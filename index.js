@@ -17,8 +17,7 @@ app.use(cors());
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/your_database_name';
 
 mongoose.connect(MONGO_URI, {
-  useNewUrlParser: true,
-  useUnifiedTopology: true
+  useNewUrlParser: true 
 })
 .then(() => console.log('✅ Connected to MongoDB'))
 .catch(err => {
