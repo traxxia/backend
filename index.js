@@ -16,39 +16,30 @@ app.use(cors());
 // MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/your_database_name';
 
-mongoose.connect(MONGO_URI)
-  .then(() => console.log('✅ Connected to MongoDB'))
-  .catch(err => console.error('MongoDB connection error:', err));
+mongoose.connect(MONGO_URI, {
+  useNewUrlParser: true,
+  useUnifiedTopology: true
+})
+.then(() => console.log('✅ Connected to MongoDB'))
+.catch(err => {
+  console.error('❌ MongoDB connection error:', err);
+  process.exit(1);
+});
+
+// Health Check Route (For Render)
+app.get('/health', (req, res) => {
+  res.status(200).send('Backend is running 🚀');
+});
 
 // User Schema and Model
 const userSchema = new mongoose.Schema({
-  name: { 
-    type: String, 
-    required: true 
-  },
+  name: { type: String, required: true },
   description: String,
-  gender: { 
-    type: String, 
-    enum: ['Male', 'Female'],
-    required: true 
-  },
-  terms: { 
-    type: Boolean, 
-    required: true 
-  },
-  email: { 
-    type: String, 
-    required: true, 
-    unique: true 
-  },
-  password: { 
-    type: String, 
-    required: true 
-  },
-  created_at: { 
-    type: Date, 
-    default: Date.now 
-  }
+  gender: { type: String, enum: ['Male', 'Female'], required: true },
+  terms: { type: Boolean, required: true },
+  email: { type: String, required: true, unique: true },
+  password: { type: String, required: true },
+  created_at: { type: Date, default: Date.now }
 });
 
 const User = mongoose.model('User', userSchema);
@@ -68,24 +59,11 @@ app.post('/register', async (req, res) => {
     console.log(req.body);
     const { name, description, gender, terms, email, password } = req.body;
 
-    // Check if user already exists
     const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).send({ message: 'User already exists' });
-    }
+    if (existingUser) return res.status(400).send({ message: 'User already exists' });
 
-    // Hash the password
     const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create new user
-    const newUser = new User({
-      name,
-      description,
-      gender,
-      terms,
-      email,
-      password: hashedPassword
-    });
+    const newUser = new User({ name, description, gender, terms, email, password: hashedPassword });
 
     await newUser.save();
     res.status(200).send({ message: 'Registration successful' });
@@ -97,28 +75,16 @@ app.post('/register', async (req, res) => {
 
 app.post('/login', async (req, res) => {
   try {
-    console.log('Request Body:', req.body);
     const { email, password } = req.body;
+    if (!email || !password) return res.status(400).send({ message: 'Email and password are required' });
 
-    if (!email || !password) {
-      return res.status(400).send({ message: 'Email and password are required' });
-    }
-
-    // Find user by email
     const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).send({ message: 'Invalid credentials' });
-    }
+    if (!user) return res.status(400).send({ message: 'Invalid credentials' });
 
-    // Verify password
     const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).send({ message: 'Invalid credentials' });
-    }
+    if (!isMatch) return res.status(400).send({ message: 'Invalid credentials' });
 
-    // Generate JWT
     const token = jwt.sign({ id: user._id, email: user.email }, secretKey, { expiresIn: '1h' });
-
     res.status(200).send({ message: 'Login successful', token });
   } catch (error) {
     console.error('Login error:', error);
@@ -129,17 +95,10 @@ app.post('/login', async (req, res) => {
 // Middleware to verify JWT
 const authenticateToken = (req, res, next) => {
   const token = req.headers['authorization'];
-  console.log('Received Token:', token);
-
-  if (!token) {
-    return res.status(401).send({ message: 'No token provided' });
-  }
+  if (!token) return res.status(401).send({ message: 'No token provided' });
 
   jwt.verify(token, secretKey, (err, user) => {
-    if (err) {
-      console.error('JWT Verification Error:', err);
-      return res.status(403).send({ message: 'Invalid token' });
-    }
+    if (err) return res.status(403).send({ message: 'Invalid token' });
 
     req.user = user;
     next();
@@ -178,4 +137,4 @@ app.post('/api/analyse', async (req, res) => {
   }
 });
 
-app.listen(port, () => console.log(`🚀 Backend running on port ${port}`));
+app.listen(port, '0.0.0.0', () => console.log(`🚀 Backend running on port ${port}`));
