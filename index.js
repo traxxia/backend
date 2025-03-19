@@ -103,16 +103,25 @@ const authenticateToken = (req, res, next) => {
     next();
   });
 };
-
-// Protected Route (Example)
+ 
 app.get('/dashboard', authenticateToken, async (req, res) => {
   try {
     const user = await User.findById(req.user.id).select('-password');
-    res.send({ message: `Welcome to the dashboard, ${user.email}` });
+    if (!user) return res.status(404).send({ message: 'User not found' });
+
+    res.send({ 
+      message: `Welcome to the dashboard, ${user.name}`,
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email
+      }
+    });
   } catch (error) {
-    res.status(500).send({ message: 'Server error' });
+    res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
+
 
 // Insert Responses into Database
 app.post('/api/analyse', async (req, res) => {
