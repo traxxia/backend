@@ -52,6 +52,37 @@ const responseSchema = new mongoose.Schema({
 
 const Response = mongoose.model('Response', responseSchema);
 
+const surveyAnswerSchema = new mongoose.Schema({
+  user_id: { 
+    type: mongoose.Schema.Types.ObjectId, 
+    ref: 'User',
+    required: true 
+  },
+  question_id: { 
+    type: String, 
+    required: true 
+  },
+  category_id: { 
+    type: String, 
+    required: true 
+  },
+  selectedOption: String,
+  description: String,
+  created_at: { 
+    type: Date, 
+    default: Date.now 
+  },
+  updated_at: { 
+    type: Date, 
+    default: Date.now 
+  }
+});
+
+// Create composite index to ensure one answer per question per user
+surveyAnswerSchema.index({ user_id: 1, question_id: 1 }, { unique: true });
+
+const SurveyAnswer = mongoose.model('surveyAnswers', surveyAnswerSchema);
+
 // Routes
 app.post('/register', async (req, res) => {
   try {
@@ -141,6 +172,67 @@ app.post('/api/analyse', async (req, res) => {
     res.status(200).send({ message: 'Answers submitted for analysis.' });
   } catch (error) {
     console.error('Analysis error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// Save multiple answers at once
+app.post('/api/survey/answers', authenticateToken, async (req, res) => {
+  try {
+    const { answers } = req.body;
+    
+    if (!answers || !Array.isArray(answers)) {
+      return res.status(400).send({ message: 'Answers array is required' });
+    }
+    
+    const operations = answers.map(answer => ({
+      updateOne: {
+        filter: { 
+          user_id: req.user.id,
+          question_id: answer.question_id
+        },
+        update: {
+          user_id: req.user.id,
+          question_id: answer.question_id,
+          category_id: answer.category_id,
+          selectedOption: answer.selectedOption,
+          description: answer.description,
+          updated_at: Date.now()
+        },
+        upsert: true
+      }
+    }));
+    
+    const result = await SurveyAnswer.bulkWrite(operations);
+    
+    res.status(200).send({ 
+      message: 'Answers saved successfully', 
+      result
+    });
+  } catch (error) {
+    console.error('Save multiple answers error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get all answers for the current user
+app.get('/api/survey/answers', authenticateToken, async (req, res) => {
+  try {
+    const answers = await SurveyAnswer.find({ user_id: req.user.id });
+    
+    // Convert array to object with question_id as keys for easier frontend use
+    const answersMap = {};
+    answers.forEach(answer => {
+      answersMap[answer.question_id] = {
+        selectedOption: answer.selectedOption,
+        description: answer.description,
+        category_id: answer.category_id
+      };
+    });
+    
+    res.status(200).send({ answers: answersMap });
+  } catch (error) {
+    console.error('Get answers error:', error);
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
