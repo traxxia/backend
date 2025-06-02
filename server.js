@@ -353,9 +353,16 @@ app.get('/api/survey/my-responses', authenticateToken, async (req, res) => {
 
 app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    // Get all users regardless of version
-    const users = await User.find({ role: 'user' })
-      .select('name email company created_at')
+    const { role } = req.query; // ?role=user or ?role=admin or omit for all
+    
+    // Build query based on role parameter
+    let query = {};
+    if (role && ['user', 'admin'].includes(role)) {
+      query.role = role;
+    }
+
+    const users = await User.find(query)
+      .select('name email company role created_at')
       .sort({ created_at: -1 });
 
     const usersWithStatus = await Promise.all(
@@ -369,6 +376,7 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
           name: user.name,
           email: user.email,
           company: user.company || '',
+          role: user.role,
           created_at: user.created_at,
           total_responses: responses.length,
           latest_response: responses.length > 0 ? {
@@ -381,7 +389,8 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
 
     res.status(200).send({ 
       users: usersWithStatus,
-      total: usersWithStatus.length
+      total: usersWithStatus.length,
+      filter_applied: role || 'none'
     });
 
   } catch (error) {
@@ -389,7 +398,6 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
-
 // ===============================
 // 5. USER RESPONSE RETRIEVAL (Any authenticated user can call)
 // ===============================
@@ -523,21 +531,21 @@ app.get('/api/download-csv/:userId', authenticateToken, async (req, res) => {
       'Question': 'Email',
       'Answer': user.email
     });
-    csvData.push({
-      'Section': 'User Information',
-      'Question': 'Company',
-      'Answer': user.company || ''
-    });
-    csvData.push({
-      'Section': 'User Information',
-      'Question': 'Question Set Version',
-      'Answer': response.question_set_version
-    });
-    csvData.push({
-      'Section': 'User Information',
-      'Question': 'Survey Submitted At',
-      'Answer': response.submitted_at.toISOString()
-    });
+    // csvData.push({
+    //   'Section': 'User Information',
+    //   'Question': 'Company',
+    //   'Answer': user.company || ''
+    // });
+    // csvData.push({
+    //   'Section': 'User Information',
+    //   'Question': 'Question Set Version',
+    //   'Answer': response.question_set_version
+    // });
+    // csvData.push({
+    //   'Section': 'User Information',
+    //   'Question': 'Survey Submitted At',
+    //   'Answer': response.submitted_at.toISOString()
+    // });
 
     csvData.push({ 'Section': '', 'Question': '', 'Answer': '' });
 
