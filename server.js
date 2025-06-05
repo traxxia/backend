@@ -403,6 +403,7 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
 // ===============================
 
 // Get user's survey response by user_id and version (Any authenticated user can call)
+// Updated version of the get-user-response endpoint
 app.post('/api/get-user-response', authenticateToken, async (req, res) => {
   try {
     const { user_id, version } = req.body;
@@ -428,13 +429,45 @@ app.post('/api/get-user-response', authenticateToken, async (req, res) => {
       question_set_version: version
     });
 
+    // If no response found, return user info with empty survey data
     if (!response) {
-      return res.status(404).send({ 
-        message: `No survey response found for user '${user.name}' in version ${version}` 
+      // Get the question set for this version to show available questions
+      const questionSet = await CurrentQuestions.findOne({ version });
+      
+      return res.status(200).send({
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          company: user.company || ''
+        },
+        survey: {
+          version: version,
+          submitted_at: null,
+          total_questions: questionSet ? questionSet.questions.reduce((sum, cat) => sum + cat.questions.length, 0) : 0,
+          total_answered: 0,
+          status: 'not_submitted'
+        },
+        categories: questionSet ? questionSet.questions.map(category => ({
+          category_id: category.id,
+          category_name: category.name,
+          questions_answered: 0,
+          total_questions: category.questions.length,
+          questions: category.questions.map(question => ({
+            question_id: question.id,
+            question_text: question.question,
+            question_type: question.type,
+            options: question.options || null,
+            nested: question.nested || null,
+            user_answer: null,
+            answered: false
+          }))
+        })) : [],
+        message: 'User has not submitted a survey response for this version yet'
       });
     }
 
-    // Format the response data
+    // Format the response data (existing code for when response exists)
     const formattedResponse = {
       user: {
         id: user._id,
@@ -446,7 +479,8 @@ app.post('/api/get-user-response', authenticateToken, async (req, res) => {
         version: response.question_set_version,
         submitted_at: response.submitted_at,
         total_questions: response.questions.reduce((sum, cat) => sum + cat.questions.length, 0),
-        total_answered: response.answers.length
+        total_answered: response.answers.length,
+        status: 'submitted'
       },
       categories: response.questions.map(category => {
         const categoryAnswers = response.answers.filter(answer => 
