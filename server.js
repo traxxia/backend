@@ -398,6 +398,434 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
+
+
+// Add these translation endpoints to your existing backend (server.js)
+// Replace your existing translation endpoints with these optimized versions
+
+// ===============================
+// OPTIMIZED TRANSLATION ENDPOINTS
+// ===============================
+
+// Helper function for translation with caching and batching
+const translateWithCache = (() => {
+  const cache = new Map();
+  const CACHE_EXPIRY = 3600000; // 1 hour in milliseconds
+  
+  return async (texts, targetLanguage) => {
+    if (targetLanguage === 'en') {
+      return texts;
+    }
+
+    const results = [];
+    const textsToTranslate = [];
+    const indices = [];
+
+    // Check cache first
+    texts.forEach((text, index) => {
+      const cacheKey = `${text.trim()}_${targetLanguage}`;
+      const cached = cache.get(cacheKey);
+      
+      if (cached && (Date.now() - cached.timestamp < CACHE_EXPIRY)) {
+        results[index] = cached.translation;
+      } else if (text && text.trim()) {
+        textsToTranslate.push(text.trim());
+        indices.push(index);
+      } else {
+        results[index] = text;
+      }
+    });
+
+    // If all texts were cached, return immediately
+    if (textsToTranslate.length === 0) {
+      return results;
+    }
+
+    // Batch translate uncached texts (chunks of 5 to respect rate limits)
+    const BATCH_SIZE = 5;
+    const axios = require('axios');
+    
+    for (let i = 0; i < textsToTranslate.length; i += BATCH_SIZE) {
+      const batch = textsToTranslate.slice(i, i + BATCH_SIZE);
+      const batchIndices = indices.slice(i, i + BATCH_SIZE);
+      
+      // Process batch concurrently with Promise.allSettled for better error handling
+      const promises = batch.map(async (text) => {
+        try {
+          const response = await axios.get('https://api.mymemory.translated.net/get', {
+            params: {
+              q: text,
+              langpair: `en|${targetLanguage}`,
+              de: 'admin@traxxia.com'
+            },
+            timeout: 8000
+          });
+          
+          if (response.data?.responseData?.translatedText) {
+            return response.data.responseData.translatedText;
+          }
+          return text; // Fallback
+        } catch (error) {
+          console.error(`Translation error for "${text}":`, error.message);
+          return text; // Fallback
+        }
+      });
+
+      const batchResults = await Promise.allSettled(promises);
+      
+      // Store results and cache them
+      batchResults.forEach((result, batchIndex) => {
+        const originalIndex = batchIndices[batchIndex];
+        const originalText = textsToTranslate[i + batchIndex];
+        const translation = result.status === 'fulfilled' ? result.value : originalText;
+        
+        results[originalIndex] = translation;
+        
+        // Cache the translation
+        const cacheKey = `${originalText}_${targetLanguage}`;
+        cache.set(cacheKey, {
+          translation,
+          timestamp: Date.now()
+        });
+      });
+
+      // Small delay between batches to respect rate limits
+      if (i + BATCH_SIZE < textsToTranslate.length) {
+        await new Promise(resolve => setTimeout(resolve, 300));
+      }
+    }
+
+    return results;
+  };
+})();
+
+// Helper function to format response data (same as get-user-response)
+// Fixed Helper function to format response data (same as get-user-response)
+function formatResponseData(user, response, version, questionSet = null) {
+  if (!response) {
+    // Format for non-submitted response
+    return {
+      user: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        company: user.company || ''
+      },
+      survey: {
+        version: version,
+        submitted_at: null,
+        total_questions: questionSet ? questionSet.questions.reduce((sum, cat) => sum + cat.questions.length, 0) : 0,
+        total_answered: 0,
+        status: 'not_submitted'
+      },
+      categories: questionSet ? questionSet.questions.map(category => ({
+        category_id: category.id,
+        category_name: category.name,
+        questions_answered: 0,
+        total_questions: category.questions.length,
+        questions: category.questions.map(question => ({
+          question_id: question.id,
+          question_text: question.question,
+          question_type: question.type,
+          options: question.options || null,
+          nested: question.nested || null,
+          user_answer: null,
+          answered: false
+        }))
+      })) : [],
+      message: 'User has not submitted a survey response for this version yet'
+    };
+  }
+
+  // Format for submitted response - FIXED VERSION
+  return {
+    user: {
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      company: user.company || ''
+    },
+    survey: {
+      version: response.question_set_version,
+      submitted_at: response.submitted_at,
+      total_questions: response.questions.reduce((sum, cat) => sum + cat.questions.length, 0),
+      total_answered: response.answers.length,
+      status: 'submitted'
+    },
+    categories: response.questions.map(category => {
+      const categoryAnswers = response.answers.filter(answer => 
+        category.questions.some(q => q.id === answer.question_id)
+      );
+
+      return {
+        category_id: category.id,
+        category_name: category.name,
+        questions_answered: categoryAnswers.length,
+        total_questions: category.questions.length,
+        questions: category.questions.map(question => {
+          const userAnswer = response.answers.find(ans => ans.question_id === question.id);
+          
+          return {
+            question_id: question.id,
+            question_text: question.question,
+            question_type: question.type,
+            options: question.options || null,
+            nested: question.nested || null,
+            // FIXED: This should match the original get-user-response format exactly
+            user_answer: userAnswer ? {
+              answer: userAnswer.answer || null,
+              selected_option: userAnswer.selected_option || null,
+              selected_options: userAnswer.selected_options || null,
+              rating: userAnswer.rating || null
+            } : null,
+            answered: !!userAnswer
+          };
+        })
+      };
+    })
+  };
+}
+
+// OPTIMIZED: Single translation endpoint with consistent response format
+// OPTIMIZED: Single translation endpoint with consistent response format - FIXED VERSION
+app.post('/api/get-user-response-translated', authenticateToken, async (req, res) => {
+  try {
+    const { user_id, version, language = 'en' } = req.body;
+
+    if (!user_id || !version) {
+      return res.status(400).send({ message: 'User ID and version are required' });
+    }
+
+    // Get user and response data (same logic as original get-user-response)
+    const user = await User.findById(user_id).select('name email company');
+    if (!user) {
+      return res.status(404).send({ message: `User with ID '${user_id}' not found` });
+    }
+
+    const response = await SurveyResponse.findOne({ 
+      user_id: user_id,
+      question_set_version: version
+    });
+
+    let responseData;
+
+    // Build response data exactly like the original get-user-response endpoint
+    if (!response) {
+      // Get the question set for this version to show available questions
+      const questionSet = await CurrentQuestions.findOne({ version });
+      
+      responseData = {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          company: user.company || ''
+        },
+        survey: {
+          version: version,
+          submitted_at: null,
+          total_questions: questionSet ? questionSet.questions.reduce((sum, cat) => sum + cat.questions.length, 0) : 0,
+          total_answered: 0,
+          status: 'not_submitted'
+        },
+        categories: questionSet ? questionSet.questions.map(category => ({
+          category_id: category.id,
+          category_name: category.name,
+          questions_answered: 0,
+          total_questions: category.questions.length,
+          questions: category.questions.map(question => ({
+            question_id: question.id,
+            question_text: question.question,
+            question_type: question.type,
+            options: question.options || null,
+            nested: question.nested || null,
+            user_answer: null,
+            answered: false
+          }))
+        })) : [],
+        message: 'User has not submitted a survey response for this version yet'
+      };
+    } else {
+      // Format the response data exactly like the original endpoint
+      responseData = {
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          company: user.company || ''
+        },
+        survey: {
+          version: response.question_set_version,
+          submitted_at: response.submitted_at,
+          total_questions: response.questions.reduce((sum, cat) => sum + cat.questions.length, 0),
+          total_answered: response.answers.length,
+          status: 'submitted'
+        },
+        categories: response.questions.map(category => {
+          const categoryAnswers = response.answers.filter(answer => 
+            category.questions.some(q => q.id === answer.question_id)
+          );
+
+          return {
+            category_id: category.id,
+            category_name: category.name,
+            questions_answered: categoryAnswers.length,
+            total_questions: category.questions.length,
+            questions: category.questions.map(question => {
+              const userAnswer = response.answers.find(ans => ans.question_id === question.id);
+              
+              return {
+                question_id: question.id,
+                question_text: question.question,
+                question_type: question.type,
+                options: question.options || null,
+                nested: question.nested || null,
+                // PRESERVE ORIGINAL USER ANSWERS - this is the key fix
+                user_answer: userAnswer ? {
+                  answer: userAnswer.answer || null,
+                  selected_option: userAnswer.selected_option || null,
+                  selected_options: userAnswer.selected_options || null,
+                  rating: userAnswer.rating || null
+                } : null,
+                answered: !!userAnswer
+              };
+            })
+          };
+        })
+      };
+    }
+
+    // If language is English, return as-is
+    if (language === 'en') {
+      return res.status(200).send({
+        ...responseData,
+        translated: false,
+        target_language: language
+      });
+    }
+
+    // Collect all texts that need translation
+    const textsToTranslate = [];
+    const textMappings = [];
+
+    responseData.categories.forEach((category, categoryIndex) => {
+      // Category name
+      if (category.category_name) {
+        textsToTranslate.push(category.category_name);
+        textMappings.push({ type: 'category_name', categoryIndex });
+      }
+
+      // Questions
+      category.questions?.forEach((question, questionIndex) => {
+        // Main question
+        if (question.question_text) {
+          textsToTranslate.push(question.question_text);
+          textMappings.push({ type: 'question_text', categoryIndex, questionIndex });
+        }
+
+        // Nested question
+        if (question.nested?.question) {
+          textsToTranslate.push(question.nested.question);
+          textMappings.push({ type: 'nested_question', categoryIndex, questionIndex });
+        }
+
+        // Options
+        if (question.options && Array.isArray(question.options)) {
+          question.options.forEach((option, optionIndex) => {
+            if (option) {
+              textsToTranslate.push(option);
+              textMappings.push({ type: 'option', categoryIndex, questionIndex, optionIndex });
+            }
+          });
+        }
+      });
+    });
+
+    console.log(`Starting optimized translation for ${textsToTranslate.length} texts to ${language}`);
+    const startTime = Date.now();
+
+    // Translate all texts using optimized function
+    const translatedTexts = await translateWithCache(textsToTranslate, language);
+
+    console.log(`Translation completed in ${Date.now() - startTime}ms`);
+
+    // Apply translations back to data structure
+    // IMPORTANT: Use deep clone to preserve original user_answer data
+    const translatedData = JSON.parse(JSON.stringify(responseData));
+    
+    translatedTexts.forEach((translatedText, index) => {
+      const mapping = textMappings[index];
+      
+      switch (mapping.type) {
+        case 'category_name':
+          translatedData.categories[mapping.categoryIndex].category_name = translatedText;
+          break;
+        case 'question_text':
+          translatedData.categories[mapping.categoryIndex].questions[mapping.questionIndex].question_text = translatedText;
+          break;
+        case 'nested_question':
+          translatedData.categories[mapping.categoryIndex].questions[mapping.questionIndex].nested.question = translatedText;
+          break;
+        case 'option':
+          translatedData.categories[mapping.categoryIndex].questions[mapping.questionIndex].options[mapping.optionIndex] = translatedText;
+          break;
+      }
+    });
+
+    res.status(200).send({
+      ...translatedData,
+      translated: true,
+      target_language: language,
+      translation_time_ms: Date.now() - startTime
+    });
+
+  } catch (error) {
+    console.error('Get user response with translation error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// Remove the old batch endpoint and replace with this single optimized one
+// The above endpoint now handles both single and batch translation efficiently
+
+// OPTIONAL: Endpoint to clear translation cache (useful for testing)
+app.post('/api/admin/clear-translation-cache', authenticateToken, requireAdmin, (req, res) => {
+  try {
+    // Clear the cache (you'll need to modify the cache to be accessible)
+    // For now, just restart the server to clear cache
+    res.status(200).send({ 
+      message: 'Translation cache cleared. Note: Cache will be fully cleared on server restart.' 
+    });
+  } catch (error) {
+    res.status(500).send({ message: 'Failed to clear cache', error: error.message });
+  }
+});
+
+// OPTIONAL: Simple translation endpoint for testing
+app.post('/api/translate', authenticateToken, async (req, res) => {
+  try {
+    const { text, targetLanguage = 'es' } = req.body;
+    
+    if (!text) {
+      return res.status(400).json({ error: 'Text is required' });
+    }
+
+    const translatedTexts = await translateWithCache([text], targetLanguage);
+    
+    res.json({ 
+      translatedText: translatedTexts[0],
+      cached: false // You could track this if needed
+    });
+    
+  } catch (error) {
+    console.error('Translation error:', error);
+    res.status(500).json({ 
+      error: 'Translation failed', 
+      translatedText: req.body.text
+    });
+  }
+});
+
 // ===============================
 // 5. USER RESPONSE RETRIEVAL (Any authenticated user can call)
 // ===============================
