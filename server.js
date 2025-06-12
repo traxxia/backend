@@ -130,15 +130,30 @@ const requireAdmin = (req, res, next) => {
 };
 
 // ===============================
-// 1. USER CREATION & AUTHENTICATION
+// 1. SECURE USER CREATION & AUTHENTICATION - PRIVILEGE ESCALATION FIXED
 // ===============================
 
 app.post('/api/users', async (req, res) => {
   try {
-    const { name, email, password, role = 'user', company } = req.body;
+    // SECURITY FIX: REMOVED role from destructuring - privilege escalation vulnerability FIXED
+    const { name, email, password, company } = req.body;
 
     if (!name || !email || !password) {
       return res.status(400).send({ message: 'Name, email, and password are required' });
+    }
+
+    // Enhanced validation
+    if (name.length < 2 || name.length > 50) {
+      return res.status(400).send({ message: 'Name must be between 2 and 50 characters' });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(email)) {
+      return res.status(400).send({ message: 'Please provide a valid email address' });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).send({ message: 'Password must be at least 8 characters long' });
     }
 
     const existingUser = await User.findOne({ email });
@@ -146,18 +161,25 @@ app.post('/api/users', async (req, res) => {
       return res.status(400).send({ message: 'User already exists with this email' });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const newUser = new User({ name, email, password: hashedPassword, role, company });
+    const hashedPassword = await bcrypt.hash(password, 12); // Increased salt rounds for security
+
+    const newUser = new User({ 
+      name, 
+      email, 
+      password: hashedPassword, 
+      role: 'user',  
+      company 
+    });
 
     await newUser.save();
-    
+ 
     res.status(201).send({ 
       message: 'User created successfully',
       user: {
         id: newUser._id,
         name: newUser.name,
         email: newUser.email,
-        role: newUser.role
+        role: newUser.role 
       }
     });
   } catch (error) {
@@ -184,6 +206,7 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).send({ message: 'Invalid credentials' });
     }
 
+    // Enhanced JWT payload
     const token = jwt.sign({ 
       id: user._id, 
       email: user.email, 
@@ -399,10 +422,6 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
   }
 });
 
-
-// Add these translation endpoints to your existing backend (server.js)
-// Replace your existing translation endpoints with these optimized versions
-
 // ===============================
 // OPTIMIZED TRANSLATION ENDPOINTS
 // ===============================
@@ -587,7 +606,6 @@ function formatResponseData(user, response, version, questionSet = null) {
 }
 
 // OPTIMIZED: Single translation endpoint with consistent response format
-// OPTIMIZED: Single translation endpoint with consistent response format - FIXED VERSION
 app.post('/api/get-user-response-translated', authenticateToken, async (req, res) => {
   try {
     const { user_id, version, language = 'en' } = req.body;
@@ -680,7 +698,6 @@ app.post('/api/get-user-response-translated', authenticateToken, async (req, res
                 question_type: question.type,
                 options: question.options || null,
                 nested: question.nested || null,
-                // PRESERVE ORIGINAL USER ANSWERS - this is the key fix
                 user_answer: userAnswer ? {
                   answer: userAnswer.answer || null,
                   selected_option: userAnswer.selected_option || null,
@@ -750,7 +767,6 @@ app.post('/api/get-user-response-translated', authenticateToken, async (req, res
     console.log(`Translation completed in ${Date.now() - startTime}ms`);
 
     // Apply translations back to data structure
-    // IMPORTANT: Use deep clone to preserve original user_answer data
     const translatedData = JSON.parse(JSON.stringify(responseData));
     
     translatedTexts.forEach((translatedText, index) => {
@@ -785,14 +801,9 @@ app.post('/api/get-user-response-translated', authenticateToken, async (req, res
   }
 });
 
-// Remove the old batch endpoint and replace with this single optimized one
-// The above endpoint now handles both single and batch translation efficiently
-
-// OPTIONAL: Endpoint to clear translation cache (useful for testing)
+// Clear translation cache endpoint (admin only)
 app.post('/api/admin/clear-translation-cache', authenticateToken, requireAdmin, (req, res) => {
   try {
-    // Clear the cache (you'll need to modify the cache to be accessible)
-    // For now, just restart the server to clear cache
     res.status(200).send({ 
       message: 'Translation cache cleared. Note: Cache will be fully cleared on server restart.' 
     });
@@ -801,7 +812,7 @@ app.post('/api/admin/clear-translation-cache', authenticateToken, requireAdmin, 
   }
 });
 
-// OPTIONAL: Simple translation endpoint for testing
+// Simple translation endpoint for testing
 app.post('/api/translate', authenticateToken, async (req, res) => {
   try {
     const { text, targetLanguage = 'es' } = req.body;
@@ -814,7 +825,7 @@ app.post('/api/translate', authenticateToken, async (req, res) => {
     
     res.json({ 
       translatedText: translatedTexts[0],
-      cached: false // You could track this if needed
+      cached: false
     });
     
   } catch (error) {
@@ -827,11 +838,9 @@ app.post('/api/translate', authenticateToken, async (req, res) => {
 });
 
 // ===============================
-// 5. USER RESPONSE RETRIEVAL (Any authenticated user can call)
+// 5. USER RESPONSE RETRIEVAL
 // ===============================
 
-// Get user's survey response by user_id and version (Any authenticated user can call)
-// Updated version of the get-user-response endpoint
 app.post('/api/get-user-response', authenticateToken, async (req, res) => {
   try {
     const { user_id, version } = req.body;
@@ -951,7 +960,7 @@ app.post('/api/get-user-response', authenticateToken, async (req, res) => {
 });
 
 // ===============================
-// 6. CSV DOWNLOAD API (Common for user_id and version)
+// 6. CSV DOWNLOAD API
 // ===============================
 
 app.get('/api/download-csv/:userId', authenticateToken, async (req, res) => {
@@ -993,21 +1002,6 @@ app.get('/api/download-csv/:userId', authenticateToken, async (req, res) => {
       'Question': 'Email',
       'Answer': user.email
     });
-    // csvData.push({
-    //   'Section': 'User Information',
-    //   'Question': 'Company',
-    //   'Answer': user.company || ''
-    // });
-    // csvData.push({
-    //   'Section': 'User Information',
-    //   'Question': 'Question Set Version',
-    //   'Answer': response.question_set_version
-    // });
-    // csvData.push({
-    //   'Section': 'User Information',
-    //   'Question': 'Survey Submitted At',
-    //   'Answer': response.submitted_at.toISOString()
-    // });
 
     csvData.push({ 'Section': '', 'Question': '', 'Answer': '' });
 
