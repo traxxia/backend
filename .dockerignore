@@ -1,0 +1,6 @@
+node_modules
+.dockerignore
+Dockerfile
+docker/
+uploads/*   # optionally ignore if you want empty volume
+.env        # if you mount it instead
