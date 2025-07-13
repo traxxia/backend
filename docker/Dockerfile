@@ -1,21 +1,32 @@
-# Stage 1: Base Node.js environment
-FROM node:18-alpine
+# ---------- Stage 1: Build ----------
+FROM node:18-alpine AS builder
 
-# Create app directory
+# Set working directory
 WORKDIR /app
 
-# Copy package files and install dependencies
-COPY ../package*.json ./
-RUN npm install --only=production
+# Copy package files and install dependencies (omit dev dependencies)
+COPY package*.json ./
+RUN npm ci --omit=dev
 
-# Copy source code (excluding node_modules via .dockerignore)
-COPY ../ ./
+# Copy app source code
+COPY . .
 
-# Optional: Copy uploads folder (if runtime needs it pre-created)
-RUN mkdir -p uploads
+# Optional: Run build step if using TypeScript or build tools
+# RUN npm run build
 
-# Expose backend port
-EXPOSE 5000
+# ---------- Stage 2: Runtime ----------
+FROM node:18-alpine AS runtime
 
-# Start the server
+# Set working directory
+WORKDIR /app
+
+# Copy only necessary files from builder
+COPY --from=builder /app .
+
+# Create a non-root user
+RUN addgroup -g 1001 appgroup && adduser -D -u 1001 -G appgroup appuser
+USER appuser
+
+# No EXPOSE (handled by K8s ingress/service)
+# Application starts here
 CMD ["node", "server.js"]
