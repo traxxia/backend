@@ -74,6 +74,59 @@ surveyResponseSchema.index({ user_id: 1, question_set_version: 1 }, { unique: tr
 
 const SurveyResponse = mongoose.model('SurveyResponse', surveyResponseSchema);
 
+// ===============================
+// NEW: AUDIT TRAIL SCHEMA
+// ===============================
+
+// Simple Audit Trail Schema - just add this one schema
+const auditTrailSchema = new mongoose.Schema({
+  user_id: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User',
+    required: true
+  },
+  business_name: { type: String, required: true },
+  
+  // Survey data (questions and answers)
+  survey_data: {
+    version: String,
+    questions: { type: Array, required: true }, // All questions from your survey
+    answers: { type: Array, required: true },   // All answers from user
+    completion_percentage: Number,
+    submitted_at: Date
+  },
+  
+  // Analysis result data  
+  analysis_data: {
+    analysis_type: String,        // swot, porter, pestle, etc.
+    analysis_framework: String,   // framework name
+    category: String,             // analysis or strategic
+    generated_result: { type: mongoose.Schema.Types.Mixed, required: true }, // The actual analysis result
+    groq_request_details: {
+      model: String,
+      tokens_used: Number,
+      response_time_ms: Number
+    }
+  },
+  
+  // Save details
+  save_details: {
+    title: { type: String, required: true },
+    description: String,
+    tags: [String]
+  },
+  
+  // Timestamps
+  created_at: { type: Date, default: Date.now },
+  analysis_generated_at: Date,
+  saved_at: { type: Date, default: Date.now }
+});
+
+auditTrailSchema.index({ user_id: 1, created_at: -1 });
+auditTrailSchema.index({ business_name: 1 });
+
+const AuditTrail = mongoose.model('AuditTrail', auditTrailSchema);
+
 // Simple CSV conversion function
 function convertToCSV(data) {
   if (!data || !data.length) return '';
@@ -256,20 +309,69 @@ app.post('/api/admin/upload-questions', authenticateToken, requireAdmin, async (
       return res.status(400).send({ message: `Version ${version} already exists` });
     }
 
+    // Validate and ensure all questions have severity and phase fields
+    const processedQuestions = questions.map(category => ({
+      ...category,
+      questions: category.questions ? category.questions.map(question => {
+        // Validate severity field
+        const severity = question.severity || 'mandatory';
+        if (!['mandatory', 'optional'].includes(severity)) {
+          throw new Error(`Invalid severity "${severity}" for question: ${question.question}. Must be 'mandatory' or 'optional'.`);
+        }
+
+        // Validate phase field  
+        const phase = question.phase || 'initial';
+        if (!['initial', 'essential', 'good', 'excellent'].includes(phase)) {
+          throw new Error(`Invalid phase "${phase}" for question: ${question.question}. Must be 'initial', 'essential', 'good', or 'excellent'.`);
+        }
+
+        return {
+          ...question,
+          severity: severity,
+          phase: phase
+        };
+      }) : []
+    }));
+
     // Create new question set
     const newQuestions = new CurrentQuestions({
-      questions: questions,
+      questions: processedQuestions,
       version: version,
       updated_by: req.user.id
     });
 
     await newQuestions.save();
 
+    // Calculate statistics
+    const stats = {
+      totalCategories: processedQuestions.length,
+      totalQuestions: processedQuestions.reduce((sum, cat) => sum + (cat.questions ? cat.questions.length : 0), 0),
+      severityBreakdown: {
+        mandatory: 0,
+        optional: 0
+      },
+      phaseBreakdown: {
+        initial: 0,
+        essential: 0,
+        good: 0,
+        excellent: 0
+      }
+    };
+
+    // Calculate breakdown statistics
+    processedQuestions.forEach(category => {
+      if (category.questions) {
+        category.questions.forEach(question => {
+          stats.severityBreakdown[question.severity]++;
+          stats.phaseBreakdown[question.phase]++;
+        });
+      }
+    });
+
     res.status(200).send({ 
       message: 'Questions uploaded successfully',
       version: version,
-      totalCategories: questions.length,
-      totalQuestions: questions.reduce((sum, cat) => sum + (cat.questions ? cat.questions.length : 0), 0)
+      statistics: stats
     });
 
   } catch (error) {
@@ -423,6 +525,240 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
 });
 
 // ===============================
+// NEW: AUDIT TRAIL APIs
+// ===============================
+
+// API 1: POST - Save Audit Trail (when user clicks save)
+app.post('/api/audit-trail/save', authenticateToken, async (req, res) => {
+  try {
+    const {
+      business_name,
+      survey_data,           // {version, questions, answers, completion_percentage}
+      analysis_data,         // {analysis_type, framework, category, result, groq_details}
+      save_details          // {title, description, tags}
+    } = req.body;
+
+    // Validation
+    if (!business_name || !survey_data || !analysis_data || !save_details?.title) {
+      return res.status(400).send({ 
+        message: 'Business name, survey data, analysis data, and save title are required' 
+      });
+    }
+
+    // Create audit trail entry
+    const auditEntry = new AuditTrail({
+      user_id: req.user.id,
+      business_name: business_name.trim(),
+      
+      survey_data: {
+        version: survey_data.version || 'unknown',
+        questions: survey_data.questions || [],
+        answers: survey_data.answers || [],
+        completion_percentage: survey_data.completion_percentage || 0,
+        submitted_at: survey_data.submitted_at || new Date()
+      },
+      
+      analysis_data: {
+        analysis_type: analysis_data.analysis_type,
+        analysis_framework: analysis_data.analysis_framework,
+        category: analysis_data.category,
+        generated_result: analysis_data.generated_result,
+        groq_request_details: analysis_data.groq_request_details || {}
+      },
+      
+      save_details: {
+        title: save_details.title.trim(),
+        description: save_details.description?.trim() || '',
+        tags: Array.isArray(save_details.tags) ? save_details.tags : []
+      },
+      
+      analysis_generated_at: analysis_data.generated_at || new Date()
+    });
+
+    await auditEntry.save();
+
+    console.log(`✅ Audit trail saved: ${save_details.title} for ${business_name}`);
+
+    res.status(201).send({
+      message: 'Audit trail saved successfully',
+      audit_id: auditEntry._id,
+      title: auditEntry.save_details.title,
+      created_at: auditEntry.created_at
+    });
+
+  } catch (error) {
+    console.error('Save audit trail error:', error);
+    res.status(500).send({ 
+      message: 'Failed to save audit trail', 
+      error: error.message 
+    });
+  }
+});
+
+// API 2: GET - Get Audit Trail History
+app.get('/api/audit-trail/history', authenticateToken, async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 20,
+      business_name,    // Filter by business name
+      analysis_type,    // Filter by analysis type (swot, porter, etc.)
+      date_from,        // Filter from date
+      date_to,          // Filter to date
+      search           // Search in title/description
+    } = req.query;
+
+    // Build query for current user
+    const query = { user_id: req.user.id };
+
+    // Apply filters
+    if (business_name) {
+      query.business_name = { $regex: business_name, $options: 'i' };
+    }
+
+    if (analysis_type) {
+      query['analysis_data.analysis_type'] = analysis_type;
+    }
+
+    if (date_from || date_to) {
+      query.created_at = {};
+      if (date_from) query.created_at.$gte = new Date(date_from);
+      if (date_to) query.created_at.$lte = new Date(date_to);
+    }
+
+    if (search) {
+      query.$or = [
+        { 'save_details.title': { $regex: search, $options: 'i' } },
+        { 'save_details.description': { $regex: search, $options: 'i' } },
+        { business_name: { $regex: search, $options: 'i' } }
+      ];
+    }
+
+    // Pagination
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    const [auditHistory, totalCount] = await Promise.all([
+      AuditTrail.find(query)
+        .populate('user_id', 'name email')
+        .sort({ created_at: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      AuditTrail.countDocuments(query)
+    ]);
+
+    // Format response
+    const formattedHistory = auditHistory.map(entry => ({
+      id: entry._id,
+      business_name: entry.business_name,
+      
+      // Save details
+      title: entry.save_details.title,
+      description: entry.save_details.description,
+      tags: entry.save_details.tags,
+      
+      // Survey summary
+      survey_summary: {
+        version: entry.survey_data.version,
+        total_questions: entry.survey_data.questions.length,
+        total_answers: entry.survey_data.answers.length,
+        completion_percentage: entry.survey_data.completion_percentage,
+        submitted_at: entry.survey_data.submitted_at
+      },
+      
+      // Analysis summary
+      analysis_summary: {
+        type: entry.analysis_data.analysis_type,
+        framework: entry.analysis_data.analysis_framework,
+        category: entry.analysis_data.category,
+        generated_at: entry.analysis_generated_at
+      },
+      
+      // User info
+      user: entry.user_id ? {
+        name: entry.user_id.name,
+        email: entry.user_id.email
+      } : null,
+      
+      // Timestamps
+      created_at: entry.created_at,
+      saved_at: entry.saved_at
+    }));
+
+    res.status(200).send({
+      audit_history: formattedHistory,
+      pagination: {
+        current_page: parseInt(page),
+        total_pages: Math.ceil(totalCount / parseInt(limit)),
+        total_count: totalCount,
+        per_page: parseInt(limit)
+      },
+      filters_applied: {
+        business_name: business_name || null,
+        analysis_type: analysis_type || null,
+        date_from: date_from || null,
+        date_to: date_to || null,
+        search: search || null
+      }
+    });
+
+  } catch (error) {
+    console.error('Get audit trail history error:', error);
+    res.status(500).send({ 
+      message: 'Failed to retrieve audit trail history', 
+      error: error.message 
+    });
+  }
+});
+
+// OPTIONAL: Get specific audit trail entry details
+app.get('/api/audit-trail/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const auditEntry = await AuditTrail.findOne({
+      _id: id,
+      user_id: req.user.id
+    }).populate('user_id', 'name email');
+
+    if (!auditEntry) {
+      return res.status(404).send({ message: 'Audit trail entry not found' });
+    }
+
+    res.status(200).send({
+      id: auditEntry._id,
+      business_name: auditEntry.business_name,
+      
+      // Complete survey data
+      survey_data: auditEntry.survey_data,
+      
+      // Complete analysis data  
+      analysis_data: auditEntry.analysis_data,
+      
+      // Save details
+      save_details: auditEntry.save_details,
+      
+      // User info
+      user: {
+        name: auditEntry.user_id.name,
+        email: auditEntry.user_id.email
+      },
+      
+      // Timestamps
+      created_at: auditEntry.created_at,
+      analysis_generated_at: auditEntry.analysis_generated_at,
+      saved_at: auditEntry.saved_at
+    });
+
+  } catch (error) {
+    console.error('Get audit trail details error:', error);
+    res.status(500).send({ 
+      message: 'Failed to retrieve audit trail details', 
+      error: error.message 
+    });
+  }
+});
+
+// ===============================
 // OPTIMIZED TRANSLATION ENDPOINTS
 // ===============================
 
@@ -548,6 +884,8 @@ function formatResponseData(user, response, version, questionSet = null) {
           question_type: question.type,
           options: question.options || null,
           nested: question.nested || null,
+          severity: question.severity || 'mandatory', // NEW FIELD
+          phase: question.phase || 'initial',         // NEW FIELD
           user_answer: null,
           answered: false
         }))
@@ -556,7 +894,7 @@ function formatResponseData(user, response, version, questionSet = null) {
     };
   }
 
-  // Format for submitted response - FIXED VERSION
+  // Format for submitted response - UPDATED VERSION
   return {
     user: {
       id: user._id,
@@ -590,7 +928,8 @@ function formatResponseData(user, response, version, questionSet = null) {
             question_type: question.type,
             options: question.options || null,
             nested: question.nested || null,
-            // FIXED: This should match the original get-user-response format exactly
+            severity: question.severity || 'mandatory', // NEW FIELD
+            phase: question.phase || 'initial',         // NEW FIELD
             user_answer: userAnswer ? {
               answer: userAnswer.answer || null,
               selected_option: userAnswer.selected_option || null,
@@ -604,6 +943,144 @@ function formatResponseData(user, response, version, questionSet = null) {
     })
   };
 }
+
+app.get('/api/admin/question-statistics', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { version } = req.query;
+    
+    let query = {};
+    if (version) {
+      query.version = version;
+    }
+    
+    const questionSets = await CurrentQuestions.find(query).sort({ updated_at: -1 });
+    
+    if (questionSets.length === 0) {
+      return res.status(404).send({ message: 'No question sets found' });
+    }
+    
+    const statistics = questionSets.map(questionSet => {
+      const stats = {
+        version: questionSet.version,
+        updated_at: questionSet.updated_at,
+        totalCategories: questionSet.questions.length,
+        totalQuestions: 0,
+        severityBreakdown: {
+          mandatory: 0,
+          optional: 0
+        },
+        phaseBreakdown: {
+          initial: 0,
+          essential: 0,
+          good: 0,
+          excellent: 0
+        },
+        detailedBreakdown: {
+          mandatory_by_phase: { initial: 0, essential: 0, good: 0, excellent: 0 },
+          optional_by_phase: { initial: 0, essential: 0, good: 0, excellent: 0 }
+        }
+      };
+      
+      questionSet.questions.forEach(category => {
+        if (category.questions) {
+          category.questions.forEach(question => {
+            stats.totalQuestions++;
+            
+            const severity = question.severity || 'mandatory';
+            const phase = question.phase || 'initial';
+            
+            stats.severityBreakdown[severity]++;
+            stats.phaseBreakdown[phase]++;
+            stats.detailedBreakdown[`${severity}_by_phase`][phase]++;
+          });
+        }
+      });
+      
+      return stats;
+    });
+    
+    res.status(200).send({
+      statistics: version ? statistics[0] : statistics,
+      total_versions: questionSets.length
+    });
+    
+  } catch (error) {
+    console.error('Get question statistics error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// UPDATE 4: New endpoint to filter questions by severity and phase
+app.post('/api/questions/filtered', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      version, 
+      severity,  // 'mandatory', 'optional', or null for all
+      phase,     // 'initial', 'essential', 'good', 'excellent', or null for all
+      category_ids // Array of category IDs to filter by
+    } = req.body;
+    
+    // Get question set (specific version or latest)
+    let questionSet;
+    if (version) {
+      questionSet = await CurrentQuestions.findOne({ version });
+    } else {
+      questionSet = await CurrentQuestions.findOne().sort({ updated_at: -1 });
+    }
+    
+    if (!questionSet) {
+      return res.status(404).send({ message: 'Question set not found' });
+    }
+    
+    // Filter questions based on criteria
+    const filteredCategories = questionSet.questions
+      .filter(category => {
+        // Filter by category IDs if provided
+        if (category_ids && category_ids.length > 0) {
+          return category_ids.includes(category.id);
+        }
+        return true;
+      })
+      .map(category => ({
+        ...category,
+        questions: category.questions ? category.questions.filter(question => {
+          // Filter by severity
+          if (severity && question.severity !== severity) {
+            return false;
+          }
+          
+          // Filter by phase
+          if (phase && question.phase !== phase) {
+            return false;
+          }
+          
+          return true;
+        }) : []
+      }))
+      .filter(category => category.questions.length > 0); // Remove empty categories
+    
+    const filteredStats = {
+      total_categories: filteredCategories.length,
+      total_questions: filteredCategories.reduce((sum, cat) => sum + cat.questions.length, 0),
+      applied_filters: {
+        version: version || 'latest',
+        severity: severity || 'all',
+        phase: phase || 'all',
+        category_ids: category_ids || 'all'
+      }
+    };
+    
+    res.status(200).send({
+      questions: filteredCategories,
+      version: questionSet.version,
+      statistics: filteredStats
+    });
+    
+  } catch (error) {
+    console.error('Get filtered questions error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
 
 // OPTIMIZED: Single translation endpoint with consistent response format
 app.post('/api/get-user-response-translated', authenticateToken, async (req, res) => {
@@ -1033,7 +1510,12 @@ app.get('/api/download-csv/:userId', authenticateToken, async (req, res) => {
 
 // Health check
 app.get('/health', (req, res) => {
-  res.status(200).send('Traxxia Survey Backend with JWT is running 🚀');
+  res.status(200).send('Traxxia Survey Backend with Audit Trail is running 🚀');
 });
+
+// NEW: Console log showing new audit trail endpoints
+console.log('🎯 Audit Trail APIs loaded successfully!');
+console.log('📊 New endpoints available:');
+
 
 app.listen(port, '0.0.0.0', () => console.log(`🚀 Traxxia Survey Backend running on port ${port}`));
