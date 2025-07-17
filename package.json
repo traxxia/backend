@@ -1,6 +1,7 @@
 {
   "name": "traxxia-survey-backend",
   "version": "1.0.0",
+<<<<<<< HEAD
   "description": "Simple Survey Application Backend with Comprehensive Audit Trail",
   "main": "server.js",
   "scripts": {
@@ -15,18 +16,33 @@
     "db:create-admin": "node create-admin.js",
     "test:audit": "node test-audit-endpoints.js",
     "test:mongo": "node test-mongo-connection.js"
+=======
+  "description": "Simple Survey Application Backend",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js",
+    "build": "npm install --production"
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
   },
   "dependencies": {
     "@json2csv/plainjs": "^7.0.6",
     "axios": "^1.9.0",
     "bcryptjs": "^2.4.3",
-    "body-parser": "^1.20.3",
+    "body-parser": "^1.20.2",
     "cors": "^2.8.5",
+<<<<<<< HEAD
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "groq-sdk": "^0.27.0",
     "jsonwebtoken": "^9.0.2",
     "mongoose": "^7.8.7",
+=======
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^7.6.0",
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
     "multer": "^1.4.5-lts.1"
   },
   "devDependencies": {

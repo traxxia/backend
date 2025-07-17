@@ -74,6 +74,7 @@ surveyResponseSchema.index({ user_id: 1, question_set_version: 1 }, { unique: tr
 
 const SurveyResponse = mongoose.model('SurveyResponse', surveyResponseSchema);
 
+<<<<<<< HEAD
 // ===============================
 // NEW: AUDIT TRAIL SCHEMA
 // ===============================
@@ -127,6 +128,8 @@ auditTrailSchema.index({ business_name: 1 });
 
 const AuditTrail = mongoose.model('AuditTrail', auditTrailSchema);
 
+=======
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
 // Simple CSV conversion function
 function convertToCSV(data) {
   if (!data || !data.length) return '';
@@ -309,6 +312,7 @@ app.post('/api/admin/upload-questions', authenticateToken, requireAdmin, async (
       return res.status(400).send({ message: `Version ${version} already exists` });
     }
 
+<<<<<<< HEAD
     // Validate and ensure all questions have severity and phase fields
     const processedQuestions = questions.map(category => ({
       ...category,
@@ -336,12 +340,18 @@ app.post('/api/admin/upload-questions', authenticateToken, requireAdmin, async (
     // Create new question set
     const newQuestions = new CurrentQuestions({
       questions: processedQuestions,
+=======
+    // Create new question set
+    const newQuestions = new CurrentQuestions({
+      questions: questions,
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
       version: version,
       updated_by: req.user.id
     });
 
     await newQuestions.save();
 
+<<<<<<< HEAD
     // Calculate statistics
     const stats = {
       totalCategories: processedQuestions.length,
@@ -372,6 +382,13 @@ app.post('/api/admin/upload-questions', authenticateToken, requireAdmin, async (
       message: 'Questions uploaded successfully',
       version: version,
       statistics: stats
+=======
+    res.status(200).send({ 
+      message: 'Questions uploaded successfully',
+      version: version,
+      totalCategories: questions.length,
+      totalQuestions: questions.reduce((sum, cat) => sum + (cat.questions ? cat.questions.length : 0), 0)
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
     });
 
   } catch (error) {
@@ -525,6 +542,7 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
 });
 
 // ===============================
+<<<<<<< HEAD
 // NEW: AUDIT TRAIL APIs
 // ===============================
 
@@ -759,6 +777,8 @@ app.get('/api/audit-trail/:id', authenticateToken, async (req, res) => {
 });
 
 // ===============================
+=======
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
 // OPTIMIZED TRANSLATION ENDPOINTS
 // ===============================
 
@@ -884,8 +904,11 @@ function formatResponseData(user, response, version, questionSet = null) {
           question_type: question.type,
           options: question.options || null,
           nested: question.nested || null,
+<<<<<<< HEAD
           severity: question.severity || 'mandatory', // NEW FIELD
           phase: question.phase || 'initial',         // NEW FIELD
+=======
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
           user_answer: null,
           answered: false
         }))
@@ -894,7 +917,11 @@ function formatResponseData(user, response, version, questionSet = null) {
     };
   }
 
+<<<<<<< HEAD
   // Format for submitted response - UPDATED VERSION
+=======
+  // Format for submitted response - FIXED VERSION
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
   return {
     user: {
       id: user._id,
@@ -928,8 +955,12 @@ function formatResponseData(user, response, version, questionSet = null) {
             question_type: question.type,
             options: question.options || null,
             nested: question.nested || null,
+<<<<<<< HEAD
             severity: question.severity || 'mandatory', // NEW FIELD
             phase: question.phase || 'initial',         // NEW FIELD
+=======
+            // FIXED: This should match the original get-user-response format exactly
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
             user_answer: userAnswer ? {
               answer: userAnswer.answer || null,
               selected_option: userAnswer.selected_option || null,
@@ -944,6 +975,7 @@ function formatResponseData(user, response, version, questionSet = null) {
   };
 }
 
+<<<<<<< HEAD
 app.get('/api/admin/question-statistics', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { version } = req.query;
@@ -1082,6 +1114,8 @@ app.post('/api/questions/filtered', authenticateToken, async (req, res) => {
   }
 });
 
+=======
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
 // OPTIMIZED: Single translation endpoint with consistent response format
 app.post('/api/get-user-response-translated', authenticateToken, async (req, res) => {
   try {
@@ -1510,6 +1544,7 @@ app.get('/api/download-csv/:userId', authenticateToken, async (req, res) => {
 
 // Health check
 app.get('/health', (req, res) => {
+<<<<<<< HEAD
   res.status(200).send('Traxxia Survey Backend with Audit Trail is running 🚀');
 });
 
@@ -1518,4 +1553,9 @@ console.log('🎯 Audit Trail APIs loaded successfully!');
 console.log('📊 New endpoints available:');
 
 
+=======
+  res.status(200).send('Traxxia Survey Backend with JWT is running 🚀');
+});
+
+>>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
 app.listen(port, '0.0.0.0', () => console.log(`🚀 Traxxia Survey Backend running on port ${port}`));
