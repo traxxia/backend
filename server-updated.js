@@ -541,11 +541,308 @@ app.get('/api/conversation/current', authenticateToken, async (req, res) => {
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
+// Add these endpoints to your existing server.js file
 
 // ===============================
-// HEALTH CHECK
+// ANALYSIS STORAGE ENDPOINTS
 // ===============================
 
+// POST: Save analysis result
+app.post('/api/analysis/save', authenticateToken, async (req, res) => {
+  try {
+    const {
+      sessionId,
+      analysisType,
+      analysisData,
+      businessName
+    } = req.body;
+
+    if (!sessionId || !analysisType || !analysisData) {
+      return res.status(400).send({ 
+        message: 'Session ID, analysis type, and analysis data are required' 
+      });
+    }
+
+    const userId = new ObjectId(req.user.id);
+
+    // Validate analysis type
+    const validTypes = [
+      'swot',
+      'customerSegmentation', 
+      'purchaseCriteria',
+      'channelHeatmap',
+      'loyaltyNPS',
+      'capabilityHeatmap'
+    ];
+
+    if (!validTypes.includes(analysisType)) {
+      return res.status(400).send({ 
+        message: `Invalid analysis type. Valid types: ${validTypes.join(', ')}` 
+      });
+    }
+
+    // Find the conversation
+    const conversation = await db.collection('conversations').findOne({
+      user_id: userId,
+      session_id: sessionId,
+      status: 'active'
+    });
+
+    if (!conversation) {
+      return res.status(404).send({ message: 'Conversation not found' });
+    }
+
+    // Prepare analysis document
+    const analysisDoc = {
+      user_id: userId,
+      session_id: sessionId,
+      analysis_type: analysisType,
+      business_name: businessName || conversation.businessData?.name || 'Your Business',
+      analysis_data: analysisData,
+      created_at: new Date(),
+      updated_at: new Date(),
+      version: 1
+    };
+
+    // Check if analysis already exists for this session and type
+    const existingAnalysis = await db.collection('analyses').findOne({
+      user_id: userId,
+      session_id: sessionId,
+      analysis_type: analysisType
+    });
+
+    let result;
+    if (existingAnalysis) {
+      // Update existing analysis
+      result = await db.collection('analyses').updateOne(
+        { _id: existingAnalysis._id },
+        {
+          $set: {
+            analysis_data: analysisData,
+            business_name: analysisDoc.business_name,
+            updated_at: new Date(),
+            version: (existingAnalysis.version || 1) + 1
+          }
+        }
+      );
+      
+      console.log(`📊 Updated ${analysisType} analysis for session: ${sessionId}`);
+    } else {
+      // Create new analysis
+      result = await db.collection('analyses').insertOne(analysisDoc);
+      console.log(`📊 Saved new ${analysisType} analysis for session: ${sessionId}`);
+    }
+
+    // Update conversation with analysis reference
+    await db.collection('conversations').updateOne(
+      { _id: conversation._id },
+      {
+        $addToSet: { 
+          analysis_types: analysisType 
+        },
+        $set: { 
+          lastActivity: new Date(),
+          [`latest_analyses.${analysisType}`]: new Date()
+        }
+      }
+    );
+
+    res.status(200).send({
+      message: `${analysisType} analysis saved successfully`,
+      analysisType: analysisType,
+      isUpdate: !!existingAnalysis,
+      timestamp: new Date()
+    });
+
+  } catch (error) {
+    console.error('Save analysis error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// GET: Retrieve specific analysis
+app.get('/api/analysis/:analysisType', authenticateToken, async (req, res) => {
+  try {
+    const { analysisType } = req.params;
+    const { sessionId } = req.query;
+
+    const userId = new ObjectId(req.user.id);
+
+    // Validate analysis type
+    const validTypes = [
+      'swot',
+      'customerSegmentation', 
+      'purchaseCriteria',
+      'channelHeatmap',
+      'loyaltyNPS',
+      'capabilityHeatmap'
+    ];
+
+    if (!validTypes.includes(analysisType)) {
+      return res.status(400).send({ 
+        message: `Invalid analysis type. Valid types: ${validTypes.join(', ')}` 
+      });
+    }
+
+    let query = { user_id: userId, analysis_type: analysisType };
+    
+    // If sessionId provided, use it; otherwise get the latest for this user
+    if (sessionId) {
+      query.session_id = sessionId;
+    }
+
+    const analysis = await db.collection('analyses').findOne(
+      query,
+      { sort: { updated_at: -1 } }
+    );
+
+    if (!analysis) {
+      return res.status(404).send({ 
+        message: `No ${analysisType} analysis found`,
+        analysisType: analysisType
+      });
+    }
+
+    res.status(200).send({
+      analysisType: analysis.analysis_type,
+      businessName: analysis.business_name,
+      analysisData: analysis.analysis_data,
+      createdAt: analysis.created_at,
+      updatedAt: analysis.updated_at,
+      version: analysis.version || 1,
+      sessionId: analysis.session_id
+    });
+
+  } catch (error) {
+    console.error('Get analysis error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// GET: Retrieve all analyses for current session
+app.get('/api/analysis/session/:sessionId', authenticateToken, async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const userId = new ObjectId(req.user.id);
+
+    const analyses = await db.collection('analyses').find({
+      user_id: userId,
+      session_id: sessionId
+    }).sort({ analysis_type: 1, updated_at: -1 }).toArray();
+
+    // Group by analysis type and get the latest version of each
+    const latestAnalyses = {};
+    analyses.forEach(analysis => {
+      if (!latestAnalyses[analysis.analysis_type] || 
+          analysis.updated_at > latestAnalyses[analysis.analysis_type].updated_at) {
+        latestAnalyses[analysis.analysis_type] = {
+          analysisType: analysis.analysis_type,
+          businessName: analysis.business_name,
+          analysisData: analysis.analysis_data,
+          createdAt: analysis.created_at,
+          updatedAt: analysis.updated_at,
+          version: analysis.version || 1
+        };
+      }
+    });
+
+    res.status(200).send({
+      sessionId: sessionId,
+      analyses: latestAnalyses,
+      totalTypes: Object.keys(latestAnalyses).length,
+      availableTypes: Object.keys(latestAnalyses)
+    });
+
+  } catch (error) {
+    console.error('Get session analyses error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// GET: Retrieve all analyses for current user (latest session)
+app.get('/api/analysis/latest', authenticateToken, async (req, res) => {
+  try {
+    const userId = new ObjectId(req.user.id);
+
+    // Get the latest conversation for this user
+    const latestConversation = await db.collection('conversations').findOne(
+      { user_id: userId, status: 'active' },
+      { sort: { lastActivity: -1 } }
+    );
+
+    if (!latestConversation) {
+      return res.status(404).send({ 
+        message: 'No active conversation found',
+        analyses: {}
+      });
+    }
+
+    const analyses = await db.collection('analyses').find({
+      user_id: userId,
+      session_id: latestConversation.session_id
+    }).sort({ analysis_type: 1, updated_at: -1 }).toArray();
+
+    // Group by analysis type and get the latest version of each
+    const latestAnalyses = {};
+    analyses.forEach(analysis => {
+      if (!latestAnalyses[analysis.analysis_type] || 
+          analysis.updated_at > latestAnalyses[analysis.analysis_type].updated_at) {
+        latestAnalyses[analysis.analysis_type] = {
+          analysisType: analysis.analysis_type,
+          businessName: analysis.business_name,
+          analysisData: analysis.analysis_data,
+          createdAt: analysis.created_at,
+          updatedAt: analysis.updated_at,
+          version: analysis.version || 1
+        };
+      }
+    });
+
+    res.status(200).send({
+      sessionId: latestConversation.session_id,
+      analyses: latestAnalyses,
+      totalTypes: Object.keys(latestAnalyses).length,
+      availableTypes: Object.keys(latestAnalyses),
+      lastActivity: latestConversation.lastActivity
+    });
+
+  } catch (error) {
+    console.error('Get latest analyses error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// DELETE: Delete specific analysis
+app.delete('/api/analysis/:analysisType', authenticateToken, async (req, res) => {
+  try {
+    const { analysisType } = req.params;
+    const { sessionId } = req.query;
+
+    const userId = new ObjectId(req.user.id);
+
+    let query = { user_id: userId, analysis_type: analysisType };
+    if (sessionId) {
+      query.session_id = sessionId;
+    }
+
+    const result = await db.collection('analyses').deleteMany(query);
+
+    res.status(200).send({
+      message: `Deleted ${result.deletedCount} ${analysisType} analysis(es)`,
+      deletedCount: result.deletedCount
+    });
+
+  } catch (error) {
+    console.error('Delete analysis error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===============================
+// UPDATE HEALTH CHECK TO INCLUDE ANALYSIS ENDPOINTS
+// ===============================
+
+// Update your existing health check endpoint to include the new analysis endpoints
 app.get('/health', (req, res) => {
   res.status(200).send({
     message: 'Native MongoDB API is running 🚀',
@@ -565,15 +862,17 @@ app.get('/health', (req, res) => {
         'POST /api/conversation/finalize-answer',
         'POST /api/conversation/complete-phase',
         'GET /api/conversation/current'
+      ],
+      analysis: [
+        'POST /api/analysis/save',
+        'GET /api/analysis/:analysisType',
+        'GET /api/analysis/session/:sessionId',
+        'GET /api/analysis/latest',
+        'DELETE /api/analysis/:analysisType'
       ]
     }
   });
-});
-
-// ===============================
-// START SERVER
-// ===============================
-
+}); 
 // Connect to MongoDB first, then start server
 connectToMongoDB().then(() => {
   app.listen(port, '0.0.0.0', () => {
