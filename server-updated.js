@@ -3,7 +3,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const mongoose = require('mongoose');
+const { MongoClient, ObjectId } = require('mongodb');
 require('dotenv').config();
 
 const app = express();
@@ -15,178 +15,31 @@ app.use(cors());
 
 // MongoDB Connection
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_survey';
+let db;
 
-mongoose.connect(MONGO_URI, {
-  useNewUrlParser: true
-})
-  .then(() => console.log('✅ Connected to MongoDB'))
-  .catch(err => {
+async function connectToMongoDB() {
+  try {
+    const client = new MongoClient(MONGO_URI);
+    await client.connect();
+    db = client.db();
+    console.log('✅ Connected to MongoDB');
+    
+    // Create indexes for better performance
+    try {
+      await db.collection('conversations').createIndex({ user_id: 1, status: 1 });
+      await db.collection('conversations').createIndex({ user_id: 1, session_id: 1 });
+      await db.collection('users').createIndex({ email: 1 }, { unique: true });
+      await db.collection('questions').createIndex({ id: 1 }, { unique: true });
+      console.log('✅ Database indexes created');
+    } catch (indexError) {
+      console.log('ℹ️ Some indexes may already exist');
+    }
+    
+  } catch (err) {
     console.error('❌ MongoDB connection error:', err);
     process.exit(1);
-  });
-
-// ===============================
-// SCHEMAS
-// ===============================
-
-// User Schema
-const userSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  role: {
-    type: String,
-    enum: ['user', 'admin'],
-    default: 'user'
-  },
-  created_at: { type: Date, default: Date.now }
-});
-
-const User = mongoose.model('User', userSchema);
-
-// Questions Schema
-const questionSchema = new mongoose.Schema({
-  id: {
-    type: Number,
-    required: true,
-    unique: true
-  },
-  question: {
-    type: String,
-    required: true
-  },
-  severity: {
-    type: String,
-    enum: ['mandatory', 'optional'],
-    required: true
-  },
-  phase: {
-    type: String,
-    enum: ['initial', 'essential', 'good', 'excellent'],
-    required: true
-  },
-  created_at: { type: Date, default: Date.now }
-});
-
-const Question = mongoose.model('Question', questionSchema);
-
-// Conversation Schema - Stores all Q&A interactions including follow-ups
-const conversationSchema = new mongoose.Schema({
-  user_id: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
-  },
-  session_id: {
-    type: String,
-    required: true,
-    default: () => `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-  },
-  // Store the complete conversation flow
-  messages: [{
-    id: { type: String, required: true },
-    type: { type: String, enum: ['user', 'bot'], required: true },
-    text: { type: String, required: true },
-    timestamp: { type: Date, default: Date.now },
-    
-    // Question metadata (for bot messages)
-    questionId: { type: Number },
-    phase: { type: String, enum: ['initial', 'essential', 'good', 'excellent'] },
-    severity: { type: String, enum: ['mandatory', 'optional'] },
-    isFollowUp: { type: Boolean, default: false },
-    isPhaseValidation: { type: Boolean, default: false },
-    
-    // ML validation metadata
-    mlValidation: {
-      validated: { type: Boolean, default: false },
-      valid: { type: Boolean },
-      feedback: { type: String },
-      attempt: { type: Number, default: 1 }
-    }
-  }],
-  
-  // Final answers after validation (clean data for analysis)
-  finalAnswers: {
-    type: Map,
-    of: {
-      questionId: { type: Number, required: true },
-      questionText: { type: String, required: true },
-      finalAnswer: { type: String, required: true }, // Combined answer after follow-ups
-      phase: { type: String, required: true },
-      severity: { type: String, required: true },
-      attemptCount: { type: Number, default: 1 }, // How many follow-ups were needed
-      completedAt: { type: Date, default: Date.now }
-    }
-  },
-  
-  // Progress tracking
-  progress: {
-    totalQuestions: { type: Number, default: 0 },
-    answeredQuestions: { type: Number, default: 0 },
-    mandatoryAnswered: { type: Number, default: 0 },
-    mandatoryTotal: { type: Number, default: 0 },
-    percentage: { type: Number, default: 0 },
-    currentPhase: {
-      type: String,
-      enum: ['initial', 'essential', 'good', 'excellent'],
-      default: 'initial'
-    },
-    completedPhases: [String]
-  },
-  
-  // Business data extracted from answers
-  businessData: {
-    name: { type: String, default: 'Your Business' },
-    description: { type: String, default: '' },
-    industry: { type: String, default: '' },
-    targetAudience: { type: String, default: '' },
-    products: { type: String, default: '' }
-  },
-  
-  // Future: Analysis results will be stored here
-  analyses: [{
-    type: { type: String, enum: ['swot', 'strategic', 'financial', 'competitive'] },
-    result: { type: String },
-    generatedAt: { type: Date, default: Date.now },
-    model: { type: String, default: 'groq' },
-    tokensUsed: { type: Number, default: 0 }
-  }],
-  
-  status: {
-    type: String,
-    enum: ['active', 'completed', 'paused'],
-    default: 'active'
-  },
-  
-  // Timestamps
-  startedAt: { type: Date, default: Date.now },
-  lastActivity: { type: Date, default: Date.now },
-  completedAt: { type: Date }
-});
-
-// Indexes for performance
-conversationSchema.index({ user_id: 1, status: 1 });
-conversationSchema.index({ user_id: 1, session_id: 1 });
-
-const Conversation = mongoose.model('Conversation', conversationSchema);
-
-// ===============================
-// MIDDLEWARE
-// ===============================
-
-// Middleware to verify JWT
-const authenticateToken = (req, res, next) => {
-  const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1];
-
-  if (!token) return res.status(401).send({ message: 'No token provided' });
-
-  jwt.verify(token, secretKey, (err, user) => {
-    if (err) return res.status(403).send({ message: 'Invalid token' });
-    req.user = user;
-    next();
-  });
-};
+  }
+}
 
 // ===============================
 // HELPER FUNCTIONS
@@ -225,9 +78,9 @@ const updateBusinessData = (conversation, questionId, answer) => {
 
 // Calculate progress
 const calculateProgress = (finalAnswers, allQuestions) => {
-  const answeredCount = finalAnswers.size;
+  const answeredCount = Object.keys(finalAnswers).length;
   const mandatoryQuestions = allQuestions.filter(q => q.severity === 'mandatory');
-  const mandatoryAnswered = Array.from(finalAnswers.values()).filter(a => a.severity === 'mandatory').length;
+  const mandatoryAnswered = Object.values(finalAnswers).filter(a => a.severity === 'mandatory').length;
 
   return {
     totalQuestions: allQuestions.length,
@@ -236,6 +89,24 @@ const calculateProgress = (finalAnswers, allQuestions) => {
     mandatoryTotal: mandatoryQuestions.length,
     percentage: mandatoryQuestions.length > 0 ? Math.round((mandatoryAnswered / mandatoryQuestions.length) * 100) : 0
   };
+};
+
+// ===============================
+// MIDDLEWARE
+// ===============================
+
+// Middleware to verify JWT
+const authenticateToken = (req, res, next) => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+
+  if (!token) return res.status(401).send({ message: 'No token provided' });
+
+  jwt.verify(token, secretKey, (err, user) => {
+    if (err) return res.status(403).send({ message: 'Invalid token' });
+    req.user = user;
+    next();
+  });
 };
 
 // ===============================
@@ -251,26 +122,27 @@ app.post('/api/users', async (req, res) => {
       return res.status(400).send({ message: 'Name, email, and password are required' });
     }
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await db.collection('users').findOne({ email });
     if (existingUser) {
       return res.status(400).send({ message: 'User already exists with this email' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    const newUser = new User({
+    const newUser = {
       name,
       email,
       password: hashedPassword,
-      role: 'user'
-    });
+      role: 'user',
+      created_at: new Date()
+    };
 
-    await newUser.save();
+    const result = await db.collection('users').insertOne(newUser);
 
     res.status(201).send({
       message: 'User created successfully',
       user: {
-        id: newUser._id,
+        id: result.insertedId,
         name: newUser.name,
         email: newUser.email,
         role: newUser.role
@@ -291,7 +163,7 @@ app.post('/api/login', async (req, res) => {
       return res.status(400).send({ message: 'Email and password are required' });
     }
 
-    const user = await User.findOne({ email });
+    const user = await db.collection('users').findOne({ email });
     if (!user) {
       return res.status(400).send({ message: 'Invalid credentials' });
     }
@@ -330,27 +202,23 @@ app.post('/api/login', async (req, res) => {
 // GET: Retrieve All Questions
 app.get('/api/questions', authenticateToken, async (req, res) => {
   try {
-    const questions = await Question.find({})
-      .select('id question severity phase')
-      .sort({ id: 1 });
+    const questions = await db.collection('questions')
+      .find({})
+      .project({ id: 1, question: 1, severity: 1, phase: 1 })
+      .sort({ id: 1 })
+      .toArray();
 
-    res.status(200).send({
-      questions: questions
-    });
+    res.status(200).send({ questions });
 
   } catch (error) {
     console.error('Get questions error:', error);
-    res.status(500).send({
-      message: 'Server error',
-      error: error.message
-    });
+    res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
 
 // POST: Add Questions (Admin only - for initial setup)
 app.post('/api/questions', authenticateToken, async (req, res) => {
   try {
-    // Simple admin check
     if (req.user.role !== 'admin') {
       return res.status(403).send({ message: 'Admin access required' });
     }
@@ -360,13 +228,19 @@ app.post('/api/questions', authenticateToken, async (req, res) => {
       return res.status(400).send({ message: 'Questions array is required' });
     }
 
+    // Add timestamps to questions
+    const questionsWithTimestamp = questions.map(q => ({
+      ...q,
+      created_at: new Date()
+    }));
+
     // Clear existing questions and insert new ones
-    await Question.deleteMany({});
-    const savedQuestions = await Question.insertMany(questions);
+    await db.collection('questions').deleteMany({});
+    const result = await db.collection('questions').insertMany(questionsWithTimestamp);
 
     res.status(201).send({
-      message: `Successfully added ${savedQuestions.length} questions`,
-      questions: savedQuestions
+      message: `Successfully added ${result.insertedCount} questions`,
+      questions: questionsWithTimestamp
     });
 
   } catch (error) {
@@ -397,45 +271,60 @@ app.post('/api/conversation/save-message', authenticateToken, async (req, res) =
       }
     } = req.body;
 
-    const userId = req.user.id;
+    const userId = new ObjectId(req.user.id);
 
     // Find or create conversation
     let conversation = null;
     
-    // If sessionId is provided, try to find existing conversation
     if (sessionId) {
-      conversation = await Conversation.findOne({
+      conversation = await db.collection('conversations').findOne({
         user_id: userId,
         session_id: sessionId,
         status: 'active'
       });
     }
 
-    // If no conversation found (sessionId null or not found), find any active conversation
     if (!conversation) {
-      conversation = await Conversation.findOne({
+      conversation = await db.collection('conversations').findOne({
         user_id: userId,
         status: 'active'
       });
     }
 
-    // If still no conversation, create new one
     if (!conversation) {
-      const allQuestions = await Question.find({}).sort({ id: 1 });
+      const allQuestions = await db.collection('questions').find({}).sort({ id: 1 }).toArray();
       
-      // Generate new sessionId if not provided
       const newSessionId = sessionId || `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
       
-      conversation = new Conversation({
+      conversation = {
         user_id: userId,
         session_id: newSessionId,
         messages: [],
-        finalAnswers: new Map(),
+        finalAnswers: {},
         progress: {
           totalQuestions: allQuestions.length,
-          mandatoryTotal: allQuestions.filter(q => q.severity === 'mandatory').length
-        }
-      });
+          answeredQuestions: 0,
+          mandatoryAnswered: 0,
+          mandatoryTotal: allQuestions.filter(q => q.severity === 'mandatory').length,
+          percentage: 0,
+          currentPhase: 'initial',
+          completedPhases: []
+        },
+        businessData: {
+          name: 'Your Business',
+          description: '',
+          industry: '',
+          targetAudience: '',
+          products: ''
+        },
+        analyses: [],
+        status: 'active',
+        startedAt: new Date(),
+        lastActivity: new Date()
+      };
+
+      const result = await db.collection('conversations').insertOne(conversation);
+      conversation._id = result.insertedId;
     }
 
     // Add message to conversation
@@ -458,10 +347,13 @@ app.post('/api/conversation/save-message', authenticateToken, async (req, res) =
       messageData.mlValidation = mlValidation;
     }
 
-    conversation.messages.push(messageData);
-    conversation.lastActivity = new Date();
-
-    await conversation.save();
+    await db.collection('conversations').updateOne(
+      { _id: conversation._id },
+      {
+        $push: { messages: messageData },
+        $set: { lastActivity: new Date() }
+      }
+    );
 
     console.log(`💾 Message saved to session: ${conversation.session_id}`);
 
@@ -487,9 +379,9 @@ app.post('/api/conversation/finalize-answer', authenticateToken, async (req, res
       attemptCount = 1
     } = req.body;
 
-    const userId = req.user.id;
+    const userId = new ObjectId(req.user.id);
 
-    const conversation = await Conversation.findOne({
+    const conversation = await db.collection('conversations').findOne({
       user_id: userId,
       session_id: sessionId,
       status: 'active'
@@ -500,13 +392,13 @@ app.post('/api/conversation/finalize-answer', authenticateToken, async (req, res
     }
 
     // Get question details
-    const question = await Question.findOne({ id: questionId });
+    const question = await db.collection('questions').findOne({ id: questionId });
     if (!question) {
       return res.status(404).send({ message: 'Question not found' });
     }
 
-    // Store final answer
-    conversation.finalAnswers.set(questionId.toString(), {
+    // Prepare final answer
+    const finalAnswerData = {
       questionId: question.id,
       questionText: question.question,
       finalAnswer: finalAnswer,
@@ -514,29 +406,42 @@ app.post('/api/conversation/finalize-answer', authenticateToken, async (req, res
       severity: question.severity,
       attemptCount: attemptCount,
       completedAt: new Date()
-    });
+    };
 
-    // Update business data
-    updateBusinessData(conversation, questionId, finalAnswer);
+    // Update conversation with final answer and business data
+    const updatedBusinessData = { ...conversation.businessData };
+    updateBusinessData({ businessData: updatedBusinessData }, questionId, finalAnswer);
 
-    // Recalculate progress
-    const allQuestions = await Question.find({}).sort({ id: 1 });
-    const progressData = calculateProgress(conversation.finalAnswers, allQuestions);
-    
-    conversation.progress.totalQuestions = progressData.totalQuestions;
-    conversation.progress.answeredQuestions = progressData.answeredQuestions;
-    conversation.progress.mandatoryAnswered = progressData.mandatoryAnswered;
-    conversation.progress.mandatoryTotal = progressData.mandatoryTotal;
-    conversation.progress.percentage = progressData.percentage;
+    // Calculate progress
+    const updatedFinalAnswers = { ...conversation.finalAnswers };
+    updatedFinalAnswers[questionId.toString()] = finalAnswerData;
 
-    conversation.lastActivity = new Date();
+    const allQuestions = await db.collection('questions').find({}).sort({ id: 1 }).toArray();
+    const progressData = calculateProgress(updatedFinalAnswers, allQuestions);
 
-    await conversation.save();
+    await db.collection('conversations').updateOne(
+      { _id: conversation._id },
+      {
+        $set: {
+          [`finalAnswers.${questionId}`]: finalAnswerData,
+          businessData: updatedBusinessData,
+          'progress.totalQuestions': progressData.totalQuestions,
+          'progress.answeredQuestions': progressData.answeredQuestions,
+          'progress.mandatoryAnswered': progressData.mandatoryAnswered,
+          'progress.mandatoryTotal': progressData.mandatoryTotal,
+          'progress.percentage': progressData.percentage,
+          lastActivity: new Date()
+        }
+      }
+    );
 
     res.status(200).send({
       message: 'Answer finalized successfully',
-      progress: conversation.progress,
-      businessData: conversation.businessData
+      progress: {
+        ...conversation.progress,
+        ...progressData
+      },
+      businessData: updatedBusinessData
     });
 
   } catch (error) {
@@ -549,9 +454,9 @@ app.post('/api/conversation/finalize-answer', authenticateToken, async (req, res
 app.post('/api/conversation/complete-phase', authenticateToken, async (req, res) => {
   try {
     const { sessionId, phase } = req.body;
-    const userId = req.user.id;
+    const userId = new ObjectId(req.user.id);
 
-    const conversation = await Conversation.findOne({
+    const conversation = await db.collection('conversations').findOne({
       user_id: userId,
       session_id: sessionId,
       status: 'active'
@@ -561,19 +466,25 @@ app.post('/api/conversation/complete-phase', authenticateToken, async (req, res)
       return res.status(404).send({ message: 'Conversation not found' });
     }
 
-    // Add to completed phases if not already there
-    if (!conversation.progress.completedPhases.includes(phase)) {
-      conversation.progress.completedPhases.push(phase);
+    const completedPhases = conversation.progress.completedPhases || [];
+    if (!completedPhases.includes(phase)) {
+      completedPhases.push(phase);
     }
 
-    conversation.progress.currentPhase = phase;
-    conversation.lastActivity = new Date();
-
-    await conversation.save();
+    await db.collection('conversations').updateOne(
+      { _id: conversation._id },
+      {
+        $set: {
+          'progress.completedPhases': completedPhases,
+          'progress.currentPhase': phase,
+          lastActivity: new Date()
+        }
+      }
+    );
 
     res.status(200).send({
       message: `Phase ${phase} completed successfully`,
-      completedPhases: conversation.progress.completedPhases
+      completedPhases: completedPhases
     });
 
   } catch (error) {
@@ -585,12 +496,12 @@ app.post('/api/conversation/complete-phase', authenticateToken, async (req, res)
 // GET: Get current conversation
 app.get('/api/conversation/current', authenticateToken, async (req, res) => {
   try {
-    const userId = req.user.id;
+    const userId = new ObjectId(req.user.id);
 
-    const conversation = await Conversation.findOne({
-      user_id: userId,
-      status: 'active'
-    }).sort({ lastActivity: -1 });
+    const conversation = await db.collection('conversations').findOne(
+      { user_id: userId, status: 'active' },
+      { sort: { lastActivity: -1 } }
+    );
 
     if (!conversation) {
       return res.status(200).send({
@@ -616,16 +527,10 @@ app.get('/api/conversation/current', authenticateToken, async (req, res) => {
       });
     }
 
-    // Convert Map to Object for JSON response
-    const finalAnswersObj = {};
-    conversation.finalAnswers.forEach((value, key) => {
-      finalAnswersObj[key] = value;
-    });
-
     res.status(200).send({
       sessionId: conversation.session_id,
-      messages: conversation.messages,
-      finalAnswers: finalAnswersObj,
+      messages: conversation.messages || [],
+      finalAnswers: conversation.finalAnswers || {},
       progress: conversation.progress,
       businessData: conversation.businessData,
       lastActivity: conversation.lastActivity
@@ -643,8 +548,9 @@ app.get('/api/conversation/current', authenticateToken, async (req, res) => {
 
 app.get('/health', (req, res) => {
   res.status(200).send({
-    message: 'Streamlined Auto-Save API is running 🚀',
+    message: 'Native MongoDB API is running 🚀',
     timestamp: new Date().toISOString(),
+    database: db ? 'Connected' : 'Disconnected',
     endpoints: {
       authentication: [
         'POST /api/users (register)',
@@ -664,7 +570,16 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Start server
-app.listen(port, '0.0.0.0', () => {
-  console.log(`🚀 Streamlined Auto-Save API Server running on port ${port}`);
+// ===============================
+// START SERVER
+// ===============================
+
+// Connect to MongoDB first, then start server
+connectToMongoDB().then(() => {
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`🚀 Native MongoDB API Server running on port ${port}`);
+  });
+}).catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
 });
