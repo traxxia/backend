@@ -4,6 +4,7 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { MongoClient, ObjectId } = require('mongodb');
+const fetch = require('node-fetch'); // Add this for ML API calls
 require('dotenv').config();
 
 const app = express();
@@ -14,7 +15,7 @@ app.use(bodyParser.json());
 app.use(cors());
 
 // MongoDB Connection
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_multi_tenant';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_multi_tenant'; 
 let db;
 
 // Permission helper functions
@@ -53,11 +54,14 @@ async function createEssentialIndexes() {
     await db.collection('global_questions').createIndex({ question_id: 1 }, { unique: true });
     await db.collection('company_questions').createIndex({ company_id: 1, global_question_id: 1 });
 
-    // Sessions and chat indexes
-    await db.collection('user_sessions').createIndex({ user_id: 1, company_id: 1 });
-    await db.collection('user_answers').createIndex({ session_id: 1, user_id: 1 });
-    await db.collection('chat_conversations').createIndex({ session_id: 1, user_id: 1 });
-    await db.collection('phase_results').createIndex({ session_id: 1, user_id: 1, phase_name: 1 });
+    // Progress tracking indexes
+    await db.collection('user_progress').createIndex({ user_id: 1, company_id: 1, question_id: 1, is_followup: 1 });
+    await db.collection('user_progress').createIndex({ user_id: 1, company_id: 1, answered_at: 1 });
+    await db.collection('user_progress').createIndex({ followup_parent_id: 1 });
+    
+    // Chat history indexes
+    await db.collection('user_chat_history').createIndex({ user_id: 1, company_id: 1, timestamp: 1 });
+    await db.collection('user_chat_history').createIndex({ user_id: 1, company_id: 1, question_id: 1 });
 
     console.log('✅ Essential indexes created');
   } catch (error) {
@@ -241,410 +245,309 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ===============================
-// SUPER ADMIN - COMPANY MANAGEMENT
+// SIMPLIFIED USER PROGRESS TRACKING
 // ===============================
 
-// Create Company
-app.post('/api/super-admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
+// Get User's Latest Progress and Chat History
+app.get('/api/user/latest-progress', authenticateToken, async (req, res) => {
   try {
-    const { company_name, industry, size, admin_name, admin_email, admin_password } = req.body;
-
-    if (!company_name || !admin_name || !admin_email || !admin_password) {
-      return res.status(400).send({ message: 'Company name and admin details are required' });
+    if (!canViewQuestions(req.user.role)) {
+      return res.status(403).send({ message: 'You do not have permission to view progress' });
     }
 
-    const existingUser = await db.collection('users').findOne({ email: admin_email });
-    if (existingUser) {
-      return res.status(400).send({ message: 'Admin email already exists' });
+    const userId = new ObjectId(req.user._id);
+    const companyId = req.user.company_id;
+
+    // Get all user's answers/progress (only main answers, not followup)
+    const userProgress = await db.collection('user_progress').find({
+      user_id: userId,
+      company_id: companyId,
+      is_followup: false  // Only get main answers for userAnswers map
+    }).sort({ answered_at: 1 }).toArray();
+
+    // Get chat history
+    const chatHistory = await db.collection('user_chat_history').find({
+      user_id: userId,
+      company_id: companyId
+    }).sort({ timestamp: 1 }).toArray();
+
+    // Get available questions for context
+    let availableQuestions = [];
+    if (req.user.role.role_name === 'super_admin') {
+      // For super admin, get global questions
+      availableQuestions = await db.collection('global_questions').find({
+        is_active: true
+      }).sort({ order: 1, question_id: 1 }).toArray();
+    } else {
+      // For company users, get company-specific questions
+      availableQuestions = await db.collection('company_questions').aggregate([
+        { $match: { company_id: companyId, is_active: true } },
+        {
+          $lookup: {
+            from: 'global_questions',
+            localField: 'global_question_id',
+            foreignField: '_id',
+            as: 'global_question'
+          }
+        },
+        { $unwind: '$global_question' },
+        {
+          $project: {
+            question_id: '$global_question.question_id',
+            question_text: {
+              $cond: {
+                if: '$is_customized',
+                then: '$custom_question_text',
+                else: '$global_question.question_text'
+              }
+            },
+            phase: '$global_question.phase',
+            severity: '$global_question.severity',
+            order: '$global_question.order'
+          }
+        },
+        { $sort: { order: 1, question_id: 1 } }
+      ]).toArray();
     }
 
-    const companyAdminRole = await db.collection('roles').findOne({ role_name: 'company_admin' });
-
-    const newCompany = {
-      company_name,
-      industry: industry || '',
-      size: size || '',
-      status: 'active',
-      created_at: new Date()
-    };
-
-    const companyResult = await db.collection('companies').insertOne(newCompany);
-
-    const hashedPassword = await bcrypt.hash(admin_password, 12);
-    const newAdmin = {
-      name: admin_name,
-      email: admin_email,
-      password: hashedPassword,
-      role_id: companyAdminRole._id,
-      company_id: companyResult.insertedId,
-      status: 'active',
-      profile: { job_title: 'Company Administrator' },
-      created_at: new Date(),
-      last_login: null
-    };
-
-    const adminResult = await db.collection('users').insertOne(newAdmin);
-
-    await db.collection('companies').updateOne(
-      { _id: companyResult.insertedId },
-      { $set: { admin_user_id: adminResult.insertedId } }
-    );
-
-    // Auto-assign all global questions to this company
-    const globalQuestions = await db.collection('global_questions').find({ is_active: true }).toArray();
-    const companyQuestions = globalQuestions.map(gq => ({
-      company_id: companyResult.insertedId,
-      global_question_id: gq._id,
-      custom_question_text: null,
-      is_customized: false,
-      is_active: true,
-      assigned_at: new Date(),
-      assigned_by: new ObjectId(req.user._id)
-    }));
-
-    if (companyQuestions.length > 0) {
-      await db.collection('company_questions').insertMany(companyQuestions);
-    }
-
-    res.status(201).send({
-      message: 'Company and admin created successfully',
-      company: {
-        id: companyResult.insertedId,
-        company_name,
-        admin_email
-      },
-      questions_assigned: companyQuestions.length
+    // Build user answers map from main answers only
+    const userAnswers = {};
+    userProgress.forEach(progress => {
+      userAnswers[progress.question_id] = progress.answer_text;
     });
+
+    // Find next question to ask
+    const answeredQuestionIds = Object.keys(userAnswers).map(id => parseInt(id));
+    const nextQuestion = availableQuestions.find(q => !answeredQuestionIds.includes(q.question_id));
+
+    // Calculate progress
+    const totalQuestions = availableQuestions.length;
+    const answeredQuestions = answeredQuestionIds.length;
+    const progressPercentage = totalQuestions > 0 ? Math.round((answeredQuestions / totalQuestions) * 100) : 0;
+
+    console.log('📊 Latest progress loaded:', {
+      total_questions: totalQuestions,
+      answered_questions: answeredQuestions,
+      next_question: nextQuestion?.question_id,
+      chat_messages: chatHistory.length
+    });
+
+    res.status(200).send({
+      user_answers: userAnswers,
+      chat_history: chatHistory,
+      available_questions: availableQuestions,
+      next_question: nextQuestion,
+      progress: {
+        total_questions: totalQuestions,
+        answered_questions: answeredQuestions,
+        completion_percentage: progressPercentage
+      },
+      user_permissions: {
+        can_view: canViewQuestions(req.user.role),
+        can_answer: canAnswerQuestions(req.user.role),
+        can_admin: req.user.role.can_admin || req.user.role.role_name === 'super_admin',
+        role: req.user.role.role_name
+      }
+    });
+
   } catch (error) {
-    console.error('Create company error:', error);
+    console.error('Get latest progress error:', error);
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
+ // Add this new API endpoint to your backend code
 
-// List All Companies
-app.get('/api/super-admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
+// Get User Data with Chat History - Single comprehensive endpoint
+app.get('/api/admin/user-data/:userId', authenticateToken, async (req, res) => {
   try {
-    const companies = await db.collection('companies').aggregate([
+    const { userId } = req.params;
+    const requestingUserRole = req.user.role.role_name;
+    const requestingUserCompanyId = req.user.company_id;
+
+    // Authorization check
+    if (!['super_admin', 'company_admin'].includes(requestingUserRole)) {
+      return res.status(403).send({ message: 'Admin access required' });
+    }
+
+    // Validate userId
+    if (!ObjectId.isValid(userId)) {
+      return res.status(400).send({ message: 'Invalid user ID' });
+    }
+
+    const targetUserId = new ObjectId(userId);
+
+    // Get target user details
+    const targetUser = await db.collection('users').aggregate([
+      { $match: { _id: targetUserId } },
       {
         $lookup: {
-          from: 'users',
-          localField: 'admin_user_id',
+          from: 'roles',
+          localField: 'role_id',
           foreignField: '_id',
-          as: 'admin_user'
+          as: 'role'
         }
-      },
-      {
-        $unwind: { path: '$admin_user', preserveNullAndEmptyArrays: true }
       },
       {
         $lookup: {
-          from: 'users',
-          localField: '_id',
-          foreignField: 'company_id',
-          as: 'users'
+          from: 'companies',
+          localField: 'company_id',
+          foreignField: '_id',
+          as: 'company'
         }
       },
       {
-        $project: {
-          company_name: 1,
-          industry: 1,
-          size: 1,
-          status: 1,
-          created_at: 1,
-          admin_name: '$admin_user.name',
-          admin_email: '$admin_user.email',
-          total_users: { $size: '$users' },
-          active_users: {
-            $size: {
-              $filter: {
-                input: '$users',
-                cond: { $eq: ['$$this.status', 'active'] }
-              }
-            }
-          }
-        }
+        $unwind: { path: '$role', preserveNullAndEmptyArrays: true }
+      },
+      {
+        $unwind: { path: '$company', preserveNullAndEmptyArrays: true }
       }
     ]).toArray();
 
-    res.status(200).send({
-      companies,
-      total: companies.length
-    });
-  } catch (error) {
-    console.error('Get companies error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===============================
-// SUPER ADMIN - GLOBAL QUESTIONS MANAGEMENT
-// ===============================
-
-// Create Global Question
-app.post('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const { question_id, question_text, phase, severity, order } = req.body;
-
-    if (!question_id || !question_text || !phase || !severity) {
-      return res.status(400).send({ message: 'Question ID, text, phase, and severity are required' });
+    if (targetUser.length === 0) {
+      return res.status(404).send({ message: 'User not found' });
     }
 
-    const existingQuestion = await db.collection('global_questions').findOne({ question_id });
-    if (existingQuestion) {
-      return res.status(400).send({ message: 'Question ID already exists' });
-    }
+    const user = targetUser[0];
 
-    const newQuestion = {
-      question_id,
-      question_text,
-      phase,
-      severity,
-      order: order || 999,
-      is_active: true,
-      created_at: new Date()
-    };
-
-    const result = await db.collection('global_questions').insertOne(newQuestion);
-
-    // Auto-assign to all active companies
-    const activeCompanies = await db.collection('companies').find({ status: 'active' }).toArray();
-    const companyAssignments = activeCompanies.map(company => ({
-      company_id: company._id,
-      global_question_id: result.insertedId,
-      custom_question_text: null,
-      is_customized: false,
-      is_active: true,
-      assigned_at: new Date(),
-      assigned_by: new ObjectId(req.user._id)
-    }));
-
-    if (companyAssignments.length > 0) {
-      await db.collection('company_questions').insertMany(companyAssignments);
-    }
-
-    res.status(201).send({
-      message: 'Global question created and assigned to all companies',
-      question: { ...newQuestion, _id: result.insertedId },
-      assigned_to_companies: companyAssignments.length
-    });
-  } catch (error) {
-    console.error('Create global question error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Bulk Create Global Questions
-app.post('/api/super-admin/global-questions/bulk', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const { questions } = req.body;
-
-    if (!questions || !Array.isArray(questions) || questions.length === 0) {
-      return res.status(400).send({ message: 'Questions array is required' });
-    }
-
-    // Validate all questions first
-    for (let i = 0; i < questions.length; i++) {
-      const q = questions[i];
-      if (!q.question_id || !q.question_text || !q.phase || !q.severity) {
-        return res.status(400).send({
-          message: `Question at index ${i}: Question ID, text, phase, and severity are required`
-        });
+    // Company admin can only view users from their own company
+    if (requestingUserRole === 'company_admin') {
+      if (!user.company_id || user.company_id.toString() !== requestingUserCompanyId.toString()) {
+        return res.status(403).send({ message: 'You can only view users from your company' });
       }
     }
 
-    const questionIds = questions.map(q => q.question_id);
-    const duplicateIds = questionIds.filter((id, index) => questionIds.indexOf(id) !== index);
-    if (duplicateIds.length > 0) {
-      return res.status(400).send({
-        message: `Duplicate question IDs found: ${duplicateIds.join(', ')}`
-      });
-    }
+    // Get user's answers/progress
+    const answers = await db.collection('user_progress').find({
+      user_id: targetUserId,
+      company_id: user.company_id
+    }).sort({ answered_at: 1 }).toArray();
 
-    const existingQuestions = await db.collection('global_questions').find({
-      question_id: { $in: questionIds }
-    }).toArray();
+    // Get user's chat history
+    const chatHistory = await db.collection('user_chat_history').find({
+      user_id: targetUserId,
+      company_id: user.company_id
+    }).sort({ timestamp: 1 }).toArray();
 
-    if (existingQuestions.length > 0) {
-      const existingIds = existingQuestions.map(q => q.question_id);
-      return res.status(400).send({
-        message: `Question IDs already exist: ${existingIds.join(', ')}`
-      });
-    }
+    // Get user's phase results if any
+    const phaseResults = await db.collection('phase_results').find({
+      user_id: targetUserId,
+      company_id: user.company_id
+    }).sort({ generated_at: -1 }).toArray();
 
-    const newQuestions = questions.map(q => ({
-      question_id: q.question_id,
-      question_text: q.question_text,
-      phase: q.phase,
-      severity: q.severity,
-      order: q.order || 999,
-      is_active: true,
-      created_at: new Date()
-    }));
+    // Get user's sessions
+    const sessions = await db.collection('user_sessions').find({
+      user_id: targetUserId,
+      company_id: user.company_id
+    }).sort({ started_at: -1 }).toArray();
 
-    const result = await db.collection('global_questions').insertMany(newQuestions);
-    const insertedQuestions = Object.values(result.insertedIds);
+    // Calculate summary statistics
+    const totalAnswers = answers.length;
+    const mainAnswers = answers.filter(a => !a.is_followup).length;
+    const followupAnswers = answers.filter(a => a.is_followup).length;
+    const completedPhases = [...new Set(answers.map(a => a.phase))].length;
+    const totalSessions = sessions.length;
+    const activeSessions = sessions.filter(s => s.status === 'active').length;
 
-    // Auto-assign to all active companies
-    const activeCompanies = await db.collection('companies').find({ status: 'active' }).toArray();
-    const allCompanyAssignments = [];
-    insertedQuestions.forEach(questionId => {
-      activeCompanies.forEach(company => {
-        allCompanyAssignments.push({
-          company_id: company._id,
-          global_question_id: questionId,
-          custom_question_text: null,
-          is_customized: false,
-          is_active: true,
-          assigned_at: new Date(),
-          assigned_by: new ObjectId(req.user._id)
-        });
-      });
+    // Group chat history by conversation/question for better organization
+    const chatByQuestion = {};
+    chatHistory.forEach(chat => {
+      const key = chat.question_id || 'general';
+      if (!chatByQuestion[key]) {
+        chatByQuestion[key] = [];
+      }
+      chatByQuestion[key].push(chat);
     });
 
-    if (allCompanyAssignments.length > 0) {
-      await db.collection('company_questions').insertMany(allCompanyAssignments);
-    }
-
-    res.status(201).send({
-      message: `${questions.length} global questions created and assigned to all companies`,
-      questions_created: questions.length,
-      assigned_to_companies: activeCompanies.length,
-      total_assignments: allCompanyAssignments.length
+    // Organize answers with their related chat messages
+    const answersWithChat = answers.map(answer => {
+      const relatedChat = chatByQuestion[answer.question_id] || [];
+      return {
+        ...answer,
+        related_chat_messages: relatedChat.filter(chat => 
+          Math.abs(new Date(chat.timestamp) - new Date(answer.answered_at)) < 30 * 60 * 1000 // Within 30 minutes
+        )
+      };
     });
-  } catch (error) {
-    console.error('Bulk create global questions error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
 
-// List Global Questions
-app.get('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const questions = await db.collection('global_questions')
-      .find({})
-      .sort({ order: 1, question_id: 1 })
-      .toArray();
-
-    const questionsWithStats = await Promise.all(
-      questions.map(async (question) => {
-        const assignmentCount = await db.collection('company_questions').countDocuments({
-          global_question_id: question._id
-        });
-        return { ...question, assigned_to_companies: assignmentCount };
-      })
-    );
+    console.log(`📊 User data loaded for ${user.name}:`, {
+      total_answers: totalAnswers,
+      chat_messages: chatHistory.length,
+      phase_results: phaseResults.length,
+      sessions: totalSessions
+    });
 
     res.status(200).send({
-      questions: questionsWithStats,
-      total: questions.length
-    });
-  } catch (error) {
-    console.error('Get global questions error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Update Global Question
-app.put('/api/super-admin/global-questions/:questionId', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const questionId = req.params.questionId;
-    const updates = { ...req.body };
-
-    delete updates._id;
-    delete updates.created_at;
-    updates.updated_at = new Date();
-
-    const result = await db.collection('global_questions').updateOne(
-      { _id: new ObjectId(questionId) },
-      { $set: updates }
-    );
-
-    if (result.matchedCount === 0) {
-      return res.status(404).send({ message: 'Question not found' });
-    }
-
-    res.status(200).send({ message: 'Global question updated successfully' });
-  } catch (error) {
-    console.error('Update global question error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===============================
-// COMPANY ADMIN - USER MANAGEMENT
-// ===============================
-
-// Create Company User
-app.post('/api/company-admin/users', authenticateToken, requireCompanyAdmin, async (req, res) => {
-  try {
-    const { name, email, password, role_name, profile = {} } = req.body;
-
-    if (!name || !email || !password || !role_name) {
-      return res.status(400).send({ message: 'Name, email, password, and role are required' });
-    }
-
-    const existingUser = await db.collection('users').findOne({ email });
-    if (existingUser) {
-      return res.status(400).send({ message: 'Email already exists' });
-    }
-
-    const role = await db.collection('roles').findOne({ role_name });
-    if (!role || !['viewer_user', 'answerer_user'].includes(role_name)) {
-      return res.status(400).send({ message: 'Invalid role. Use viewer_user or answerer_user' });
-    }
-
-    const targetCompanyId = req.user.role.role_name === 'super_admin'
-      ? new ObjectId(req.body.company_id)
-      : req.user.company_id;
-
-    if (!targetCompanyId) {
-      return res.status(400).send({ message: 'Company ID required' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 12);
-
-    const newUser = {
-      name,
-      email,
-      password: hashedPassword,
-      role_id: role._id,
-      company_id: targetCompanyId,
-      status: 'active',
-      profile,
-      created_at: new Date(),
-      last_login: null
-    };
-
-    const result = await db.collection('users').insertOne(newUser);
-
-    res.status(201).send({
-      message: 'User created successfully',
-      user: {
-        id: result.insertedId,
-        name,
-        email,
-        role: role_name
+      user_info: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role?.role_name || 'unknown',
+        company: user.company?.company_name || 'No Company',
+        status: user.status,
+        created_at: user.created_at,
+        last_login: user.last_login,
+        profile: user.profile
+      },
+      summary: {
+        total_answers: totalAnswers,
+        main_answers: mainAnswers,
+        followup_answers: followupAnswers,
+        completed_phases: completedPhases,
+        total_sessions: totalSessions,
+        active_sessions: activeSessions,
+        total_chat_messages: chatHistory.length,
+        first_activity: answers.length > 0 ? answers[0].answered_at : null,
+        last_activity: answers.length > 0 ? answers[answers.length - 1].answered_at : null
+      },
+      answers: answersWithChat,
+      chat_history: chatHistory,
+      chat_by_question: chatByQuestion,
+      phase_results: phaseResults,
+      sessions: sessions,
+      permissions: {
+        can_export: true,
+        can_view_details: true,
+        requesting_user_role: requestingUserRole
       }
     });
+
   } catch (error) {
-    console.error('Create user error:', error);
+    console.error('Get user data error:', error);
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
 
-// List Company Users
-app.get('/api/company-admin/users', authenticateToken, requireCompanyAdmin, async (req, res) => {
+// Enhanced Company Admin Users endpoint to work with the frontend
+app.get('/api/company-admin/users', authenticateToken, async (req, res) => {
   try {
-    let filter = {};
+    const requestingUserRole = req.user.role.role_name;
+    const requestingUserCompanyId = req.user.company_id;
+    const { company_id } = req.query;
 
-    if (req.user.role.role_name === 'company_admin') {
-      filter.company_id = req.user.company_id;
-    } else if (req.query.company_id) {
-      filter.company_id = new ObjectId(req.query.company_id);
+    // Authorization check
+    if (!['super_admin', 'company_admin'].includes(requestingUserRole)) {
+      return res.status(403).send({ message: 'Admin access required' });
     }
 
+    let query = {};
+    let targetCompanyId = null;
+
+    if (requestingUserRole === 'super_admin') {
+      // Super admin can view all users or filter by company
+      if (company_id) {
+        targetCompanyId = new ObjectId(company_id);
+        query.company_id = targetCompanyId;
+      }
+      // If no company_id specified, show all users
+    } else if (requestingUserRole === 'company_admin') {
+      // Company admin can only view their own company users
+      targetCompanyId = requestingUserCompanyId;
+      query.company_id = targetCompanyId;
+    }
+
+    // Get users with role and company information
     const users = await db.collection('users').aggregate([
-      { $match: filter },
+      { $match: query },
       {
         $lookup: {
           from: 'roles',
@@ -669,196 +572,242 @@ app.get('/api/company-admin/users', authenticateToken, requireCompanyAdmin, asyn
       },
       {
         $project: {
-          password: 0,
-          'role.permissions': 0
-        }
-      }
-    ]).toArray();
-
-    res.status(200).send({
-      users,
-      total: users.length
-    });
-  } catch (error) {
-    console.error('Get users error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===============================
-// COMPANY ADMIN - QUESTION CUSTOMIZATION
-// ===============================
-
-// Get Company Questions
-app.get('/api/company-admin/questions', authenticateToken, requireCompanyAdmin, async (req, res) => {
-  try {
-    const companyId = req.user.role.role_name === 'company_admin'
-      ? req.user.company_id
-      : new ObjectId(req.query.company_id);
-
-    if (!companyId) {
-      return res.status(400).send({ message: 'Company ID required' });
-    }
-
-    const companyQuestions = await db.collection('company_questions').aggregate([
-      { $match: { company_id: companyId } },
-      {
-        $lookup: {
-          from: 'global_questions',
-          localField: 'global_question_id',
-          foreignField: '_id',
-          as: 'global_question'
-        }
-      },
-      {
-        $unwind: '$global_question'
-      },
-      {
-        $project: {
-          global_question_id: 1,
-          custom_question_text: 1,
-          is_customized: 1,
-          is_active: 1,
-          assigned_at: 1,
-          question_id: '$global_question.question_id',
-          original_question_text: '$global_question.question_text',
-          phase: '$global_question.phase',
-          severity: '$global_question.severity',
-          order: '$global_question.order',
-          final_question_text: {
-            $cond: {
-              if: '$is_customized',
-              then: '$custom_question_text',
-              else: '$global_question.question_text'
-            }
+          name: 1,
+          email: 1,
+          status: 1,
+          created_at: 1,
+          last_login: 1,
+          profile: 1,
+          role: {
+            role_name: '$role.role_name',
+            permissions: '$role.permissions'
+          },
+          company: {
+            company_name: '$company.company_name',
+            _id: '$company._id'
           }
         }
       },
-      {
-        $sort: { 'order': 1, 'question_id': 1 }
-      }
+      { $sort: { created_at: -1 } }
     ]).toArray();
 
+    // Get activity summary for each user
+    const usersWithActivity = await Promise.all(
+      users.map(async (user) => {
+        const [answerCount, chatCount, sessionCount] = await Promise.all([
+          db.collection('user_progress').countDocuments({ user_id: user._id }),
+          db.collection('user_chat_history').countDocuments({ user_id: user._id }),
+          db.collection('user_sessions').countDocuments({ user_id: user._id })
+        ]);
+
+        return {
+          ...user,
+          activity_summary: {
+            total_answers: answerCount,
+            total_chat_messages: chatCount,
+            total_sessions: sessionCount,
+            has_activity: answerCount > 0 || chatCount > 0
+          }
+        };
+      })
+    );
+
+    console.log(`📋 Retrieved ${usersWithActivity.length} users for ${requestingUserRole}`);
+
     res.status(200).send({
-      questions: companyQuestions,
-      total: companyQuestions.length,
-      company_id: companyId
-    });
-  } catch (error) {
-    console.error('Get company questions error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Customize Company Question
-app.put('/api/company-admin/questions/:companyQuestionId', authenticateToken, requireCompanyAdmin, async (req, res) => {
-  try {
-    const companyQuestionId = req.params.companyQuestionId;
-    const { custom_question_text, is_active } = req.body;
-
-    if (!custom_question_text && is_active === undefined) {
-      return res.status(400).send({ message: 'Either custom question text or status update required' });
-    }
-
-    const updates = {};
-
-    if (custom_question_text) {
-      updates.custom_question_text = custom_question_text;
-      updates.is_customized = true;
-    }
-
-    if (is_active !== undefined) {
-      updates.is_active = is_active;
-    }
-
-    updates.updated_at = new Date();
-
-    let filter = { _id: new ObjectId(companyQuestionId) };
-    if (req.user.role.role_name === 'company_admin') {
-      filter.company_id = req.user.company_id;
-    }
-
-    const result = await db.collection('company_questions').updateOne(filter, { $set: updates });
-
-    if (result.matchedCount === 0) {
-      return res.status(404).send({ message: 'Question not found or access denied' });
-    }
-
-    res.status(200).send({ message: 'Question updated successfully' });
-  } catch (error) {
-    console.error('Customize question error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===============================
-// USER - SESSION & QUESTIONS
-// ===============================
-
-// Start User Session
-app.post('/api/user/start-session', authenticateToken, async (req, res) => {
-  try {
-    if (!canViewQuestions(req.user.role)) {
-      return res.status(403).send({ message: 'You do not have permission to start sessions' });
-    }
-
-    // Check if user has an active session
-    const existingSession = await db.collection('user_sessions').findOne({
-      user_id: new ObjectId(req.user._id),
-      status: 'active'
-    });
-
-    if (existingSession) {
-      return res.status(200).send({
-        message: 'Active session found',
-        session: existingSession,
-        user_permissions: {
-          can_view: canViewQuestions(req.user.role),
-          can_answer: canAnswerQuestions(req.user.role),
-          can_admin: req.user.role.can_admin || req.user.role.role_name === 'super_admin',
-          role: req.user.role.role_name
-        }
-      });
-    }
-
-    let sessionCompanyId = null;
-    if (req.user.role.role_name === 'super_admin') {
-      sessionCompanyId = req.body.company_id ? new ObjectId(req.body.company_id) : null;
-    } else {
-      sessionCompanyId = req.user.company_id;
-    }
-
-    const newSession = {
-      user_id: new ObjectId(req.user._id),
-      company_id: sessionCompanyId,
-      session_id: `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-      status: 'active',
-      current_phase: 'initial',
-      current_question_index: 0,
-      started_at: new Date(),
-      completed_at: null,
-      user_role: req.user.role.role_name
-    };
-
-    const result = await db.collection('user_sessions').insertOne(newSession);
-
-    res.status(201).send({
-      message: 'Session started successfully',
-      session: { ...newSession, _id: result.insertedId },
-      user_permissions: {
-        can_view: canViewQuestions(req.user.role),
-        can_answer: canAnswerQuestions(req.user.role),
-        can_admin: req.user.role.can_admin || req.user.role.role_name === 'super_admin',
-        role: req.user.role.role_name
+      users: usersWithActivity,
+      total: usersWithActivity.length,
+      filters: {
+        company_id: targetCompanyId,
+        requesting_user_role: requestingUserRole
       }
     });
+
   } catch (error) {
-    console.error('Start session error:', error);
+    console.error('Get company users error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+app.post('/api/user/save-answer', authenticateToken, async (req, res) => {
+  try {
+    if (!canAnswerQuestions(req.user.role)) {
+      return res.status(403).send({ message: 'You do not have permission to submit answers' });
+    }
+
+    const { question_id, question_text, answer_text, is_followup = false, followup_parent_id = null } = req.body;
+
+    if (!question_id || !question_text || !answer_text) {
+      return res.status(400).send({ message: 'Question ID, text, and answer are required' });
+    }
+
+    const userId = new ObjectId(req.user._id);
+    const companyId = req.user.company_id;
+
+    console.log('💾 Saving answer:', {
+      question_id,
+      is_followup,
+      answer_length: answer_text.length,
+      user: req.user.email
+    });
+
+    // Save the answer
+    const existingProgress = await db.collection('user_progress').findOne({
+      user_id: userId,
+      company_id: companyId,
+      question_id: parseInt(question_id),
+      is_followup: is_followup,
+      followup_parent_id: followup_parent_id
+    });
+
+    let progressId;
+    if (existingProgress) {
+      // Update existing answer
+      await db.collection('user_progress').updateOne(
+        { _id: existingProgress._id },
+        {
+          $set: {
+            answer_text: answer_text.trim(),
+            answered_at: new Date(),
+            attempt_count: (existingProgress.attempt_count || 1) + 1
+          }
+        }
+      );
+      progressId = existingProgress._id;
+      console.log('📝 Updated existing answer');
+    } else {
+      // Create new progress entry
+      const result = await db.collection('user_progress').insertOne({
+        user_id: userId,
+        company_id: companyId,
+        question_id: parseInt(question_id),
+        question_text: question_text,
+        answer_text: answer_text.trim(),
+        is_followup: is_followup,
+        followup_parent_id: followup_parent_id,
+        attempt_count: 1,
+        answered_at: new Date()
+      });
+      progressId = result.insertedId;
+      console.log('✨ Created new answer');
+    }
+
+    // Return success without ML validation (frontend will handle ML API call)
+    res.status(200).send({
+      message: 'Answer saved successfully',
+      question_id: parseInt(question_id),
+      is_followup: is_followup,
+      is_update: !!existingProgress,
+      progress_id: progressId
+    });
+
+  } catch (error) {
+    console.error('Save answer error:', error);
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
 
-// Get User's Assigned Questions
+// Save Chat Message (simplified)
+app.post('/api/user/save-chat-message', authenticateToken, async (req, res) => {
+  try {
+    const { message_type, message_text, question_id = null, metadata = {} } = req.body;
+
+    if (!message_type || !message_text) {
+      return res.status(400).send({ message: 'Message type and text are required' });
+    }
+
+    const userId = new ObjectId(req.user._id);
+    const companyId = req.user.company_id;
+
+    await db.collection('user_chat_history').insertOne({
+      user_id: userId,
+      company_id: companyId,
+      message_type: message_type, // 'user', 'bot', 'system'
+      message_text: message_text,
+      question_id: question_id ? parseInt(question_id) : null,
+      timestamp: new Date(),
+      metadata: metadata
+    });
+
+    res.status(200).send({ message: 'Chat message saved successfully' });
+
+  } catch (error) {
+    console.error('Save chat message error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get Complete Conversation History (including followups)
+app.get('/api/user/conversation-history', authenticateToken, async (req, res) => {
+  try {
+    if (!canViewQuestions(req.user.role)) {
+      return res.status(403).send({ message: 'You do not have permission to view conversation history' });
+    }
+
+    const userId = new ObjectId(req.user._id);
+    const companyId = req.user.company_id;
+
+    // Get all progress entries (main answers + followups)
+    const allProgress = await db.collection('user_progress').find({
+      user_id: userId,
+      company_id: companyId
+    }).sort({ answered_at: 1 }).toArray();
+
+    // Get chat history
+    const chatHistory = await db.collection('user_chat_history').find({
+      user_id: userId,
+      company_id: companyId
+    }).sort({ timestamp: 1 }).toArray();
+
+    // Organize progress by question with followups
+    const conversationMap = {};
+    
+    allProgress.forEach(progress => {
+      const key = progress.question_id;
+      
+      if (!conversationMap[key]) {
+        conversationMap[key] = {
+          question_id: progress.question_id,
+          question_text: progress.question_text,
+          main_answer: null,
+          followup_answers: [],
+          answered_at: progress.answered_at
+        };
+      }
+      
+      if (progress.is_followup) {
+        conversationMap[key].followup_answers.push({
+          answer_text: progress.answer_text,
+          answered_at: progress.answered_at,
+          attempt_count: progress.attempt_count,
+          followup_parent_id: progress.followup_parent_id
+        });
+      } else {
+        conversationMap[key].main_answer = {
+          answer_text: progress.answer_text,
+          answered_at: progress.answered_at,
+          attempt_count: progress.attempt_count
+        };
+      }
+    });
+
+    // Convert to sorted array
+    const conversationHistory = Object.values(conversationMap)
+      .sort((a, b) => a.question_id - b.question_id);
+
+    res.status(200).send({
+      conversation_history: conversationHistory,
+      chat_messages: chatHistory,
+      total_questions_answered: conversationHistory.length,
+      total_followup_answers: allProgress.filter(p => p.is_followup).length
+    });
+
+  } catch (error) {
+    console.error('Get conversation history error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// Get User Questions (from existing code)
 app.get('/api/user/questions', authenticateToken, async (req, res) => {
   try {
     if (!canViewQuestions(req.user.role)) {
@@ -983,622 +932,25 @@ app.get('/api/user/questions', authenticateToken, async (req, res) => {
   }
 });
 
-// ===============================
-// CHAT CONVERSATION MANAGEMENT
-// ===============================
-
-// Save Chat Message
-app.post('/api/chat/save-message', authenticateToken, async (req, res) => {
-  try {
-    const { session_id, message_type, message_text, question_id, phase, metadata = {} } = req.body;
-
-    if (!session_id || !message_type || !message_text) {
-      return res.status(400).send({ message: 'Session ID, message type, and message text are required' });
-    }
-
-    // Find session
-    const session = await db.collection('user_sessions').findOne({
-      session_id: session_id,
-      user_id: new ObjectId(req.user._id),
-      status: 'active'
-    });
-
-    if (!session) {
-      return res.status(404).send({ message: 'Active session not found' });
-    }
-
-    const chatMessage = {
-      session_id: session._id,
-      user_id: new ObjectId(req.user._id),
-      message_type, // 'user', 'bot', 'system'
-      message_text,
-      question_id: question_id || null,
-      phase: phase || null,
-      metadata,
-      timestamp: new Date(),
-      is_followup: metadata.isFollowUp || false,
-      is_phase_validation: metadata.isPhaseValidation || false
-    };
-
-    const result = await db.collection('chat_conversations').insertOne(chatMessage);
-
-    res.status(201).send({
-      message: 'Chat message saved successfully',
-      chat_message: { ...chatMessage, _id: result.insertedId }
-    });
-  } catch (error) {
-    console.error('Save chat message error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Get Chat History
-app.get('/api/chat/history/:sessionId', authenticateToken, async (req, res) => {
-  try {
-    const sessionId = req.params.sessionId;
-
-    // Find session
-    const session = await db.collection('user_sessions').findOne({
-      session_id: sessionId,
-      user_id: new ObjectId(req.user._id)
-    });
-
-    if (!session) {
-      return res.status(404).send({ message: 'Session not found' });
-    }
-
-    const chatHistory = await db.collection('chat_conversations')
-      .find({ session_id: session._id })
-      .sort({ timestamp: 1 })
-      .toArray();
-
-    res.status(200).send({
-      session_info: {
-        session_id: session.session_id,
-        current_phase: session.current_phase,
-        status: session.status
-      },
-      chat_history: chatHistory,
-      total_messages: chatHistory.length
-    });
-  } catch (error) {
-    console.error('Get chat history error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===============================
-// ANSWER SUBMISSION & VALIDATION
-// ===============================
-
-// Submit Answer
-app.post('/api/user/submit-answer', authenticateToken, async (req, res) => {
+// Clear User Progress (optional - for starting fresh)
+app.delete('/api/user/clear-progress', authenticateToken, async (req, res) => {
   try {
     if (!canAnswerQuestions(req.user.role)) {
-      return res.status(403).send({ message: 'You do not have permission to submit answers' });
+      return res.status(403).send({ message: 'You do not have permission to clear progress' });
     }
 
-    const { session_id, question_id, answer_text } = req.body;
+    const userId = new ObjectId(req.user._id);
+    const companyId = req.user.company_id;
 
-    if (!session_id || !question_id || !answer_text) {
-      return res.status(400).send({ message: 'Session ID, question ID, and answer text are required' });
-    }
-
-    // Find session
-    let sessionFilter = { status: 'active' };
-
-    if (req.user.role.role_name === 'super_admin') {
-      sessionFilter.session_id = session_id;
-    } else if (req.user.role.role_name === 'company_admin') {
-      sessionFilter = {
-        session_id: session_id,
-        company_id: req.user.company_id,
-        status: 'active'
-      };
-    } else {
-      sessionFilter = {
-        session_id: session_id,
-        user_id: new ObjectId(req.user._id),
-        status: 'active'
-      };
-    }
-
-    const session = await db.collection('user_sessions').findOne(sessionFilter);
-
-    if (!session) {
-      return res.status(404).send({ message: 'Active session not found or access denied' });
-    }
-
-    // Find the question
-    let companyQuestion = [];
-
-    if (req.user.role.role_name === 'super_admin' && !session.company_id) {
-      const globalQuestion = await db.collection('global_questions').findOne({
-        question_id: parseInt(question_id),
-        is_active: true
-      });
-
-      if (!globalQuestion) {
-        return res.status(404).send({ message: 'Global question not found' });
-      }
-
-      companyQuestion = [{
-        _id: globalQuestion._id,
-        global_question_id: globalQuestion._id,
-        is_customized: false,
-        custom_question_text: null,
-        global_question: globalQuestion
-      }];
-    } else {
-      const targetCompanyId = session.company_id;
-
-      if (!targetCompanyId) {
-        return res.status(400).send({ message: 'No company assigned to session' });
-      }
-
-      companyQuestion = await db.collection('company_questions').aggregate([
-        { $match: { company_id: targetCompanyId, is_active: true } },
-        {
-          $lookup: {
-            from: 'global_questions',
-            localField: 'global_question_id',
-            foreignField: '_id',
-            as: 'global_question'
-          }
-        },
-        { $unwind: '$global_question' },
-        { $match: { 'global_question.question_id': parseInt(question_id) } }
-      ]).toArray();
-    }
-
-    if (companyQuestion.length === 0) {
-      return res.status(404).send({ message: 'Question not found' });
-    }
-
-    const question = companyQuestion[0];
-
-    // Check if answer already exists
-    const existingAnswer = await db.collection('user_answers').findOne({
-      session_id: session._id,
-      question_id: parseInt(question_id)
-    });
-
-    if (existingAnswer) {
-      // Update existing answer
-      await db.collection('user_answers').updateOne(
-        { _id: existingAnswer._id },
-        {
-          $set: {
-            answer_text: answer_text.trim(),
-            answered_at: new Date(),
-            attempt_count: (existingAnswer.attempt_count || 1) + 1,
-            answered_by: new ObjectId(req.user._id)
-          }
-        }
-      );
-    } else {
-      // Create new answer
-      const newAnswer = {
-        session_id: session._id,
-        user_id: session.user_id,
-        answered_by: new ObjectId(req.user._id),
-        question_id: parseInt(question_id),
-        question_text: question.is_customized ? question.custom_question_text : question.global_question.question_text,
-        answer_text: answer_text.trim(),
-        phase: question.global_question.phase,
-        attempt_count: 1,
-        answered_at: new Date(),
-        confidence_score: 0.8
-      };
-
-      await db.collection('user_answers').insertOne(newAnswer);
-    }
-
-    // Update session last activity
-    await db.collection('user_sessions').updateOne(
-      { _id: session._id },
-      { $set: { last_activity: new Date() } }
-    );
-
-    res.status(200).send({
-      message: 'Answer submitted successfully',
-      question_id: parseInt(question_id),
-      phase: question.global_question.phase,
-      submitted_by: req.user.role.role_name
-    });
-  } catch (error) {
-    console.error('Submit answer error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Complete Phase and Generate Results
-app.post('/api/user/complete-phase', authenticateToken, async (req, res) => {
-  try {
-    if (!canAnswerQuestions(req.user.role)) {
-      return res.status(403).send({ message: 'You do not have permission to complete phases' });
-    }
-
-    const { session_id, phase_name } = req.body;
-
-    if (!session_id || !phase_name) {
-      return res.status(400).send({ message: 'Session ID and phase name are required' });
-    }
-
-    // Find session
-    let sessionFilter = { status: 'active' };
-
-    if (req.user.role.role_name === 'super_admin') {
-      sessionFilter.session_id = session_id;
-    } else if (req.user.role.role_name === 'company_admin') {
-      sessionFilter = {
-        session_id: session_id,
-        company_id: req.user.company_id,
-        status: 'active'
-      };
-    } else {
-      sessionFilter = {
-        session_id: session_id,
-        user_id: new ObjectId(req.user._id),
-        status: 'active'
-      };
-    }
-
-    const session = await db.collection('user_sessions').findOne(sessionFilter);
-
-    if (!session) {
-      return res.status(404).send({ message: 'Active session not found or access denied' });
-    }
-
-    // Get all answers for this phase
-    const phaseAnswers = await db.collection('user_answers').aggregate([
-      { $match: { session_id: session._id, phase: phase_name } },
-      {
-        $lookup: {
-          from: 'global_questions',
-          localField: 'question_id',
-          foreignField: 'question_id',
-          as: 'question_info'
-        }
-      },
-      { $unwind: { path: '$question_info', preserveNullAndEmptyArrays: true } }
-    ]).toArray();
-
-    if (phaseAnswers.length === 0) {
-      return res.status(400).send({ message: 'No answers found for this phase' });
-    }
-
-    // Generate phase results
-    const resultData = {
-      phase: phase_name,
-      total_questions: phaseAnswers.length,
-      answers_summary: phaseAnswers.map(answer => ({
-        question_id: answer.question_id,
-        question: answer.question_text,
-        answer: answer.answer_text.substring(0, 100) + '...',
-        confidence: answer.confidence_score
-      })),
-      completion_percentage: 100,
-      insights: `Phase ${phase_name} completed with ${phaseAnswers.length} questions answered.`,
-      completed_by: req.user.role.role_name
-    };
-
-    // Save phase results
-    const phaseResult = {
-      session_id: session._id,
-      user_id: session.user_id,
-      completed_by: new ObjectId(req.user._id),
-      phase_name,
-      result_type: 'phase_completion',
-      result_data: resultData,
-      analysis_output: {
-        summary: `User completed ${phase_name} phase successfully`,
-        recommendations: ['Continue to next phase', 'Review answers if needed']
-      },
-      generated_at: new Date(),
-      quality_score: 85,
-      status: 'completed'
-    };
-
-    await db.collection('phase_results').insertOne(phaseResult);
-
-    // Update session current phase
-    await db.collection('user_sessions').updateOne(
-      { _id: session._id },
-      {
-        $set: {
-          current_phase: phase_name,
-          last_activity: new Date()
-        }
-      }
-    );
-
-    res.status(200).send({
-      message: `Phase ${phase_name} completed successfully`,
-      results: resultData,
-      next_phase: getNextPhase(phase_name),
-      completed_by: req.user.role.role_name
-    });
-  } catch (error) {
-    console.error('Complete phase error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Helper function to determine next phase
-function getNextPhase(currentPhase) {
-  const phaseOrder = ['initial', 'essential', 'good', 'excellent'];
-  const currentIndex = phaseOrder.indexOf(currentPhase);
-  return currentIndex < phaseOrder.length - 1 ? phaseOrder[currentIndex + 1] : 'completed';
-}
-
-// ===============================
-// ADMIN REPORTING & MONITORING
-// ===============================
-
-// Get User Sessions (Admin view)
-app.get('/api/admin/sessions', authenticateToken, requireCompanyAdmin, async (req, res) => {
-  try {
-    const companyId = req.user.role.role_name === 'company_admin'
-      ? req.user.company_id
-      : req.query.company_id ? new ObjectId(req.query.company_id) : null;
-
-    let filter = {};
-    if (companyId) {
-      filter.company_id = companyId;
-    }
-
-    const sessions = await db.collection('user_sessions').aggregate([
-      { $match: filter },
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'user_id',
-          foreignField: '_id',
-          as: 'user'
-        }
-      },
-      { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
-      {
-        $lookup: {
-          from: 'companies',
-          localField: 'company_id',
-          foreignField: '_id',
-          as: 'company'
-        }
-      },
-      { $unwind: { path: '$company', preserveNullAndEmptyArrays: true } },
-      {
-        $project: {
-          session_id: 1,
-          status: 1,
-          current_phase: 1,
-          started_at: 1,
-          completed_at: 1,
-          last_activity: 1,
-          user_role: 1,
-          user_name: '$user.name',
-          user_email: '$user.email',
-          company_name: '$company.company_name'
-        }
-      },
-      { $sort: { started_at: -1 } }
-    ]).toArray();
-
-    res.status(200).send({
-      sessions,
-      total: sessions.length
-    });
-  } catch (error) {
-    console.error('Get admin sessions error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Get User Data (Admin view)
-app.get('/api/admin/user-data/:userId', authenticateToken, requireCompanyAdmin, async (req, res) => {
-  try {
-    const userId = req.params.userId;
-
-    if (!ObjectId.isValid(userId)) {
-      return res.status(400).send({ message: 'Invalid user ID' });
-    }
-
-    // For company admin, ensure user belongs to their company
-    let userFilter = { _id: new ObjectId(userId) };
-    if (req.user.role.role_name === 'company_admin') {
-      userFilter.company_id = req.user.company_id;
-    }
-
-    const user = await db.collection('users').findOne(userFilter);
-    if (!user) {
-      return res.status(404).send({ message: 'User not found or access denied' });
-    }
-
-    // Get user sessions
-    const sessions = await db.collection('user_sessions').find({
-      user_id: new ObjectId(userId)
-    }).sort({ started_at: -1 }).toArray();
-
-    // Get user answers for latest session
-    let userAnswers = [];
-    let phaseResults = [];
-    let chatHistory = [];
-
-    if (sessions.length > 0) {
-      const latestSession = sessions[0];
-
-      userAnswers = await db.collection('user_answers').find({
-        session_id: latestSession._id
-      }).sort({ answered_at: 1 }).toArray();
-
-      phaseResults = await db.collection('phase_results').find({
-        session_id: latestSession._id
-      }).sort({ generated_at: -1 }).toArray();
-
-      chatHistory = await db.collection('chat_conversations').find({
-        session_id: latestSession._id
-      }).sort({ timestamp: 1 }).toArray();
-    }
-
-    res.status(200).send({
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        created_at: user.created_at,
-        last_login: user.last_login
-      },
-      sessions,
-      answers: userAnswers,
-      phase_results: phaseResults,
-      chat_history: chatHistory,
-      summary: {
-        total_sessions: sessions.length,
-        total_answers: userAnswers.length,
-        completed_phases: phaseResults.length,
-        latest_activity: sessions.length > 0 ? sessions[0].last_activity : null
-      }
-    });
-  } catch (error) {
-    console.error('Get user data error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Get Company Summary (for Company Admin)
-app.get('/api/admin/company-summary', authenticateToken, requireCompanyAdmin, async (req, res) => {
-  try {
-    const companyId = req.user.role.role_name === 'company_admin'
-      ? req.user.company_id
-      : new ObjectId(req.query.company_id);
-
-    if (!companyId) {
-      return res.status(400).send({ message: 'Company ID required' });
-    }
-
-    const [
-      company,
-      totalUsers,
-      activeUsers,
-      totalSessions,
-      activeSessions,
-      totalAnswers,
-      totalPhaseResults,
-      recentActivity
-    ] = await Promise.all([
-      db.collection('companies').findOne({ _id: companyId }),
-      db.collection('users').countDocuments({ company_id: companyId }),
-      db.collection('users').countDocuments({ company_id: companyId, status: 'active' }),
-      db.collection('user_sessions').countDocuments({ company_id: companyId }),
-      db.collection('user_sessions').countDocuments({ company_id: companyId, status: 'active' }),
-      db.collection('user_answers').countDocuments({
-        user_id: { $in: await db.collection('users').distinct('_id', { company_id: companyId }) }
-      }),
-      db.collection('phase_results').countDocuments({
-        user_id: { $in: await db.collection('users').distinct('_id', { company_id: companyId }) }
-      }),
-      db.collection('users').find({ company_id: companyId })
-        .sort({ last_login: -1 })
-        .limit(5)
-        .project({ name: 1, email: 1, last_login: 1 })
-        .toArray()
+    await Promise.all([
+      db.collection('user_progress').deleteMany({ user_id: userId, company_id: companyId }),
+      db.collection('user_chat_history').deleteMany({ user_id: userId, company_id: companyId })
     ]);
 
-    res.status(200).send({
-      company: {
-        id: company._id,
-        name: company.company_name,
-        industry: company.industry,
-        size: company.size
-      },
-      statistics: {
-        users: { total: totalUsers, active: activeUsers },
-        sessions: { total: totalSessions, active: activeSessions },
-        engagement: {
-          total_answers: totalAnswers,
-          phase_results: totalPhaseResults,
-          avg_answers_per_user: totalUsers > 0 ? Math.round(totalAnswers / totalUsers) : 0
-        }
-      },
-      recent_activity: recentActivity
-    });
+    res.status(200).send({ message: 'Progress cleared successfully' });
+
   } catch (error) {
-    console.error('Get company summary error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===============================
-// SUPER ADMIN - SYSTEM OVERVIEW
-// ===============================
-
-// Get System Overview
-app.get('/api/super-admin/system-overview', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const [
-      totalCompanies,
-      activeCompanies,
-      totalUsers,
-      activeUsers,
-      totalGlobalQuestions,
-      totalSessions,
-      totalAnswers,
-      totalPhaseResults,
-      companyBreakdown
-    ] = await Promise.all([
-      db.collection('companies').countDocuments({}),
-      db.collection('companies').countDocuments({ status: 'active' }),
-      db.collection('users').countDocuments({}),
-      db.collection('users').countDocuments({ status: 'active' }),
-      db.collection('global_questions').countDocuments({ is_active: true }),
-      db.collection('user_sessions').countDocuments({}),
-      db.collection('user_answers').countDocuments({}),
-      db.collection('phase_results').countDocuments({}),
-      db.collection('companies').aggregate([
-        {
-          $lookup: {
-            from: 'users',
-            localField: '_id',
-            foreignField: 'company_id',
-            as: 'users'
-          }
-        },
-        {
-          $project: {
-            company_name: 1,
-            status: 1,
-            user_count: { $size: '$users' },
-            active_user_count: {
-              $size: {
-                $filter: {
-                  input: '$users',
-                  cond: { $eq: ['$this.status', 'active'] }
-                }
-              }
-            }
-          }
-        }
-      ]).toArray()
-    ]);
-
-    res.status(200).send({
-      system_statistics: {
-        companies: { total: totalCompanies, active: activeCompanies },
-        users: { total: totalUsers, active: activeUsers },
-        content: { global_questions: totalGlobalQuestions },
-        engagement: {
-          total_sessions: totalSessions,
-          total_answers: totalAnswers,
-          phase_results: totalPhaseResults,
-          avg_answers_per_user: totalUsers > 0 ? Math.round(totalAnswers / totalUsers) : 0
-        }
-      },
-      company_breakdown: companyBreakdown,
-      generated_at: new Date()
-    });
-  } catch (error) {
-    console.error('Get system overview error:', error);
+    console.error('Clear progress error:', error);
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
@@ -1611,20 +963,25 @@ app.get('/health', async (req, res) => {
   try {
     const dbStatus = db ? 'Connected' : 'Disconnected';
 
-    const [companies, users, questions, sessions] = await Promise.all([
+    const [companies, users, questions, progressEntries] = await Promise.all([
       db ? db.collection('companies').estimatedDocumentCount() : 0,
       db ? db.collection('users').estimatedDocumentCount() : 0,
       db ? db.collection('global_questions').estimatedDocumentCount() : 0,
-      db ? db.collection('user_sessions').estimatedDocumentCount() : 0
+      db ? db.collection('user_progress').estimatedDocumentCount() : 0
     ]);
 
     res.status(200).send({
-      message: 'Multi-Tenant Traxxia API is running 🚀',
+      message: 'Simplified Traxxia API is running 🚀',
       timestamp: new Date().toISOString(),
       database: dbStatus,
-      statistics: { companies, users, global_questions: questions, sessions },
-      architecture: 'Multi-tenant with company isolation',
-      roles: ['super_admin', 'company_admin', 'viewer_user', 'answerer_user']
+      statistics: { 
+        companies, 
+        users, 
+        global_questions: questions, 
+        user_progress: progressEntries 
+      },
+      architecture: 'Simplified progress tracking with ML validation',
+      features: ['ML-powered followup questions', 'Complete audit trail', 'Seamless resume']
     });
   } catch (error) {
     res.status(500).send({
@@ -1636,18 +993,363 @@ app.get('/health', async (req, res) => {
 });
 
 // ===============================
+// SUPER ADMIN - COMPANY MANAGEMENT
+// ===============================
+
+// Create Company
+app.post('/api/super-admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { company_name, industry, size, admin_name, admin_email, admin_password } = req.body;
+
+    if (!company_name || !admin_name || !admin_email || !admin_password) {
+      return res.status(400).send({ message: 'Company name and admin details are required' });
+    }
+
+    const existingUser = await db.collection('users').findOne({ email: admin_email });
+    if (existingUser) {
+      return res.status(400).send({ message: 'Admin email already exists' });
+    }
+
+    const companyAdminRole = await db.collection('roles').findOne({ role_name: 'company_admin' });
+
+    const newCompany = {
+      company_name,
+      industry: industry || '',
+      size: size || '',
+      status: 'active',
+      created_at: new Date()
+    };
+
+    const companyResult = await db.collection('companies').insertOne(newCompany);
+
+    const hashedPassword = await bcrypt.hash(admin_password, 12);
+    const newAdmin = {
+      name: admin_name,
+      email: admin_email,
+      password: hashedPassword,
+      role_id: companyAdminRole._id,
+      company_id: companyResult.insertedId,
+      status: 'active',
+      profile: { job_title: 'Company Administrator' },
+      created_at: new Date(),
+      last_login: null
+    };
+
+    const adminResult = await db.collection('users').insertOne(newAdmin);
+
+    await db.collection('companies').updateOne(
+      { _id: companyResult.insertedId },
+      { $set: { admin_user_id: adminResult.insertedId } }
+    );
+
+    // Auto-assign all global questions to this company
+    const globalQuestions = await db.collection('global_questions').find({ is_active: true }).toArray();
+    const companyQuestions = globalQuestions.map(gq => ({
+      company_id: companyResult.insertedId,
+      global_question_id: gq._id,
+      custom_question_text: null,
+      is_customized: false,
+      is_active: true,
+      assigned_at: new Date(),
+      assigned_by: new ObjectId(req.user._id)
+    }));
+
+    if (companyQuestions.length > 0) {
+      await db.collection('company_questions').insertMany(companyQuestions);
+    }
+
+    res.status(201).send({
+      message: 'Company and admin created successfully',
+      company: {
+        id: companyResult.insertedId,
+        company_name,
+        admin_email
+      },
+      questions_assigned: companyQuestions.length
+    });
+  } catch (error) {
+    console.error('Create company error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// List All Companies
+app.get('/api/super-admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const companies = await db.collection('companies').aggregate([
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'admin_user_id',
+          foreignField: '_id',
+          as: 'admin_user'
+        }
+      },
+      {
+        $unwind: { path: '$admin_user', preserveNullAndEmptyArrays: true }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: 'company_id',
+          as: 'users'
+        }
+      },
+      {
+        $project: {
+          company_name: 1,
+          industry: 1,
+          size: 1,
+          status: 1,
+          created_at: 1,
+          admin_name: '$admin_user.name',
+          admin_email: '$admin_user.email',
+          total_users: { $size: '$users' },
+          active_users: {
+            $size: {
+              $filter: {
+                input: '$users',
+                cond: { $eq: ['$this.status', 'active'] }
+              }
+            }
+          }
+        }
+      }
+    ]).toArray();
+
+    res.status(200).send({
+      companies,
+      total: companies.length
+    });
+  } catch (error) {
+    console.error('Get companies error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===============================
+// SUPER ADMIN - GLOBAL QUESTIONS MANAGEMENT
+// ===============================
+
+// Create Global Question
+app.post('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { question_id, question_text, phase, severity, order } = req.body;
+
+    if (!question_id || !question_text || !phase || !severity) {
+      return res.status(400).send({ message: 'Question ID, text, phase, and severity are required' });
+    }
+
+    const existingQuestion = await db.collection('global_questions').findOne({ question_id });
+    if (existingQuestion) {
+      return res.status(400).send({ message: 'Question ID already exists' });
+    }
+
+    const newQuestion = {
+      question_id,
+      question_text,
+      phase,
+      severity,
+      order: order || 999,
+      is_active: true,
+      created_at: new Date()
+    };
+
+    const result = await db.collection('global_questions').insertOne(newQuestion);
+
+    // Auto-assign to all active companies
+    const activeCompanies = await db.collection('companies').find({ status: 'active' }).toArray();
+    const companyAssignments = activeCompanies.map(company => ({
+      company_id: company._id,
+      global_question_id: result.insertedId,
+      custom_question_text: null,
+      is_customized: false,
+      is_active: true,
+      assigned_at: new Date(),
+      assigned_by: new ObjectId(req.user._id)
+    }));
+
+    if (companyAssignments.length > 0) {
+      await db.collection('company_questions').insertMany(companyAssignments);
+    }
+
+    res.status(201).send({
+      message: 'Global question created and assigned to all companies',
+      question: { ...newQuestion, _id: result.insertedId },
+      assigned_to_companies: companyAssignments.length
+    });
+  } catch (error) {
+    console.error('Create global question error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// List Global Questions
+app.get('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const questions = await db.collection('global_questions')
+      .find({})
+      .sort({ order: 1, question_id: 1 })
+      .toArray();
+
+    const questionsWithStats = await Promise.all(
+      questions.map(async (question) => {
+        const assignmentCount = await db.collection('company_questions').countDocuments({
+          global_question_id: question._id
+        });
+        return { ...question, assigned_to_companies: assignmentCount };
+      })
+    );
+
+    res.status(200).send({
+      questions: questionsWithStats,
+      total: questions.length
+    });
+  } catch (error) {
+    console.error('Get global questions error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===============================
+// COMPANY ADMIN - USER MANAGEMENT
+// ===============================
+
+// Create Company User
+app.post('/api/company-admin/users', authenticateToken, requireCompanyAdmin, async (req, res) => {
+  try {
+    const { name, email, password, role_name, profile = {} } = req.body;
+
+    if (!name || !email || !password || !role_name) {
+      return res.status(400).send({ message: 'Name, email, password, and role are required' });
+    }
+
+    const existingUser = await db.collection('users').findOne({ email });
+    if (existingUser) {
+      return res.status(400).send({ message: 'Email already exists' });
+    }
+
+    const role = await db.collection('roles').findOne({ role_name });
+    if (!role || !['viewer_user', 'answerer_user'].includes(role_name)) {
+      return res.status(400).send({ message: 'Invalid role. Use viewer_user or answerer_user' });
+    }
+
+    const targetCompanyId = req.user.role.role_name === 'super_admin'
+      ? new ObjectId(req.body.company_id)
+      : req.user.company_id;
+
+    if (!targetCompanyId) {
+      return res.status(400).send({ message: 'Company ID required' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    const newUser = {
+      name,
+      email,
+      password: hashedPassword,
+      role_id: role._id,
+      company_id: targetCompanyId,
+      status: 'active',
+      profile,
+      created_at: new Date(),
+      last_login: null
+    };
+
+    const result = await db.collection('users').insertOne(newUser);
+
+    res.status(201).send({
+      message: 'User created successfully',
+      user: {
+        id: result.insertedId,
+        name,
+        email,
+        role: role_name
+      }
+    });
+  } catch (error) {
+    console.error('Create user error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+app.get('/api/roles', authenticateToken, async (req, res) => {
+  try {
+    // Optional: you can restrict access based on user role here
+    const role = req.user.role.role_name;
+    if (role !== 'super_admin' && role !== 'company_admin') {
+      return res.status(403).send({ message: 'Access denied. Only super_admin or company_admin allowed.' });
+    }
+
+    const roles = await db.collection('roles').find().toArray();
+
+    // Format roles if needed
+    const formattedRoles = roles.map(r => ({
+      id: r._id,
+      role_name: r.role_name,
+      description: r.description || '',
+      created_at: r.created_at
+    }));
+
+    res.status(200).send({ roles: formattedRoles });
+  } catch (error) {
+    console.error('Fetch roles error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+
+app.get('/api/admin/users', authenticateToken, async (req, res) => {
+  try {
+    const role = req.user.role.role_name;
+
+    let query = {};
+
+    if (role === 'company_admin') {
+      query.company_id = req.user.company_id;
+    } else if (role !== 'super_admin') {
+      return res.status(403).send({ message: 'Access denied. Only super_admin or company_admin allowed.' });
+    }
+
+    const users = await db.collection('users').find(query).toArray();
+
+    const roleMap = await db.collection('roles').find().toArray();
+    const roleLookup = roleMap.reduce((acc, r) => {
+      acc[r._id.toString()] = r.role_name;
+      return acc;
+    }, {});
+
+    const formattedUsers = users.map(user => ({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: roleLookup[user.role_id?.toString()] || 'unknown',
+      status: user.status,
+      company_id: user.company_id,
+      profile: user.profile,
+      created_at: user.created_at,
+      last_login: user.last_login
+    }));
+
+    res.status(200).send({ users: formattedUsers });
+  } catch (error) {
+    console.error('Fetch users error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+
+// ===============================
 // START SERVER
 // ===============================
 
 connectToMongoDB().then(() => {
   app.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 Multi-Tenant Traxxia API Server running on port ${port}`);
-    console.log(`🏢 Architecture: Company-based multi-tenancy`);
-    console.log(`👑 Super Admin Setup: Available`);
-    console.log(`🔧 Company Management: Enabled`);
-    console.log(`📋 Question System: Global + Company Customization`);
-    console.log(`💬 Chat System: Conversation history enabled`);
-    console.log(`👥 User Management: Role-based access control`);
+    console.log(`🚀 Simplified Traxxia API Server running on port ${port}`); 
+    console.log(`📊 Features: Progress tracking with ML validation`);
+    console.log(`💬 Audit Trail: Complete Q&A with followups`);
+    console.log(`🔄 Resume: Seamless user experience`);
   });
 }).catch(err => {
   console.error('Failed to start server:', err);
