@@ -1132,26 +1132,25 @@ app.get('/api/super-admin/companies', authenticateToken, requireSuperAdmin, asyn
 // SUPER ADMIN - GLOBAL QUESTIONS MANAGEMENT
 // ===============================
 
-// Create Global Question
+ // Replace the existing Create Global Question endpoint
 app.post('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
-    const { question_id, question_text, phase, severity, order } = req.body;
+    const { question_text, phase, severity } = req.body;
 
-    if (!question_id || !question_text || !phase || !severity) {
-      return res.status(400).send({ message: 'Question ID, text, phase, and severity are required' });
+    if (!question_text || !phase || !severity) {
+      return res.status(400).send({ message: 'Question text, phase, and severity are required' });
     }
 
-    const existingQuestion = await db.collection('global_questions').findOne({ question_id });
-    if (existingQuestion) {
-      return res.status(400).send({ message: 'Question ID already exists' });
-    }
+    // Auto-generate question_id and order
+    const question_id = await getNextQuestionId();
+    const order = await getNextOrderInPhase(phase);
 
     const newQuestion = {
       question_id,
       question_text,
       phase,
       severity,
-      order: order || 999,
+      order,
       is_active: true,
       created_at: new Date()
     };
@@ -1185,12 +1184,50 @@ app.post('/api/super-admin/global-questions', authenticateToken, requireSuperAdm
   }
 });
 
-// List Global Questions
+// Add new endpoint for updating question order within a phase
+app.put('/api/super-admin/global-questions/reorder', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { phase, questionOrders } = req.body;
+
+    if (!phase || !Array.isArray(questionOrders)) {
+      return res.status(400).send({ message: 'Phase and question orders array are required' });
+    }
+
+    // Validate all questions belong to the specified phase
+    const questionIds = questionOrders.map(q => new ObjectId(q.id));
+    const questions = await db.collection('global_questions').find({
+      _id: { $in: questionIds },
+      phase: phase
+    }).toArray();
+
+    if (questions.length !== questionOrders.length) {
+      return res.status(400).send({ message: 'Some questions do not belong to the specified phase' });
+    }
+
+    // Update orders using bulk operations
+    const bulkOps = questionOrders.map((item, index) => ({
+      updateOne: {
+        filter: { _id: new ObjectId(item.id) },
+        update: { $set: { order: index + 1 } }
+      }
+    }));
+
+    await db.collection('global_questions').bulkWrite(bulkOps);
+
+    res.status(200).send({
+      message: `Successfully reordered ${questionOrders.length} questions in ${phase} phase`
+    });
+
+  } catch (error) {
+    console.error('Reorder questions error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
 app.get('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
     const questions = await db.collection('global_questions')
       .find({})
-      .sort({ order: 1, question_id: 1 })
+      .sort({ phase: 1, order: 1, question_id: 1 })
       .toArray();
 
     const questionsWithStats = await Promise.all(
@@ -1202,8 +1239,18 @@ app.get('/api/super-admin/global-questions', authenticateToken, requireSuperAdmi
       })
     );
 
+    // Group questions by phase
+    const questionsByPhase = questionsWithStats.reduce((acc, question) => {
+      if (!acc[question.phase]) {
+        acc[question.phase] = [];
+      }
+      acc[question.phase].push(question);
+      return acc;
+    }, {});
+
     res.status(200).send({
       questions: questionsWithStats,
+      questionsByPhase,
       total: questions.length
     });
   } catch (error) {
@@ -1211,6 +1258,7 @@ app.get('/api/super-admin/global-questions', authenticateToken, requireSuperAdmi
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
+ 
 
 // ===============================
 // COMPANY ADMIN - USER MANAGEMENT
