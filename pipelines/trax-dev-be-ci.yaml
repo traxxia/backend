@@ -11,7 +11,8 @@ variables:
   MINOR: 0        # Increment manually for minor features
   PATCH: $[counter(format('{0}.{1}', variables['MAJOR'], variables['MINOR']), 0)]
 
-  SEMVER: $(MAJOR).$(MINOR).$(PATCH).$(Build.BuildId)
+  # SEMVER: $(MAJOR).$(MINOR).$(PATCH).$(Build.BuildId)
+  SEMVER: $(MAJOR).$(MINOR).$(PATCH)
   IMAGE_VERSION: $(SEMVER)
   IMAGE_NAME: trax_dev_backend
 
@@ -36,6 +37,7 @@ stages:
               repository: $(IMAGE_NAME)
               command: buildAndPush
               Dockerfile: 'docker/Dockerfile'
+              buildContext: '.'
               tags: |
                 latest
                 $(IMAGE_VERSION)
