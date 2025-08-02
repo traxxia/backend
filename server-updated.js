@@ -4,7 +4,6 @@ const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { MongoClient, ObjectId } = require('mongodb');
-const fetch = require('node-fetch'); // Add this for ML API calls
 require('dotenv').config();
 
 const app = express();
@@ -18,6 +17,10 @@ app.use(cors());
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_multi_tenant'; 
 let db;
 
+// ===============================
+// HELPER FUNCTIONS
+// ===============================
+
 // Permission helper functions
 const canAnswerQuestions = (userRole) => {
   return userRole.can_answer || userRole.role_name === 'super_admin' || userRole.role_name === 'company_admin';
@@ -26,6 +29,60 @@ const canAnswerQuestions = (userRole) => {
 const canViewQuestions = (userRole) => {
   return userRole.can_view || userRole.role_name === 'super_admin' || userRole.role_name === 'company_admin';
 };
+
+async function getNextOrderInPhase(phase) {
+  try {
+    const lastQuestionInPhase = await db.collection('global_questions')
+      .findOne({ phase }, { sort: { order: -1 } });
+    
+    return lastQuestionInPhase ? lastQuestionInPhase.order + 1 : 1;
+  } catch (error) {
+    console.error('Error getting next order in phase:', error);
+    const count = await db.collection('global_questions').countDocuments({ phase });
+    return count + 1;
+  }
+}
+
+async function getNextOrdersForPhases(questionsGroupedByPhase) {
+  const phaseOrders = {};
+  
+  for (const phase of Object.keys(questionsGroupedByPhase)) {
+    const lastQuestionInPhase = await db.collection('global_questions')
+      .findOne({ phase }, { sort: { order: -1 } });
+    
+    phaseOrders[phase] = lastQuestionInPhase ? lastQuestionInPhase.order : 0;
+  }
+  
+  return phaseOrders;
+}
+
+function validateQuestionData(question, index) {
+  const errors = [];
+  
+  if (!question.question_text || typeof question.question_text !== 'string' || question.question_text.trim().length === 0) {
+    errors.push(`Question ${index + 1}: question_text is required and must be a non-empty string`);
+  }
+  
+  if (!question.phase || typeof question.phase !== 'string' || question.phase.trim().length === 0) {
+    errors.push(`Question ${index + 1}: phase is required and must be a non-empty string`);
+  }
+  
+  if (!question.severity || typeof question.severity !== 'string' || question.severity.trim().length === 0) {
+    errors.push(`Question ${index + 1}: severity is required and must be a non-empty string`);
+  }
+  
+  if (question.order !== undefined) {
+    if (!Number.isInteger(question.order) || question.order < 1) {
+      errors.push(`Question ${index + 1}: order must be a positive integer if provided`);
+    }
+  }
+  
+  return errors;
+}
+
+// ===============================
+// DATABASE CONNECTION & SETUP
+// ===============================
 
 async function connectToMongoDB() {
   try {
@@ -43,23 +100,14 @@ async function connectToMongoDB() {
   }
 }
 
-// Create essential indexes for performance
 async function createEssentialIndexes() {
   try {
-    // Users indexes
     await db.collection('users').createIndex({ email: 1 }, { unique: true });
     await db.collection('users').createIndex({ role_id: 1, company_id: 1 });
-
-    // Questions indexes
-    await db.collection('global_questions').createIndex({ question_id: 1 }, { unique: true });
+    await db.collection('global_questions').createIndex({ phase: 1, order: 1 });
     await db.collection('company_questions').createIndex({ company_id: 1, global_question_id: 1 });
-
-    // Progress tracking indexes
     await db.collection('user_progress').createIndex({ user_id: 1, company_id: 1, question_id: 1, is_followup: 1 });
     await db.collection('user_progress').createIndex({ user_id: 1, company_id: 1, answered_at: 1 });
-    await db.collection('user_progress').createIndex({ followup_parent_id: 1 });
-    
-    // Chat history indexes
     await db.collection('user_chat_history').createIndex({ user_id: 1, company_id: 1, timestamp: 1 });
     await db.collection('user_chat_history').createIndex({ user_id: 1, company_id: 1, question_id: 1 });
 
@@ -69,7 +117,6 @@ async function createEssentialIndexes() {
   }
 }
 
-// Initialize system with default roles and super admin
 async function initializeSystem() {
   try {
     // Create default roles if they don't exist
@@ -148,7 +195,6 @@ async function initializeSystem() {
 // MIDDLEWARE
 // ===============================
 
-// Authentication middleware
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
@@ -169,7 +215,6 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
-// Super Admin middleware
 const requireSuperAdmin = (req, res, next) => {
   if (req.user.role.role_name !== 'super_admin') {
     return res.status(403).send({ message: 'Super Admin access required' });
@@ -177,7 +222,6 @@ const requireSuperAdmin = (req, res, next) => {
   next();
 };
 
-// Company Admin middleware
 const requireCompanyAdmin = (req, res, next) => {
   if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
     return res.status(403).send({ message: 'Admin access required' });
@@ -189,7 +233,6 @@ const requireCompanyAdmin = (req, res, next) => {
 // AUTHENTICATION APIs
 // ===============================
 
-// Login API
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -245,10 +288,45 @@ app.post('/api/login', async (req, res) => {
 });
 
 // ===============================
-// SIMPLIFIED USER PROGRESS TRACKING
+// USER PROGRESS & QUESTIONS APIs
 // ===============================
+function getQuestionOrderById(questions, questionId) {
+  const question = questions.find(q => q._id.toString() === questionId.toString());
+  return question ? question.order : null;
+}
 
-// Get User's Latest Progress and Chat History
+function getQuestionPhaseById(questions, questionId) {
+  const question = questions.find(q => q._id.toString() === questionId.toString());
+  return question ? question.phase : null;
+}
+
+function getQuestionSeverityById(questions, questionId) {
+  const question = questions.find(q => q._id.toString() === questionId.toString());
+  return question ? question.severity : null;
+}
+
+function extractBusinessName(finalAnswers) {
+  // Extract business name from the first answer
+  const firstAnswer = finalAnswers['1']?.finalAnswer || '';
+  
+  // Try to extract company name patterns
+  const namePatterns = [
+    /(?:We are|I am|Our company is|The company is)\s+([^,]+)/i,
+    /^([^,]+),/,
+    /^([^.]+)\./
+  ];
+  
+  for (const pattern of namePatterns) {
+    const match = firstAnswer.match(pattern);
+    if (match && match[1]) {
+      return match[1].trim();
+    }
+  }
+  
+  // Fallback: take first few words
+  const words = firstAnswer.split(' ').slice(0, 3);
+  return words.join(' ') || 'Unknown Company';
+}
 app.get('/api/user/latest-progress', authenticateToken, async (req, res) => {
   try {
     if (!canViewQuestions(req.user.role)) {
@@ -258,11 +336,11 @@ app.get('/api/user/latest-progress', authenticateToken, async (req, res) => {
     const userId = new ObjectId(req.user._id);
     const companyId = req.user.company_id;
 
-    // Get all user's answers/progress (only main answers, not followup)
+    // Get user progress (answers)
     const userProgress = await db.collection('user_progress').find({
       user_id: userId,
       company_id: companyId,
-      is_followup: false  // Only get main answers for userAnswers map
+      is_followup: false
     }).sort({ answered_at: 1 }).toArray();
 
     // Get chat history
@@ -271,15 +349,17 @@ app.get('/api/user/latest-progress', authenticateToken, async (req, res) => {
       company_id: companyId
     }).sort({ timestamp: 1 }).toArray();
 
-    // Get available questions for context
+    // Get available questions
     let availableQuestions = [];
     if (req.user.role.role_name === 'super_admin') {
-      // For super admin, get global questions
       availableQuestions = await db.collection('global_questions').find({
         is_active: true
-      }).sort({ order: 1, question_id: 1 }).toArray();
+      }).sort({ 
+        order: 1,  // Primary sort by order ascending
+        phase: 1, 
+        _id: 1 
+      }).toArray();
     } else {
-      // For company users, get company-specific questions
       availableQuestions = await db.collection('company_questions').aggregate([
         { $match: { company_id: companyId, is_active: true } },
         {
@@ -293,7 +373,7 @@ app.get('/api/user/latest-progress', authenticateToken, async (req, res) => {
         { $unwind: '$global_question' },
         {
           $project: {
-            question_id: '$global_question.question_id',
+            _id: '$global_question._id',
             question_text: {
               $cond: {
                 if: '$is_customized',
@@ -303,45 +383,151 @@ app.get('/api/user/latest-progress', authenticateToken, async (req, res) => {
             },
             phase: '$global_question.phase',
             severity: '$global_question.severity',
-            order: '$global_question.order'
+            order: '$global_question.order',
+            is_active: '$global_question.is_active',
+            created_at: '$global_question.created_at',
+            bulk_upload: '$global_question.bulk_upload',
+            uploaded_by: '$global_question.uploaded_by'
           }
         },
-        { $sort: { order: 1, question_id: 1 } }
+        {
+          $sort: {
+            order: 1,  // Primary sort by order ascending
+            phase: 1,
+            _id: 1
+          }
+        }
       ]).toArray();
     }
 
-    // Build user answers map from main answers only
-    const userAnswers = {};
-    userProgress.forEach(progress => {
-      userAnswers[progress.question_id] = progress.answer_text;
+    // Additional defensive sort to ensure proper order
+    availableQuestions.sort((a, b) => {
+      // Primary: sort by order (ascending)
+      const orderA = parseInt(a.order) || 0;
+      const orderB = parseInt(b.order) || 0;
+      if (orderA !== orderB) {
+        return orderA - orderB;
+      }
+      
+      // Secondary: sort by phase
+      const phaseOrder = ['initial', 'essential', 'good', 'excellent'];
+      const phaseA = phaseOrder.indexOf(a.phase);
+      const phaseB = phaseOrder.indexOf(b.phase);
+      if (phaseA !== phaseB) {
+        return phaseA - phaseB;
+      }
+      
+      // Tertiary: sort by _id as final tiebreaker
+      return a._id.toString().localeCompare(b._id.toString());
     });
 
-    // Find next question to ask
-    const answeredQuestionIds = Object.keys(userAnswers).map(id => parseInt(id));
-    const nextQuestion = availableQuestions.find(q => !answeredQuestionIds.includes(q.question_id));
+    // Build user answers map - question_id as string -> answer text
+    const userAnswers = {};
+    userProgress.forEach(progress => {
+      userAnswers[progress.question_id.toString()] = progress.answer_text;
+    });
+
+    // Transform chat history to match desired format
+    const transformedMessages = chatHistory.map(chat => ({
+      id: chat._id.toString(),
+      type: chat.message_type, // 'bot' or 'user'
+      text: chat.message_text,
+      timestamp: chat.timestamp,
+      questionId: chat.question_id ? getQuestionOrderById(availableQuestions, chat.question_id) : null,
+      phase: chat.metadata?.phase || 'initial',
+      severity: chat.metadata?.severity || 'mandatory',
+      isFollowUp: chat.metadata?.isFollowUp || false,
+      isPhaseValidation: chat.metadata?.isPhaseValidation || false,
+      mlValidation: {
+        validated: chat.metadata?.mlValidation?.validated || false,
+        attempt: chat.metadata?.mlValidation?.attempt || 1
+      },
+      _id: chat._id.toString()
+    }));
+
+    // Build final answers object - questionId as number -> answer details
+    const finalAnswers = {};
+    userProgress.forEach(progress => {
+      const questionOrder = getQuestionOrderById(availableQuestions, progress.question_id);
+      if (questionOrder) {
+        finalAnswers[questionOrder.toString()] = {
+          questionId: questionOrder,
+          questionText: progress.question_text,
+          finalAnswer: progress.answer_text,
+          phase: getQuestionPhaseById(availableQuestions, progress.question_id) || 'initial',
+          severity: getQuestionSeverityById(availableQuestions, progress.question_id) || 'mandatory',
+          attemptCount: progress.attempt_count || 1,
+          completedAt: progress.answered_at,
+          _id: progress._id.toString()
+        };
+      }
+    });
 
     // Calculate progress
     const totalQuestions = availableQuestions.length;
-    const answeredQuestions = answeredQuestionIds.length;
+    const answeredQuestions = Object.keys(userAnswers).length;
     const progressPercentage = totalQuestions > 0 ? Math.round((answeredQuestions / totalQuestions) * 100) : 0;
 
-    console.log('📊 Latest progress loaded:', {
-      total_questions: totalQuestions,
-      answered_questions: answeredQuestions,
-      next_question: nextQuestion?.question_id,
-      chat_messages: chatHistory.length
-    });
+    // Get mandatory questions for phase completion
+    const mandatoryQuestions = availableQuestions.filter(q => q.severity === 'mandatory');
+    const answeredMandatory = mandatoryQuestions.filter(q => 
+      userAnswers.hasOwnProperty(q._id.toString())
+    ).length;
 
+    // Determine current phase and completed phases
+    const phases = ['initial', 'essential', 'good', 'excellent'];
+    let currentPhase = 'initial';
+    const completedPhases = [];
+
+    for (const phase of phases) {
+      const phaseQuestions = availableQuestions.filter(q => q.phase === phase);
+      const phaseMandatory = phaseQuestions.filter(q => q.severity === 'mandatory');
+      const phaseAnswered = phaseMandatory.filter(q => 
+        userAnswers.hasOwnProperty(q._id.toString())
+      ).length;
+
+      if (phaseMandatory.length > 0 && phaseAnswered === phaseMandatory.length) {
+        completedPhases.push(phase);
+      } else {
+        currentPhase = phase;
+        break;
+      }
+    }
+
+    // Find next question
+    const answeredQuestionIds = Object.keys(userAnswers);
+    const nextQuestion = availableQuestions.find(q => !answeredQuestionIds.includes(q._id.toString()));
+
+    // Build business data from answers
+    const businessData = {
+      name: extractBusinessName(finalAnswers),
+      description: finalAnswers['1']?.finalAnswer || '',
+      industry: finalAnswers['2']?.finalAnswer || '',
+      targetAudience: finalAnswers['3']?.finalAnswer || '',
+      products: finalAnswers['4']?.finalAnswer || ''
+    };
+
+    // Response in desired format
     res.status(200).send({
+      messages: transformedMessages,
+      finalAnswers: finalAnswers,
+      progress: {
+        totalQuestions: totalQuestions,
+        mandatoryTotal: mandatoryQuestions.length,
+        answeredQuestions: answeredQuestions,
+        mandatoryAnswered: answeredMandatory,
+        percentage: progressPercentage,
+        currentPhase: currentPhase,
+        completedPhases: completedPhases
+      },
+      businessData: businessData,
+      lastActivity: userProgress.length > 0 ? userProgress[userProgress.length - 1].answered_at : new Date(),
+      
+      // Keep original structure for backward compatibility
       user_answers: userAnswers,
       chat_history: chatHistory,
       available_questions: availableQuestions,
       next_question: nextQuestion,
-      progress: {
-        total_questions: totalQuestions,
-        answered_questions: answeredQuestions,
-        completion_percentage: progressPercentage
-      },
       user_permissions: {
         can_view: canViewQuestions(req.user.role),
         can_answer: canAnswerQuestions(req.user.role),
@@ -355,459 +541,7 @@ app.get('/api/user/latest-progress', authenticateToken, async (req, res) => {
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
- // Add this new API endpoint to your backend code
 
-// Get User Data with Chat History - Single comprehensive endpoint
-app.get('/api/admin/user-data/:userId', authenticateToken, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const requestingUserRole = req.user.role.role_name;
-    const requestingUserCompanyId = req.user.company_id;
-
-    // Authorization check
-    if (!['super_admin', 'company_admin'].includes(requestingUserRole)) {
-      return res.status(403).send({ message: 'Admin access required' });
-    }
-
-    // Validate userId
-    if (!ObjectId.isValid(userId)) {
-      return res.status(400).send({ message: 'Invalid user ID' });
-    }
-
-    const targetUserId = new ObjectId(userId);
-
-    // Get target user details
-    const targetUser = await db.collection('users').aggregate([
-      { $match: { _id: targetUserId } },
-      {
-        $lookup: {
-          from: 'roles',
-          localField: 'role_id',
-          foreignField: '_id',
-          as: 'role'
-        }
-      },
-      {
-        $lookup: {
-          from: 'companies',
-          localField: 'company_id',
-          foreignField: '_id',
-          as: 'company'
-        }
-      },
-      {
-        $unwind: { path: '$role', preserveNullAndEmptyArrays: true }
-      },
-      {
-        $unwind: { path: '$company', preserveNullAndEmptyArrays: true }
-      }
-    ]).toArray();
-
-    if (targetUser.length === 0) {
-      return res.status(404).send({ message: 'User not found' });
-    }
-
-    const user = targetUser[0];
-
-    // Company admin can only view users from their own company
-    if (requestingUserRole === 'company_admin') {
-      if (!user.company_id || user.company_id.toString() !== requestingUserCompanyId.toString()) {
-        return res.status(403).send({ message: 'You can only view users from your company' });
-      }
-    }
-
-    // Get user's answers/progress
-    const answers = await db.collection('user_progress').find({
-      user_id: targetUserId,
-      company_id: user.company_id
-    }).sort({ answered_at: 1 }).toArray();
-
-    // Get user's chat history
-    const chatHistory = await db.collection('user_chat_history').find({
-      user_id: targetUserId,
-      company_id: user.company_id
-    }).sort({ timestamp: 1 }).toArray();
-
-    // Get user's phase results if any
-    const phaseResults = await db.collection('phase_results').find({
-      user_id: targetUserId,
-      company_id: user.company_id
-    }).sort({ generated_at: -1 }).toArray();
-
-    // Get user's sessions
-    const sessions = await db.collection('user_sessions').find({
-      user_id: targetUserId,
-      company_id: user.company_id
-    }).sort({ started_at: -1 }).toArray();
-
-    // Calculate summary statistics
-    const totalAnswers = answers.length;
-    const mainAnswers = answers.filter(a => !a.is_followup).length;
-    const followupAnswers = answers.filter(a => a.is_followup).length;
-    const completedPhases = [...new Set(answers.map(a => a.phase))].length;
-    const totalSessions = sessions.length;
-    const activeSessions = sessions.filter(s => s.status === 'active').length;
-
-    // Group chat history by conversation/question for better organization
-    const chatByQuestion = {};
-    chatHistory.forEach(chat => {
-      const key = chat.question_id || 'general';
-      if (!chatByQuestion[key]) {
-        chatByQuestion[key] = [];
-      }
-      chatByQuestion[key].push(chat);
-    });
-
-    // Organize answers with their related chat messages
-    const answersWithChat = answers.map(answer => {
-      const relatedChat = chatByQuestion[answer.question_id] || [];
-      return {
-        ...answer,
-        related_chat_messages: relatedChat.filter(chat => 
-          Math.abs(new Date(chat.timestamp) - new Date(answer.answered_at)) < 30 * 60 * 1000 // Within 30 minutes
-        )
-      };
-    });
-
-    console.log(`📊 User data loaded for ${user.name}:`, {
-      total_answers: totalAnswers,
-      chat_messages: chatHistory.length,
-      phase_results: phaseResults.length,
-      sessions: totalSessions
-    });
-
-    res.status(200).send({
-      user_info: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role?.role_name || 'unknown',
-        company: user.company?.company_name || 'No Company',
-        status: user.status,
-        created_at: user.created_at,
-        last_login: user.last_login,
-        profile: user.profile
-      },
-      summary: {
-        total_answers: totalAnswers,
-        main_answers: mainAnswers,
-        followup_answers: followupAnswers,
-        completed_phases: completedPhases,
-        total_sessions: totalSessions,
-        active_sessions: activeSessions,
-        total_chat_messages: chatHistory.length,
-        first_activity: answers.length > 0 ? answers[0].answered_at : null,
-        last_activity: answers.length > 0 ? answers[answers.length - 1].answered_at : null
-      },
-      answers: answersWithChat,
-      chat_history: chatHistory,
-      chat_by_question: chatByQuestion,
-      phase_results: phaseResults,
-      sessions: sessions,
-      permissions: {
-        can_export: true,
-        can_view_details: true,
-        requesting_user_role: requestingUserRole
-      }
-    });
-
-  } catch (error) {
-    console.error('Get user data error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Enhanced Company Admin Users endpoint to work with the frontend
-app.get('/api/company-admin/users', authenticateToken, async (req, res) => {
-  try {
-    const requestingUserRole = req.user.role.role_name;
-    const requestingUserCompanyId = req.user.company_id;
-    const { company_id } = req.query;
-
-    // Authorization check
-    if (!['super_admin', 'company_admin'].includes(requestingUserRole)) {
-      return res.status(403).send({ message: 'Admin access required' });
-    }
-
-    let query = {};
-    let targetCompanyId = null;
-
-    if (requestingUserRole === 'super_admin') {
-      // Super admin can view all users or filter by company
-      if (company_id) {
-        targetCompanyId = new ObjectId(company_id);
-        query.company_id = targetCompanyId;
-      }
-      // If no company_id specified, show all users
-    } else if (requestingUserRole === 'company_admin') {
-      // Company admin can only view their own company users
-      targetCompanyId = requestingUserCompanyId;
-      query.company_id = targetCompanyId;
-    }
-
-    // Get users with role and company information
-    const users = await db.collection('users').aggregate([
-      { $match: query },
-      {
-        $lookup: {
-          from: 'roles',
-          localField: 'role_id',
-          foreignField: '_id',
-          as: 'role'
-        }
-      },
-      {
-        $lookup: {
-          from: 'companies',
-          localField: 'company_id',
-          foreignField: '_id',
-          as: 'company'
-        }
-      },
-      {
-        $unwind: { path: '$role', preserveNullAndEmptyArrays: true }
-      },
-      {
-        $unwind: { path: '$company', preserveNullAndEmptyArrays: true }
-      },
-      {
-        $project: {
-          name: 1,
-          email: 1,
-          status: 1,
-          created_at: 1,
-          last_login: 1,
-          profile: 1,
-          role: {
-            role_name: '$role.role_name',
-            permissions: '$role.permissions'
-          },
-          company: {
-            company_name: '$company.company_name',
-            _id: '$company._id'
-          }
-        }
-      },
-      { $sort: { created_at: -1 } }
-    ]).toArray();
-
-    // Get activity summary for each user
-    const usersWithActivity = await Promise.all(
-      users.map(async (user) => {
-        const [answerCount, chatCount, sessionCount] = await Promise.all([
-          db.collection('user_progress').countDocuments({ user_id: user._id }),
-          db.collection('user_chat_history').countDocuments({ user_id: user._id }),
-          db.collection('user_sessions').countDocuments({ user_id: user._id })
-        ]);
-
-        return {
-          ...user,
-          activity_summary: {
-            total_answers: answerCount,
-            total_chat_messages: chatCount,
-            total_sessions: sessionCount,
-            has_activity: answerCount > 0 || chatCount > 0
-          }
-        };
-      })
-    );
-
-    console.log(`📋 Retrieved ${usersWithActivity.length} users for ${requestingUserRole}`);
-
-    res.status(200).send({
-      users: usersWithActivity,
-      total: usersWithActivity.length,
-      filters: {
-        company_id: targetCompanyId,
-        requesting_user_role: requestingUserRole
-      }
-    });
-
-  } catch (error) {
-    console.error('Get company users error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-app.post('/api/user/save-answer', authenticateToken, async (req, res) => {
-  try {
-    if (!canAnswerQuestions(req.user.role)) {
-      return res.status(403).send({ message: 'You do not have permission to submit answers' });
-    }
-
-    const { question_id, question_text, answer_text, is_followup = false, followup_parent_id = null } = req.body;
-
-    if (!question_id || !question_text || !answer_text) {
-      return res.status(400).send({ message: 'Question ID, text, and answer are required' });
-    }
-
-    const userId = new ObjectId(req.user._id);
-    const companyId = req.user.company_id;
-
-    console.log('💾 Saving answer:', {
-      question_id,
-      is_followup,
-      answer_length: answer_text.length,
-      user: req.user.email
-    });
-
-    // Save the answer
-    const existingProgress = await db.collection('user_progress').findOne({
-      user_id: userId,
-      company_id: companyId,
-      question_id: parseInt(question_id),
-      is_followup: is_followup,
-      followup_parent_id: followup_parent_id
-    });
-
-    let progressId;
-    if (existingProgress) {
-      // Update existing answer
-      await db.collection('user_progress').updateOne(
-        { _id: existingProgress._id },
-        {
-          $set: {
-            answer_text: answer_text.trim(),
-            answered_at: new Date(),
-            attempt_count: (existingProgress.attempt_count || 1) + 1
-          }
-        }
-      );
-      progressId = existingProgress._id;
-      console.log('📝 Updated existing answer');
-    } else {
-      // Create new progress entry
-      const result = await db.collection('user_progress').insertOne({
-        user_id: userId,
-        company_id: companyId,
-        question_id: parseInt(question_id),
-        question_text: question_text,
-        answer_text: answer_text.trim(),
-        is_followup: is_followup,
-        followup_parent_id: followup_parent_id,
-        attempt_count: 1,
-        answered_at: new Date()
-      });
-      progressId = result.insertedId;
-      console.log('✨ Created new answer');
-    }
-
-    // Return success without ML validation (frontend will handle ML API call)
-    res.status(200).send({
-      message: 'Answer saved successfully',
-      question_id: parseInt(question_id),
-      is_followup: is_followup,
-      is_update: !!existingProgress,
-      progress_id: progressId
-    });
-
-  } catch (error) {
-    console.error('Save answer error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Save Chat Message (simplified)
-app.post('/api/user/save-chat-message', authenticateToken, async (req, res) => {
-  try {
-    const { message_type, message_text, question_id = null, metadata = {} } = req.body;
-
-    if (!message_type || !message_text) {
-      return res.status(400).send({ message: 'Message type and text are required' });
-    }
-
-    const userId = new ObjectId(req.user._id);
-    const companyId = req.user.company_id;
-
-    await db.collection('user_chat_history').insertOne({
-      user_id: userId,
-      company_id: companyId,
-      message_type: message_type, // 'user', 'bot', 'system'
-      message_text: message_text,
-      question_id: question_id ? parseInt(question_id) : null,
-      timestamp: new Date(),
-      metadata: metadata
-    });
-
-    res.status(200).send({ message: 'Chat message saved successfully' });
-
-  } catch (error) {
-    console.error('Save chat message error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Get Complete Conversation History (including followups)
-app.get('/api/user/conversation-history', authenticateToken, async (req, res) => {
-  try {
-    if (!canViewQuestions(req.user.role)) {
-      return res.status(403).send({ message: 'You do not have permission to view conversation history' });
-    }
-
-    const userId = new ObjectId(req.user._id);
-    const companyId = req.user.company_id;
-
-    // Get all progress entries (main answers + followups)
-    const allProgress = await db.collection('user_progress').find({
-      user_id: userId,
-      company_id: companyId
-    }).sort({ answered_at: 1 }).toArray();
-
-    // Get chat history
-    const chatHistory = await db.collection('user_chat_history').find({
-      user_id: userId,
-      company_id: companyId
-    }).sort({ timestamp: 1 }).toArray();
-
-    // Organize progress by question with followups
-    const conversationMap = {};
-    
-    allProgress.forEach(progress => {
-      const key = progress.question_id;
-      
-      if (!conversationMap[key]) {
-        conversationMap[key] = {
-          question_id: progress.question_id,
-          question_text: progress.question_text,
-          main_answer: null,
-          followup_answers: [],
-          answered_at: progress.answered_at
-        };
-      }
-      
-      if (progress.is_followup) {
-        conversationMap[key].followup_answers.push({
-          answer_text: progress.answer_text,
-          answered_at: progress.answered_at,
-          attempt_count: progress.attempt_count,
-          followup_parent_id: progress.followup_parent_id
-        });
-      } else {
-        conversationMap[key].main_answer = {
-          answer_text: progress.answer_text,
-          answered_at: progress.answered_at,
-          attempt_count: progress.attempt_count
-        };
-      }
-    });
-
-    // Convert to sorted array
-    const conversationHistory = Object.values(conversationMap)
-      .sort((a, b) => a.question_id - b.question_id);
-
-    res.status(200).send({
-      conversation_history: conversationHistory,
-      chat_messages: chatHistory,
-      total_questions_answered: conversationHistory.length,
-      total_followup_answers: allProgress.filter(p => p.is_followup).length
-    });
-
-  } catch (error) {
-    console.error('Get conversation history error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Get User Questions (from existing code)
 app.get('/api/user/questions', authenticateToken, async (req, res) => {
   try {
     if (!canViewQuestions(req.user.role)) {
@@ -840,7 +574,7 @@ app.get('/api/user/questions', authenticateToken, async (req, res) => {
           { $unwind: '$global_question' },
           {
             $project: {
-              question_id: '$global_question.question_id',
+              _id: '$global_question._id',
               question_text: {
                 $cond: {
                   if: '$is_customized',
@@ -853,24 +587,13 @@ app.get('/api/user/questions', authenticateToken, async (req, res) => {
               order: '$global_question.order'
             }
           },
-          { $sort: { order: 1, question_id: 1 } }
+          { $sort: { phase: 1, order: 1 } }
         ]).toArray();
       } else {
-        const globalQuestions = await db.collection('global_questions').aggregate([
-          { $match: { is_active: true } },
-          {
-            $project: {
-              question_id: 1,
-              question_text: 1,
-              phase: 1,
-              severity: 1,
-              order: 1
-            }
-          },
-          { $sort: { order: 1, question_id: 1 } }
-        ]).toArray();
+        questions = await db.collection('global_questions').find({
+          is_active: true
+        }).sort({ phase: 1, order: 1 }).toArray();
 
-        questions = globalQuestions;
         company = { id: 'global', name: 'Global Questions (Super Admin View)' };
       }
     } else {
@@ -895,7 +618,7 @@ app.get('/api/user/questions', authenticateToken, async (req, res) => {
         { $unwind: '$global_question' },
         {
           $project: {
-            question_id: '$global_question.question_id',
+            _id: '$global_question._id',
             question_text: {
               $cond: {
                 if: '$is_customized',
@@ -908,7 +631,7 @@ app.get('/api/user/questions', authenticateToken, async (req, res) => {
             order: '$global_question.order'
           }
         },
-        { $sort: { order: 1, question_id: 1 } }
+        { $sort: { phase: 1, order: 1 } }
       ]).toArray();
     }
 
@@ -932,7 +655,219 @@ app.get('/api/user/questions', authenticateToken, async (req, res) => {
   }
 });
 
-// Clear User Progress (optional - for starting fresh)
+app.post('/api/user/save-answer', authenticateToken, async (req, res) => {
+  try {
+    if (!canAnswerQuestions(req.user.role)) {
+      return res.status(403).send({ message: 'You do not have permission to submit answers' });
+    }
+
+    const { question_id, question_text, answer_text, is_followup = false, followup_parent_id = null } = req.body;
+
+    if (!question_id || !question_text || !answer_text) {
+      return res.status(400).send({ message: 'Question ID, text, and answer are required' });
+    }
+
+    const userId = new ObjectId(req.user._id);
+    const companyId = req.user.company_id;
+    const questionObjectId = new ObjectId(question_id);
+
+    const existingProgress = await db.collection('user_progress').findOne({
+      user_id: userId,
+      company_id: companyId,
+      question_id: questionObjectId,
+      is_followup: is_followup,
+      followup_parent_id: followup_parent_id
+    });
+
+    let progressId;
+    if (existingProgress) {
+      await db.collection('user_progress').updateOne(
+        { _id: existingProgress._id },
+        {
+          $set: {
+            answer_text: answer_text.trim(),
+            answered_at: new Date(),
+            attempt_count: (existingProgress.attempt_count || 1) + 1
+          }
+        }
+      );
+      progressId = existingProgress._id;
+    } else {
+      const result = await db.collection('user_progress').insertOne({
+        user_id: userId,
+        company_id: companyId,
+        question_id: questionObjectId,
+        question_text: question_text,
+        answer_text: answer_text.trim(),
+        is_followup: is_followup,
+        followup_parent_id: followup_parent_id,
+        attempt_count: 1,
+        answered_at: new Date()
+      });
+      progressId = result.insertedId;
+    }
+
+    res.status(200).send({
+      message: 'Answer saved successfully',
+      question_id: questionObjectId,
+      is_followup: is_followup,
+      is_update: !!existingProgress,
+      progress_id: progressId
+    });
+
+  } catch (error) {
+    console.error('Save answer error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+app.post('/api/user/save-chat-message', authenticateToken, async (req, res) => {
+  try {
+    const { message_type, message_text, question_id = null, metadata = {} } = req.body;
+
+    if (!message_type || !message_text) {
+      return res.status(400).send({ message: 'Message type and text are required' });
+    }
+
+    const userId = new ObjectId(req.user._id);
+    const companyId = req.user.company_id;
+
+    await db.collection('user_chat_history').insertOne({
+      user_id: userId,
+      company_id: companyId,
+      message_type: message_type,
+      message_text: message_text,
+      question_id: question_id ? new ObjectId(question_id) : null,
+      timestamp: new Date(),
+      metadata: metadata
+    });
+
+    res.status(200).send({ message: 'Chat message saved successfully' });
+
+  } catch (error) {
+    console.error('Save chat message error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+// ===============================
+// USER CONVERSATION HISTORY API
+// ===============================
+
+app.get('/api/user/conversation-history', authenticateToken, async (req, res) => {
+  try {
+    if (!canViewQuestions(req.user.role)) {
+      return res.status(403).send({ message: 'You do not have permission to view conversation history' });
+    }
+
+    const userId = new ObjectId(req.user._id);
+    const companyId = req.user.company_id;
+
+    // Get all progress entries (main answers + followups) with proper ObjectId handling
+    const allProgress = await db.collection('user_progress').find({
+      user_id: userId,
+      company_id: companyId
+    }).sort({ answered_at: 1 }).toArray();
+
+    // Get chat history
+    const chatHistory = await db.collection('user_chat_history').find({
+      user_id: userId,
+      company_id: companyId
+    }).sort({ timestamp: 1 }).toArray();
+
+    // Organize progress by question with followups
+    const conversationMap = {};
+        
+    allProgress.forEach(progress => {
+      const key = progress.question_id.toString(); // Convert ObjectId to string for key
+            
+      if (!conversationMap[key]) {
+        conversationMap[key] = {
+          question_id: progress.question_id,
+          question_text: progress.question_text,
+          main_answer: null,
+          followup_answers: [],
+          answered_at: progress.answered_at
+        };
+      }
+            
+      if (progress.is_followup) {
+        conversationMap[key].followup_answers.push({
+          answer_text: progress.answer_text,
+          answered_at: progress.answered_at,
+          attempt_count: progress.attempt_count || 1,
+          followup_parent_id: progress.followup_parent_id
+        });
+        
+        // Sort followup answers by answered_at
+        conversationMap[key].followup_answers.sort((a, b) => 
+          new Date(a.answered_at) - new Date(b.answered_at)
+        );
+      } else {
+        conversationMap[key].main_answer = {
+          answer_text: progress.answer_text,
+          answered_at: progress.answered_at,
+          attempt_count: progress.attempt_count || 1
+        };
+        
+        // Update the main answered_at time
+        conversationMap[key].answered_at = progress.answered_at;
+      }
+    });
+
+    // Convert to sorted array - sort by answered_at chronologically
+    const conversationHistory = Object.values(conversationMap)
+      .sort((a, b) => new Date(a.answered_at) - new Date(b.answered_at));
+
+    // Group chat history by question for easier reference
+    const chatByQuestion = {};
+    chatHistory.forEach(chat => {
+      const questionKey = chat.question_id ? chat.question_id.toString() : 'general';
+      if (!chatByQuestion[questionKey]) {
+        chatByQuestion[questionKey] = [];
+      }
+      chatByQuestion[questionKey].push(chat);
+    });
+
+    // Calculate statistics
+    const totalMainAnswers = conversationHistory.filter(conv => conv.main_answer).length;
+    const totalFollowupAnswers = allProgress.filter(p => p.is_followup).length;
+    const totalChatMessages = chatHistory.length;
+    
+    // Get first and last activity timestamps
+    const firstActivity = allProgress.length > 0 ? allProgress[0].answered_at : null;
+    const lastActivity = allProgress.length > 0 ? allProgress[allProgress.length - 1].answered_at : null;
+
+    console.log(`📚 Conversation history retrieved for user ${req.user.email}: ${totalMainAnswers} main answers, ${totalFollowupAnswers} followups`);
+
+    res.status(200).send({
+      conversation_history: conversationHistory,
+      chat_messages: chatHistory,
+      chat_by_question: chatByQuestion,
+      statistics: {
+        total_questions_answered: totalMainAnswers,
+        total_followup_answers: totalFollowupAnswers,
+        total_chat_messages: totalChatMessages,
+        total_conversations: conversationHistory.length,
+        first_activity: firstActivity,
+        last_activity: lastActivity
+      },
+      user_permissions: {
+        can_view: canViewQuestions(req.user.role),
+        can_answer: canAnswerQuestions(req.user.role),
+        can_admin: req.user.role.can_admin || req.user.role.role_name === 'super_admin',
+        role: req.user.role.role_name
+      }
+    });
+
+  } catch (error) {
+    console.error('Get conversation history error:', error);
+    res.status(500).send({ 
+      message: 'Server error', 
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
 app.delete('/api/user/clear-progress', authenticateToken, async (req, res) => {
   try {
     if (!canAnswerQuestions(req.user.role)) {
@@ -956,47 +891,577 @@ app.delete('/api/user/clear-progress', authenticateToken, async (req, res) => {
 });
 
 // ===============================
-// HEALTH CHECK
+// SUPER ADMIN - GLOBAL QUESTIONS
 // ===============================
 
-app.get('/health', async (req, res) => {
+app.get('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
-    const dbStatus = db ? 'Connected' : 'Disconnected';
+    const questions = await db.collection('global_questions')
+      .find({})
+      .sort({ phase: 1, order: 1, _id: 1 })
+      .toArray();
 
-    const [companies, users, questions, progressEntries] = await Promise.all([
-      db ? db.collection('companies').estimatedDocumentCount() : 0,
-      db ? db.collection('users').estimatedDocumentCount() : 0,
-      db ? db.collection('global_questions').estimatedDocumentCount() : 0,
-      db ? db.collection('user_progress').estimatedDocumentCount() : 0
-    ]);
+    const questionsWithStats = await Promise.all(
+      questions.map(async (question) => {
+        const assignmentCount = await db.collection('company_questions').countDocuments({
+          global_question_id: question._id
+        });
+        return { 
+          ...question,
+          assigned_to_companies: assignmentCount 
+        };
+      })
+    );
+
+    // Build questionsByPhase while maintaining order within each phase
+    const questionsByPhase = questionsWithStats.reduce((acc, question) => {
+      if (!acc[question.phase]) {
+        acc[question.phase] = [];
+      }
+      acc[question.phase].push(question);
+      return acc;
+    }, {});
+
+    // Sort each phase's questions by order (defensive programming)
+    Object.keys(questionsByPhase).forEach(phase => {
+      questionsByPhase[phase].sort((a, b) => {
+        // Primary sort by order
+        if (a.order !== b.order) {
+          return (a.order || 0) - (b.order || 0);
+        }
+        // Secondary sort by _id if order is the same
+        return a._id.toString().localeCompare(b._id.toString());
+      });
+    });
 
     res.status(200).send({
-      message: 'Simplified Traxxia API is running 🚀',
-      timestamp: new Date().toISOString(),
-      database: dbStatus,
-      statistics: { 
-        companies, 
-        users, 
-        global_questions: questions, 
-        user_progress: progressEntries 
-      },
-      architecture: 'Simplified progress tracking with ML validation',
-      features: ['ML-powered followup questions', 'Complete audit trail', 'Seamless resume']
+      questions: questionsWithStats,
+      questionsByPhase,
+      total: questions.length
     });
   } catch (error) {
-    res.status(500).send({
-      message: 'Health check failed',
-      error: error.message,
-      timestamp: new Date().toISOString()
-    });
+    console.error('Get global questions error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
 
+app.post('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { question_text, phase, severity } = req.body;
+
+    if (!question_text || !phase || !severity) {
+      return res.status(400).send({ message: 'Question text, phase, and severity are required' });
+    }
+
+    const order = await getNextOrderInPhase(phase);
+
+    const newQuestion = {
+      question_text,
+      phase,
+      severity,
+      order,
+      is_active: true,
+      created_at: new Date()
+    };
+
+    const result = await db.collection('global_questions').insertOne(newQuestion);
+
+    // Auto-assign to all active companies
+    const activeCompanies = await db.collection('companies').find({ status: 'active' }).toArray();
+    const companyAssignments = activeCompanies.map(company => ({
+      company_id: company._id,
+      global_question_id: result.insertedId,
+      custom_question_text: null,
+      is_customized: false,
+      is_active: true,
+      assigned_at: new Date(),
+      assigned_by: new ObjectId(req.user._id)
+    }));
+
+    if (companyAssignments.length > 0) {
+      await db.collection('company_questions').insertMany(companyAssignments);
+    }
+
+    res.status(201).send({
+      message: 'Global question created and assigned to all companies',
+      question: { 
+        _id: result.insertedId,
+        ...newQuestion 
+      },
+      assigned_to_companies: companyAssignments.length
+    });
+  } catch (error) {
+    console.error('Create global question error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+app.post('/api/super-admin/global-questions/bulk-upload', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { questions } = req.body;
+
+    if (!questions || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).send({ 
+        message: 'Questions array is required and must contain at least one question',
+        expected_format: {
+          questions: [
+            {
+              question_text: "What is your company's main challenge?",
+              phase: "discovery",
+              severity: "high",
+              order: 1  // Optional
+            }
+          ]
+        }
+      });
+    }
+
+    if (questions.length > 100) {
+      return res.status(400).send({ 
+        message: 'Maximum 100 questions allowed per bulk upload' 
+      });
+    }
+
+    // Validate all questions
+    const allErrors = [];
+    questions.forEach((question, index) => {
+      const errors = validateQuestionData(question, index);
+      allErrors.push(...errors);
+    });
+
+    if (allErrors.length > 0) {
+      return res.status(400).send({ 
+        message: 'Validation errors found',
+        errors: allErrors,
+        total_errors: allErrors.length
+      });
+    }
+    
+    // Group questions by phase
+    const questionsByPhase = questions.reduce((acc, question) => {
+      const phase = question.phase.trim();
+      if (!acc[phase]) {
+        acc[phase] = [];
+      }
+      acc[phase].push(question);
+      return acc;
+    }, {});
+
+    const hasExplicitOrders = questions.some(q => q.order !== undefined);
+    let questionsToInsert = [];
+    const currentDate = new Date();
+
+    if (hasExplicitOrders) {
+      // Validate order conflicts
+      const orderConflicts = [];
+      Object.entries(questionsByPhase).forEach(([phase, phaseQuestions]) => {
+        const ordersInPhase = phaseQuestions
+          .filter(q => q.order !== undefined)
+          .map(q => q.order);
+        
+        const duplicateOrders = ordersInPhase.filter((order, index) => 
+          ordersInPhase.indexOf(order) !== index
+        );
+        
+        if (duplicateOrders.length > 0) {
+          orderConflicts.push(`Phase "${phase}" has duplicate orders: ${duplicateOrders.join(', ')}`);
+        }
+      });
+
+      if (orderConflicts.length > 0) {
+        return res.status(400).send({
+          message: 'Order conflicts detected',
+          errors: orderConflicts
+        });
+      }
+
+      // Check for conflicts with existing questions
+      for (const [phase, phaseQuestions] of Object.entries(questionsByPhase)) {
+        const providedOrders = phaseQuestions
+          .filter(q => q.order !== undefined)
+          .map(q => q.order);
+        
+        if (providedOrders.length > 0) {
+          const existingOrders = await db.collection('global_questions')
+            .find({ phase, order: { $in: providedOrders } })
+            .toArray();
+          
+          if (existingOrders.length > 0) {
+            return res.status(400).send({
+              message: `Order conflicts in phase "${phase}"`,
+              conflicting_orders: existingOrders.map(q => ({
+                order: q.order,
+                existing_question: q.question_text
+              }))
+            });
+          }
+        }
+      }
+
+      // Prepare questions with explicit orders
+      Object.entries(questionsByPhase).forEach(([phase, phaseQuestions]) => {
+        phaseQuestions.forEach((question) => {
+          questionsToInsert.push({
+            question_text: question.question_text.trim(),
+            phase: phase,
+            severity: question.severity.trim(),
+            order: question.order || null,
+            is_active: true,
+            created_at: currentDate,
+            bulk_upload: true,
+            uploaded_by: new ObjectId(req.user._id)
+          });
+        });
+      });
+
+      // Auto-assign orders for questions without explicit order
+      const questionsNeedingOrder = questionsToInsert.filter(q => q.order === null);
+      if (questionsNeedingOrder.length > 0) {
+        const phaseOrders = await getNextOrdersForPhases(
+          questionsNeedingOrder.reduce((acc, q) => {
+            return acc;
+          }, {})
+        );
+
+        questionsNeedingOrder.forEach(question => {
+          question.order = ++phaseOrders[question.phase];
+        });
+      }
+    } else {
+      // Auto-assign all orders
+      const phaseOrders = await getNextOrdersForPhases(questionsByPhase);
+
+      Object.entries(questionsByPhase).forEach(([phase, phaseQuestions]) => {
+        let currentOrder = phaseOrders[phase];
+        
+        phaseQuestions.forEach((question) => {
+          currentOrder += 1;
+          questionsToInsert.push({
+            question_text: question.question_text.trim(),
+            phase: phase,
+            severity: question.severity.trim(),
+            order: currentOrder,
+            is_active: true,
+            created_at: currentDate,
+            bulk_upload: true,
+            uploaded_by: new ObjectId(req.user._id)
+          });
+        });
+      });
+    }
+
+    // Insert all questions
+    const insertResult = await db.collection('global_questions').insertMany(questionsToInsert);
+    const insertedQuestionIds = Object.values(insertResult.insertedIds);
+
+    // Auto-assign to companies
+    const activeCompanies = await db.collection('companies').find({ status: 'active' }).toArray();
+    
+    const companyAssignments = [];
+    insertedQuestionIds.forEach(questionId => {
+      activeCompanies.forEach(company => {
+        companyAssignments.push({
+          company_id: company._id,
+          global_question_id: questionId,
+          custom_question_text: null,
+          is_customized: false,
+          is_active: true,
+          assigned_at: currentDate,
+          assigned_by: new ObjectId(req.user._id),
+          bulk_assigned: true
+        });
+      });
+    });
+
+    if (companyAssignments.length > 0) {
+      await db.collection('company_questions').insertMany(companyAssignments);
+    }
+
+    const phaseStats = Object.entries(questionsByPhase).map(([phase, phaseQuestions]) => ({
+      phase,
+      count: phaseQuestions.length
+    }));
+
+    console.log(`📚 Bulk upload completed: ${questionsToInsert.length} questions uploaded by ${req.user.email}`);
+
+    res.status(201).send({
+      message: 'Bulk upload completed successfully',
+      summary: {
+        total_questions_uploaded: questionsToInsert.length,
+        total_companies_assigned: activeCompanies.length,
+        total_assignments_created: companyAssignments.length,
+        phases_affected: Object.keys(questionsByPhase).length
+      },
+      phase_breakdown: phaseStats,
+      uploaded_questions: insertedQuestionIds.map((id, index) => ({
+        _id: id,
+        question_text: questionsToInsert[index].question_text,
+        phase: questionsToInsert[index].phase,
+        severity: questionsToInsert[index].severity,
+        order: questionsToInsert[index].order
+      })),
+      company_assignments: {
+        successful: companyAssignments.length,
+        companies_affected: activeCompanies.map(c => ({
+          id: c._id,
+          name: c.company_name
+        }))
+      }
+    });
+
+  } catch (error) {
+    console.error('Bulk upload global questions error:', error);
+    
+    if (error.code === 11000) {
+      return res.status(400).send({ 
+        message: 'Duplicate question detected',
+        error: 'One or more questions already exist in the database' 
+      });
+    }
+    
+    res.status(500).send({ 
+      message: 'Server error during bulk upload', 
+      error: error.message 
+    });
+  }
+});
+app.put('/api/super-admin/global-questions/reorder', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { phase, questionOrders } = req.body;
+
+    // Validate input
+    if (!phase || !questionOrders || !Array.isArray(questionOrders)) {
+      return res.status(400).send({ 
+        message: 'Phase and questionOrders array are required' 
+      });
+    }
+
+    if (questionOrders.length === 0) {
+      return res.status(400).send({ 
+        message: 'questionOrders cannot be empty' 
+      });
+    }
+
+    // Validate that all questionOrders have id and order
+    const invalidOrders = questionOrders.filter(item => 
+      !item.id || typeof item.order !== 'number' || item.order < 1
+    );
+
+    if (invalidOrders.length > 0) {
+      return res.status(400).send({ 
+        message: 'All questionOrders must have valid id and positive order number' 
+      });
+    }
+
+    // Convert string IDs to ObjectIds and verify questions exist
+    const questionIds = questionOrders.map(item => {
+      try {
+        return new ObjectId(item.id);
+      } catch (error) {
+        throw new Error(`Invalid ObjectId: ${item.id}`);
+      }
+    });
+
+    // Verify all questions exist and belong to the specified phase
+    const existingQuestions = await db.collection('global_questions').find({
+      _id: { $in: questionIds },
+      phase: phase
+    }).toArray();
+
+    if (existingQuestions.length !== questionOrders.length) {
+      return res.status(400).send({ 
+        message: `Some questions not found or do not belong to phase "${phase}". Found ${existingQuestions.length} out of ${questionOrders.length} questions.` 
+      });
+    }
+
+    // Update each question's order
+    const updatePromises = questionOrders.map(item => 
+      db.collection('global_questions').updateOne(
+        { _id: new ObjectId(item.id) },
+        { 
+          $set: { 
+            order: item.order,
+            updated_at: new Date()
+          } 
+        }
+      )
+    );
+
+    const updateResults = await Promise.all(updatePromises);
+    
+    // Count successful updates
+    const successfulUpdates = updateResults.filter(result => result.modifiedCount > 0).length;
+
+    console.log(`📋 Questions reordered in ${phase} phase by ${req.user.email} - ${successfulUpdates}/${questionOrders.length} updated`);
+
+    res.status(200).send({
+      message: `Questions reordered successfully in ${phase} phase`,
+      phase: phase,
+      total_questions: questionOrders.length,
+      successfully_updated: successfulUpdates,
+      question_orders: questionOrders.map(item => ({
+        id: item.id,
+        order: item.order
+      }))
+    });
+
+  } catch (error) {
+    console.error('Reorder questions error:', error);
+    
+    if (error.message.includes('Invalid ObjectId')) {
+      return res.status(400).send({ 
+        message: 'Invalid question ID format',
+        error: error.message 
+      });
+    }
+    
+    res.status(500).send({ 
+      message: 'Server error during reorder', 
+      error: error.message 
+    });
+  }
+}); 
+
+app.put('/api/super-admin/global-questions/:questionId', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { questionId } = req.params;
+    const { question_text } = req.body;
+
+    if (!question_text) {
+      return res.status(400).send({ message: 'Question text is required' });
+    }
+
+    if (!ObjectId.isValid(questionId)) {
+      return res.status(400).send({ message: 'Invalid question ID' });
+    }
+
+    const questionObjectId = new ObjectId(questionId);
+    const question = await db.collection('global_questions').findOne({ _id: questionObjectId });
+
+    if (!question) {
+      return res.status(404).send({ message: 'Question not found' });
+    }
+
+    await db.collection('global_questions').updateOne(
+      { _id: questionObjectId },
+      { 
+        $set: { 
+          question_text: question_text.trim(),
+          updated_at: new Date()
+        } 
+      }
+    );
+
+    res.status(200).send({
+      message: 'Question updated successfully',
+      question: {
+        _id: questionObjectId,
+        question_text: question_text.trim(),
+        phase: question.phase,
+        severity: question.severity
+      }
+    });
+
+  } catch (error) {
+    console.error('Update question error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+app.delete('/api/super-admin/global-questions/:questionId', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { questionId } = req.params;
+
+    if (!ObjectId.isValid(questionId)) {
+      return res.status(400).send({ message: 'Invalid question ID' });
+    }
+
+    const questionObjectId = new ObjectId(questionId);
+    const question = await db.collection('global_questions').findOne({ _id: questionObjectId });
+
+    if (!question) {
+      return res.status(404).send({ message: 'Question not found' });
+    }
+
+    // Delete from all collections
+    await Promise.all([
+      db.collection('company_questions').deleteMany({ global_question_id: questionObjectId }),
+      db.collection('user_progress').deleteMany({ question_id: questionObjectId }),
+      db.collection('user_chat_history').deleteMany({ question_id: questionObjectId }),
+      db.collection('global_questions').deleteOne({ _id: questionObjectId })
+    ]);
+
+    res.status(200).send({
+      message: 'Question deleted successfully',
+      deleted_question: {
+        _id: question._id,
+        question_text: question.question_text
+      }
+    });
+
+  } catch (error) {
+    console.error('Delete question error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+}); 
 // ===============================
 // SUPER ADMIN - COMPANY MANAGEMENT
 // ===============================
 
-// Create Company
+app.get('/api/super-admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const companies = await db.collection('companies').aggregate([
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'admin_user_id',
+          foreignField: '_id',
+          as: 'admin_user'
+        }
+      },
+      {
+        $unwind: { path: '$admin_user', preserveNullAndEmptyArrays: true }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: 'company_id',
+          as: 'users'
+        }
+      },
+      {
+        $project: {
+          company_name: 1,
+          industry: 1,
+          size: 1,
+          status: 1,
+          created_at: 1,
+          admin_name: '$admin_user.name',
+          admin_email: '$admin_user.email',
+          total_users: { $size: '$users' },
+          active_users: {
+            $size: {
+              $filter: {
+                input: '$users',
+                cond: { $eq: ['$this.status', 'active'] }
+              }
+            }
+          }
+        }
+      }
+    ]).toArray();
+
+    res.status(200).send({
+      companies,
+      total: companies.length
+    });
+  } catch (error) {
+    console.error('Get companies error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
 app.post('/api/super-admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
     const { company_name, industry, size, admin_name, admin_email, admin_password } = req.body;
@@ -1073,198 +1538,61 @@ app.post('/api/super-admin/companies', authenticateToken, requireSuperAdmin, asy
   }
 });
 
-// List All Companies
-app.get('/api/super-admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const companies = await db.collection('companies').aggregate([
-      {
-        $lookup: {
-          from: 'users',
-          localField: 'admin_user_id',
-          foreignField: '_id',
-          as: 'admin_user'
-        }
-      },
-      {
-        $unwind: { path: '$admin_user', preserveNullAndEmptyArrays: true }
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: '_id',
-          foreignField: 'company_id',
-          as: 'users'
-        }
-      },
-      {
-        $project: {
-          company_name: 1,
-          industry: 1,
-          size: 1,
-          status: 1,
-          created_at: 1,
-          admin_name: '$admin_user.name',
-          admin_email: '$admin_user.email',
-          total_users: { $size: '$users' },
-          active_users: {
-            $size: {
-              $filter: {
-                input: '$users',
-                cond: { $eq: ['$this.status', 'active'] }
-              }
-            }
-          }
-        }
-      }
-    ]).toArray();
-
-    res.status(200).send({
-      companies,
-      total: companies.length
-    });
-  } catch (error) {
-    console.error('Get companies error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
 // ===============================
-// SUPER ADMIN - GLOBAL QUESTIONS MANAGEMENT
+// ADMIN - USER MANAGEMENT
 // ===============================
 
- // Replace the existing Create Global Question endpoint
-app.post('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
+app.get('/api/admin/users', authenticateToken, async (req, res) => {
   try {
-    const { question_text, phase, severity } = req.body;
+    const role = req.user.role.role_name;
 
-    if (!question_text || !phase || !severity) {
-      return res.status(400).send({ message: 'Question text, phase, and severity are required' });
+    let query = {};
+
+    if (role === 'company_admin') {
+      query.company_id = req.user.company_id;
+    } else if (role !== 'super_admin') {
+      return res.status(403).send({ message: 'Access denied. Only super_admin or company_admin allowed.' });
     }
 
-    // Auto-generate question_id and order
-    const question_id = await getNextQuestionId();
-    const order = await getNextOrderInPhase(phase);
+    const users = await db.collection('users').find(query).toArray();
 
-    const newQuestion = {
-      question_id,
-      question_text,
-      phase,
-      severity,
-      order,
-      is_active: true,
-      created_at: new Date()
-    };
-
-    const result = await db.collection('global_questions').insertOne(newQuestion);
-
-    // Auto-assign to all active companies
-    const activeCompanies = await db.collection('companies').find({ status: 'active' }).toArray();
-    const companyAssignments = activeCompanies.map(company => ({
-      company_id: company._id,
-      global_question_id: result.insertedId,
-      custom_question_text: null,
-      is_customized: false,
-      is_active: true,
-      assigned_at: new Date(),
-      assigned_by: new ObjectId(req.user._id)
-    }));
-
-    if (companyAssignments.length > 0) {
-      await db.collection('company_questions').insertMany(companyAssignments);
-    }
-
-    res.status(201).send({
-      message: 'Global question created and assigned to all companies',
-      question: { ...newQuestion, _id: result.insertedId },
-      assigned_to_companies: companyAssignments.length
-    });
-  } catch (error) {
-    console.error('Create global question error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Add new endpoint for updating question order within a phase
-app.put('/api/super-admin/global-questions/reorder', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const { phase, questionOrders } = req.body;
-
-    if (!phase || !Array.isArray(questionOrders)) {
-      return res.status(400).send({ message: 'Phase and question orders array are required' });
-    }
-
-    // Validate all questions belong to the specified phase
-    const questionIds = questionOrders.map(q => new ObjectId(q.id));
-    const questions = await db.collection('global_questions').find({
-      _id: { $in: questionIds },
-      phase: phase
-    }).toArray();
-
-    if (questions.length !== questionOrders.length) {
-      return res.status(400).send({ message: 'Some questions do not belong to the specified phase' });
-    }
-
-    // Update orders using bulk operations
-    const bulkOps = questionOrders.map((item, index) => ({
-      updateOne: {
-        filter: { _id: new ObjectId(item.id) },
-        update: { $set: { order: index + 1 } }
-      }
-    }));
-
-    await db.collection('global_questions').bulkWrite(bulkOps);
-
-    res.status(200).send({
-      message: `Successfully reordered ${questionOrders.length} questions in ${phase} phase`
-    });
-
-  } catch (error) {
-    console.error('Reorder questions error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-app.get('/api/super-admin/global-questions', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    const questions = await db.collection('global_questions')
-      .find({})
-      .sort({ phase: 1, order: 1, question_id: 1 })
-      .toArray();
-
-    const questionsWithStats = await Promise.all(
-      questions.map(async (question) => {
-        const assignmentCount = await db.collection('company_questions').countDocuments({
-          global_question_id: question._id
-        });
-        return { ...question, assigned_to_companies: assignmentCount };
-      })
-    );
-
-    // Group questions by phase
-    const questionsByPhase = questionsWithStats.reduce((acc, question) => {
-      if (!acc[question.phase]) {
-        acc[question.phase] = [];
-      }
-      acc[question.phase].push(question);
+    const roleMap = await db.collection('roles').find().toArray();
+    const roleLookup = roleMap.reduce((acc, r) => {
+      acc[r._id.toString()] = r.role_name;
       return acc;
     }, {});
 
-    res.status(200).send({
-      questions: questionsWithStats,
-      questionsByPhase,
-      total: questions.length
-    });
+    const companyIds = [...new Set(users.map(user => user.company_id).filter(Boolean))];
+    const companies = await db.collection('companies')
+      .find({ _id: { $in: companyIds } })
+      .toArray();
+
+    const companyLookup = companies.reduce((acc, company) => {
+      acc[company._id.toString()] = company.company_name;
+      return acc;
+    }, {});
+
+    const formattedUsers = users.map(user => ({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      role: roleLookup[user.role_id?.toString()] || 'unknown',
+      status: user.status,
+      company_id: user.company_id,
+      company_name: companyLookup[user.company_id?.toString()] || null,
+      profile: user.profile,
+      created_at: user.created_at,
+      last_login: user.last_login
+    }));
+
+    res.status(200).send({ users: formattedUsers });
+
   } catch (error) {
-    console.error('Get global questions error:', error);
+    console.error('Fetch users error:', error);
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
- 
 
-// ===============================
-// COMPANY ADMIN - USER MANAGEMENT
-// ===============================
-
-// Create Company User
 app.post('/api/company-admin/users', authenticateToken, requireCompanyAdmin, async (req, res) => {
   try {
     const { name, email, password, role_name, profile = {} } = req.body;
@@ -1324,7 +1652,6 @@ app.post('/api/company-admin/users', authenticateToken, requireCompanyAdmin, asy
 
 app.get('/api/roles', authenticateToken, async (req, res) => {
   try {
-    // Optional: you can restrict access based on user role here
     const role = req.user.role.role_name;
     if (role !== 'super_admin' && role !== 'company_admin') {
       return res.status(403).send({ message: 'Access denied. Only super_admin or company_admin allowed.' });
@@ -1332,7 +1659,6 @@ app.get('/api/roles', authenticateToken, async (req, res) => {
 
     const roles = await db.collection('roles').find().toArray();
 
-    // Format roles if needed
     const formattedRoles = roles.map(r => ({
       id: r._id,
       role_name: r.role_name,
@@ -1347,46 +1673,269 @@ app.get('/api/roles', authenticateToken, async (req, res) => {
   }
 });
 
+// ===============================
+// ADMIN - USER DATA ENDPOINTS
+// ===============================
 
-app.get('/api/admin/users', authenticateToken, async (req, res) => {
+app.get('/api/admin/user-data/:userId', authenticateToken, async (req, res) => {
   try {
-    const role = req.user.role.role_name;
+    const { userId } = req.params;
+    const requestingUserRole = req.user.role.role_name;
+    const requestingUserCompanyId = req.user.company_id;
 
-    let query = {};
-
-    if (role === 'company_admin') {
-      query.company_id = req.user.company_id;
-    } else if (role !== 'super_admin') {
-      return res.status(403).send({ message: 'Access denied. Only super_admin or company_admin allowed.' });
+    if (!['super_admin', 'company_admin'].includes(requestingUserRole)) {
+      return res.status(403).send({ message: 'Admin access required' });
     }
 
-    const users = await db.collection('users').find(query).toArray();
+    if (!ObjectId.isValid(userId)) {
+      return res.status(400).send({ message: 'Invalid user ID' });
+    }
 
-    const roleMap = await db.collection('roles').find().toArray();
-    const roleLookup = roleMap.reduce((acc, r) => {
-      acc[r._id.toString()] = r.role_name;
-      return acc;
-    }, {});
+    const targetUserId = new ObjectId(userId);
 
-    const formattedUsers = users.map(user => ({
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      role: roleLookup[user.role_id?.toString()] || 'unknown',
-      status: user.status,
-      company_id: user.company_id,
-      profile: user.profile,
-      created_at: user.created_at,
-      last_login: user.last_login
-    }));
+    const targetUser = await db.collection('users').aggregate([
+      { $match: { _id: targetUserId } },
+      {
+        $lookup: {
+          from: 'roles',
+          localField: 'role_id',
+          foreignField: '_id',
+          as: 'role'
+        }
+      },
+      {
+        $lookup: {
+          from: 'companies',
+          localField: 'company_id',
+          foreignField: '_id',
+          as: 'company'
+        }
+      },
+      {
+        $unwind: { path: '$role', preserveNullAndEmptyArrays: true }
+      },
+      {
+        $unwind: { path: '$company', preserveNullAndEmptyArrays: true }
+      }
+    ]).toArray();
 
-    res.status(200).send({ users: formattedUsers });
+    if (targetUser.length === 0) {
+      return res.status(404).send({ message: 'User not found' });
+    }
+
+    const user = targetUser[0];
+
+    if (requestingUserRole === 'company_admin') {
+      if (!user.company_id || user.company_id.toString() !== requestingUserCompanyId.toString()) {
+        return res.status(403).send({ message: 'You can only view users from your company' });
+      }
+    }
+
+    const answers = await db.collection('user_progress').find({
+      user_id: targetUserId,
+      company_id: user.company_id
+    }).sort({ answered_at: 1 }).toArray();
+
+    const chatHistory = await db.collection('user_chat_history').find({
+      user_id: targetUserId,
+      company_id: user.company_id
+    }).sort({ timestamp: 1 }).toArray();
+
+    const totalAnswers = answers.length;
+    const mainAnswers = answers.filter(a => !a.is_followup).length;
+    const followupAnswers = answers.filter(a => a.is_followup).length;
+
+    const chatByQuestion = {};
+    chatHistory.forEach(chat => {
+      const key = chat.question_id || 'general';
+      if (!chatByQuestion[key]) {
+        chatByQuestion[key] = [];
+      }
+      chatByQuestion[key].push(chat);
+    });
+
+    const answersWithChat = answers.map(answer => {
+      const relatedChat = chatByQuestion[answer.question_id] || [];
+      return {
+        ...answer,
+        related_chat_messages: relatedChat.filter(chat => 
+          Math.abs(new Date(chat.timestamp) - new Date(answer.answered_at)) < 30 * 60 * 1000
+        )
+      };
+    });
+
+    res.status(200).send({
+      user_info: {
+        id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role?.role_name || 'unknown',
+        company: user.company?.company_name || 'No Company',
+        status: user.status,
+        created_at: user.created_at,
+        last_login: user.last_login,
+        profile: user.profile
+      },
+      summary: {
+        total_answers: totalAnswers,
+        main_answers: mainAnswers,
+        followup_answers: followupAnswers,
+        total_chat_messages: chatHistory.length,
+        first_activity: answers.length > 0 ? answers[0].answered_at : null,
+        last_activity: answers.length > 0 ? answers[answers.length - 1].answered_at : null
+      },
+      answers: answersWithChat,
+      chat_history: chatHistory,
+      chat_by_question: chatByQuestion,
+      permissions: {
+        can_export: true,
+        can_view_details: true,
+        requesting_user_role: requestingUserRole
+      }
+    });
+
   } catch (error) {
-    console.error('Fetch users error:', error);
+    console.error('Get user data error:', error);
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
 
+app.get('/api/company-admin/users', authenticateToken, async (req, res) => {
+  try {
+    const requestingUserRole = req.user.role.role_name;
+    const requestingUserCompanyId = req.user.company_id;
+    const { company_id } = req.query;
+
+    if (!['super_admin', 'company_admin'].includes(requestingUserRole)) {
+      return res.status(403).send({ message: 'Admin access required' });
+    }
+
+    let query = {};
+    let targetCompanyId = null;
+
+    if (requestingUserRole === 'super_admin') {
+      if (company_id) {
+        targetCompanyId = new ObjectId(company_id);
+        query.company_id = targetCompanyId;
+      }
+    } else if (requestingUserRole === 'company_admin') {
+      targetCompanyId = requestingUserCompanyId;
+      query.company_id = targetCompanyId;
+    }
+
+    const users = await db.collection('users').aggregate([
+      { $match: query },
+      {
+        $lookup: {
+          from: 'roles',
+          localField: 'role_id',
+          foreignField: '_id',
+          as: 'role'
+        }
+      },
+      {
+        $lookup: {
+          from: 'companies',
+          localField: 'company_id',
+          foreignField: '_id',
+          as: 'company'
+        }
+      },
+      {
+        $unwind: { path: '$role', preserveNullAndEmptyArrays: true }
+      },
+      {
+        $unwind: { path: '$company', preserveNullAndEmptyArrays: true }
+      },
+      {
+        $project: {
+          name: 1,
+          email: 1,
+          status: 1,
+          created_at: 1,
+          last_login: 1,
+          profile: 1,
+          role: {
+            role_name: '$role.role_name',
+            permissions: '$role.permissions'
+          },
+          company: {
+            company_name: '$company.company_name',
+            _id: '$company._id'
+          }
+        }
+      },
+      { $sort: { created_at: -1 } }
+    ]).toArray();
+
+    const usersWithActivity = await Promise.all(
+      users.map(async (user) => {
+        const [answerCount, chatCount] = await Promise.all([
+          db.collection('user_progress').countDocuments({ user_id: user._id }),
+          db.collection('user_chat_history').countDocuments({ user_id: user._id })
+        ]);
+
+        return {
+          ...user,
+          activity_summary: {
+            total_answers: answerCount,
+            total_chat_messages: chatCount,
+            has_activity: answerCount > 0 || chatCount > 0
+          }
+        };
+      })
+    );
+
+    res.status(200).send({
+      users: usersWithActivity,
+      total: usersWithActivity.length,
+      filters: {
+        company_id: targetCompanyId,
+        requesting_user_role: requestingUserRole
+      }
+    });
+
+  } catch (error) {
+    console.error('Get company users error:', error);
+    res.status(500).send({ message: 'Server error', error: error.message });
+  }
+});
+
+// ===============================
+// HEALTH CHECK
+// ===============================
+
+app.get('/health', async (req, res) => {
+  try {
+    const dbStatus = db ? 'Connected' : 'Disconnected';
+
+    const [companies, users, questions, progressEntries] = await Promise.all([
+      db ? db.collection('companies').estimatedDocumentCount() : 0,
+      db ? db.collection('users').estimatedDocumentCount() : 0,
+      db ? db.collection('global_questions').estimatedDocumentCount() : 0,
+      db ? db.collection('user_progress').estimatedDocumentCount() : 0
+    ]);
+
+    res.status(200).send({
+      message: 'Clean Traxxia API with MongoDB ObjectIds is running 🚀',
+      timestamp: new Date().toISOString(),
+      database: dbStatus,
+      statistics: { 
+        companies, 
+        users, 
+        global_questions: questions, 
+        user_progress: progressEntries 
+      },
+      features: ['MongoDB ObjectIds', 'Clean Code Architecture', 'Bulk Upload', 'Progress Tracking']
+    });
+  } catch (error) {
+    res.status(500).send({
+      message: 'Health check failed',
+      error: error.message,
+      timestamp: new Date().toISOString()
+    });
+  }
+});
 
 // ===============================
 // START SERVER
@@ -1394,10 +1943,11 @@ app.get('/api/admin/users', authenticateToken, async (req, res) => {
 
 connectToMongoDB().then(() => {
   app.listen(port, '0.0.0.0', () => {
-    console.log(`🚀 Simplified Traxxia API Server running on port ${port}`); 
-    console.log(`📊 Features: Progress tracking with ML validation`);
-    console.log(`💬 Audit Trail: Complete Q&A with followups`);
-    console.log(`🔄 Resume: Seamless user experience`);
+    console.log(`🚀 Clean Traxxia API Server running on port ${port}`); 
+    console.log(`🆔 IDs: Using MongoDB ObjectIds (native)`);
+    console.log(`📚 Bulk Upload: Support for multiple questions`);
+    console.log(`🧹 Clean Code: Simplified and optimized`);
+    console.log(`💾 Progress Tracking: Complete user journey`);
   });
 }).catch(err => {
   console.error('Failed to start server:', err);
