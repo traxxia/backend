@@ -1693,105 +1693,272 @@ app.get('/api/admin/user-data/:userId', authenticateToken, async (req, res) => {
 
     const targetUserId = new ObjectId(userId);
 
-    const targetUser = await db.collection('users').aggregate([
-      { $match: { _id: targetUserId } },
-      {
-        $lookup: {
-          from: 'roles',
-          localField: 'role_id',
-          foreignField: '_id',
-          as: 'role'
-        }
-      },
-      {
-        $lookup: {
-          from: 'companies',
-          localField: 'company_id',
-          foreignField: '_id',
-          as: 'company'
-        }
-      },
-      {
-        $unwind: { path: '$role', preserveNullAndEmptyArrays: true }
-      },
-      {
-        $unwind: { path: '$company', preserveNullAndEmptyArrays: true }
-      }
-    ]).toArray();
-
-    if (targetUser.length === 0) {
+    // Get target user info
+    const targetUser = await db.collection('users').findOne({ _id: targetUserId });
+    if (!targetUser) {
       return res.status(404).send({ message: 'User not found' });
     }
 
-    const user = targetUser[0];
-
+    // Company admin can only view users from their company
     if (requestingUserRole === 'company_admin') {
-      if (!user.company_id || user.company_id.toString() !== requestingUserCompanyId.toString()) {
+      if (!targetUser.company_id || targetUser.company_id.toString() !== requestingUserCompanyId.toString()) {
         return res.status(403).send({ message: 'You can only view users from your company' });
       }
     }
 
-    const answers = await db.collection('user_progress').find({
+    // Get user progress (main answers and followups)
+    const userProgress = await db.collection('user_progress').find({
       user_id: targetUserId,
-      company_id: user.company_id
+      company_id: targetUser.company_id
     }).sort({ answered_at: 1 }).toArray();
 
+    // Get chat history
     const chatHistory = await db.collection('user_chat_history').find({
       user_id: targetUserId,
-      company_id: user.company_id
+      company_id: targetUser.company_id
     }).sort({ timestamp: 1 }).toArray();
 
-    const totalAnswers = answers.length;
-    const mainAnswers = answers.filter(a => !a.is_followup).length;
-    const followupAnswers = answers.filter(a => a.is_followup).length;
+    // Get question details from global_questions or company_questions
+    let questionDetailsMap = {};
+    
+    if (requestingUserRole === 'super_admin') {
+      const globalQuestions = await db.collection('global_questions').find({}).toArray();
+      globalQuestions.forEach(q => {
+        questionDetailsMap[q._id.toString()] = {
+          question_text: q.question_text,
+          phase: q.phase,
+          severity: q.severity,
+          order: q.order
+        };
+      });
+    } else {
+      const companyQuestions = await db.collection('company_questions').aggregate([
+        { $match: { company_id: targetUser.company_id } },
+        {
+          $lookup: {
+            from: 'global_questions',
+            localField: 'global_question_id',
+            foreignField: '_id',
+            as: 'global_question'
+          }
+        },
+        { $unwind: '$global_question' }
+      ]).toArray();
 
+      companyQuestions.forEach(cq => {
+        const questionId = cq.global_question._id.toString();
+        questionDetailsMap[questionId] = {
+          question_text: cq.is_customized ? cq.custom_question_text : cq.global_question.question_text,
+          phase: cq.global_question.phase,
+          severity: cq.global_question.severity,
+          order: cq.global_question.order
+        };
+      });
+    }
+
+    // Group progress by question_id
+    const progressByQuestion = {};
+    userProgress.forEach(progress => {
+      const questionId = progress.question_id.toString();
+      if (!progressByQuestion[questionId]) {
+        progressByQuestion[questionId] = {
+          main_answer: null,
+          followups: []
+        };
+      }
+      
+      if (progress.is_followup) {
+        progressByQuestion[questionId].followups.push(progress);
+      } else {
+        progressByQuestion[questionId].main_answer = progress;
+      }
+    });
+
+    // Group chat history by question_id for followup questions
     const chatByQuestion = {};
     chatHistory.forEach(chat => {
-      const key = chat.question_id || 'general';
-      if (!chatByQuestion[key]) {
-        chatByQuestion[key] = [];
+      if (chat.question_id) {
+        const questionId = chat.question_id.toString();
+        if (!chatByQuestion[questionId]) {
+          chatByQuestion[questionId] = [];
+        }
+        chatByQuestion[questionId].push(chat);
       }
-      chatByQuestion[key].push(chat);
     });
 
-    const answersWithChat = answers.map(answer => {
-      const relatedChat = chatByQuestion[answer.question_id] || [];
-      return {
-        ...answer,
-        related_chat_messages: relatedChat.filter(chat => 
-          Math.abs(new Date(chat.timestamp) - new Date(answer.answered_at)) < 30 * 60 * 1000
-        )
+    // Build conversation structure grouped by phase
+    const conversationByPhase = {};
+
+    // Process each question that has answers
+    Object.keys(progressByQuestion).forEach(questionId => {
+      const questionDetails = questionDetailsMap[questionId];
+      if (!questionDetails) return;
+
+      const phase = questionDetails.phase;
+      const severity = questionDetails.severity;
+
+      // Initialize phase if not exists
+      if (!conversationByPhase[phase]) {
+        conversationByPhase[phase] = {
+          phase: phase,
+          severity: severity,
+          questions: []
+        };
+      }
+
+      const questionData = progressByQuestion[questionId];
+      const relatedChats = chatByQuestion[questionId] || [];
+
+      // Build question object
+      const questionObj = {
+        question: questionDetails.question_text,
+        answer: questionData.main_answer ? questionData.main_answer.answer_text : null
       };
+
+      // Add followups if they exist
+      if (questionData.followups && questionData.followups.length > 0) {
+        // Sort followups by answered_at
+        questionData.followups.sort((a, b) => new Date(a.answered_at) - new Date(b.answered_at));
+
+        questionData.followups.forEach((followup, index) => {
+          // Find the bot message (followup question) that's closest in time to this followup answer
+          const followupQuestion = relatedChats
+            .filter(chat => 
+              chat.message_type === 'bot' && 
+              chat.metadata?.isFollowUp &&
+              new Date(chat.timestamp) <= new Date(followup.answered_at)
+            )
+            .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp))[index]; // Get the nth followup question
+
+          questionObj[`followup_question_${index + 1}`] = followupQuestion ? followupQuestion.message_text : `Followup question ${index + 1}`;
+          questionObj[`followup_answer_${index + 1}`] = followup.answer_text;
+        });
+      }
+
+      conversationByPhase[phase].questions.push(questionObj);
     });
 
-    res.status(200).send({
-      user_info: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        role: user.role?.role_name || 'unknown',
-        company: user.company?.company_name || 'No Company',
-        status: user.status,
-        created_at: user.created_at,
-        last_login: user.last_login,
-        profile: user.profile
-      },
-      summary: {
-        total_answers: totalAnswers,
-        main_answers: mainAnswers,
-        followup_answers: followupAnswers,
-        total_chat_messages: chatHistory.length,
-        first_activity: answers.length > 0 ? answers[0].answered_at : null,
-        last_activity: answers.length > 0 ? answers[answers.length - 1].answered_at : null
-      },
-      answers: answersWithChat,
-      chat_history: chatHistory,
-      chat_by_question: chatByQuestion,
-      permissions: {
-        can_export: true,
-        can_view_details: true,
-        requesting_user_role: requestingUserRole
+    // Sort questions within each phase by order
+    Object.values(conversationByPhase).forEach(phaseData => {
+      phaseData.questions.sort((a, b) => {
+        // Find the order for each question
+        const aQuestionId = Object.keys(progressByQuestion).find(qId => {
+          const details = questionDetailsMap[qId];
+          return details && details.question_text === a.question;
+        });
+        const bQuestionId = Object.keys(progressByQuestion).find(qId => {
+          const details = questionDetailsMap[qId];
+          return details && details.question_text === b.question;
+        });
+
+        const aOrder = aQuestionId ? questionDetailsMap[aQuestionId].order : 0;
+        const bOrder = bQuestionId ? questionDetailsMap[bQuestionId].order : 0;
+
+        return aOrder - bOrder;
+      });
+    });
+
+    // Convert to array and sort by phase order
+    const phaseOrder = ['initial', 'essential', 'good', 'excellent'];
+    const conversation = Object.values(conversationByPhase).sort((a, b) => {
+      const aIndex = phaseOrder.indexOf(a.phase);
+      const bIndex = phaseOrder.indexOf(b.phase);
+      return (aIndex === -1 ? 999 : aIndex) - (bIndex === -1 ? 999 : bIndex);
+    });
+
+    // Extract system analysis from chat history - look for message_type: 'system'
+    const systemAnalysis = [];
+    
+    chatHistory.forEach(chat => {
+      // Look for system messages that contain analysis
+      if (chat.message_type === 'system') {
+        const analysisName = chat.message_text; // The message_text contains the analysis name
+        
+        // Look for analysis data in metadata
+        let analysisData = null;
+        
+        if (chat.metadata) {
+          // Check for analysis_result in metadata
+          if (chat.metadata.analysis_result) {
+            analysisData = chat.metadata.analysis_result;
+          }
+          // Check for analysisData in metadata
+          else if (chat.metadata.analysisData) {
+            analysisData = chat.metadata.analysisData;
+          }
+          // Check for analysis in metadata
+          else if (chat.metadata.analysis && chat.metadata.analysis !== true) {
+            analysisData = chat.metadata.analysis;
+          }
+          // Check for specific analysis types (swot, competitive, etc.)
+          else if (chat.metadata[analysisName]) {
+            analysisData = chat.metadata[analysisName];
+          }
+          // Check for analysis with underscores
+          else if (chat.metadata[analysisName + '_analysis']) {
+            analysisData = chat.metadata[analysisName + '_analysis'];
+          }
+          // Look for any object in metadata that could be analysis data
+          else {
+            const metadataKeys = Object.keys(chat.metadata);
+            for (const key of metadataKeys) {
+              const value = chat.metadata[key];
+              if (value && typeof value === 'object' && !Array.isArray(value)) {
+                // Check if it looks like analysis data (has multiple properties)
+                const valueKeys = Object.keys(value);
+                if (valueKeys.length > 1) {
+                  analysisData = value;
+                  break;
+                }
+              }
+            }
+          }
+        }
+        
+        if (analysisData) {
+          systemAnalysis.push({
+            name: analysisName,
+            analysis_result: typeof analysisData === 'string' ? 
+              analysisData : JSON.stringify(analysisData)
+          });
+        }
       }
+      
+      // Also check other message types that might have analysis in metadata
+      else if (chat.metadata) {
+        // Check for various analysis types in metadata for non-system messages
+        if (chat.metadata.analysis_type && chat.metadata.analysis_result) {
+          systemAnalysis.push({
+            name: chat.metadata.analysis_type,
+            analysis_result: typeof chat.metadata.analysis_result === 'string' ? 
+              chat.metadata.analysis_result : JSON.stringify(chat.metadata.analysis_result)
+          });
+        }
+        
+        // Check for specific analysis fields
+        Object.keys(chat.metadata).forEach(key => {
+          if (key.includes('analysis') && key !== 'analysis_type' && typeof chat.metadata[key] === 'object') {
+            const analysisData = chat.metadata[key];
+            if (analysisData && Object.keys(analysisData).length > 0) {
+              systemAnalysis.push({
+                name: key.replace('_analysis', '').replace('analysis_', ''),
+                analysis_result: JSON.stringify(analysisData)
+              });
+            }
+          }
+        });
+      }
+    });
+
+    // Remove duplicates from system analysis
+    const uniqueSystemAnalysis = systemAnalysis.filter((analysis, index, self) => 
+      index === self.findIndex(a => a.name === analysis.name && a.analysis_result === analysis.analysis_result)
+    );
+
+    // Return the structured response
+    res.status(200).send({
+      conversation: conversation,
+      system: uniqueSystemAnalysis
     });
 
   } catch (error) {
