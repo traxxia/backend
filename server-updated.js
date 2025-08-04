@@ -1966,7 +1966,131 @@ app.get('/api/admin/user-data/:userId', authenticateToken, async (req, res) => {
     res.status(500).send({ message: 'Server error', error: error.message });
   }
 });
+app.get('/api/companies', async (req, res) => {
+  try {
+    // Get only active companies with basic info for registration
+    const companies = await db.collection('companies')
+      .find(
+        { status: 'active' },
+        { 
+          projection: { 
+            company_name: 1, 
+            industry: 1,
+            _id: 1,
+            created_at: 1
+          } 
+        }
+      )
+      .sort({ company_name: 1 })
+      .toArray();
 
+    res.status(200).send({
+      success: true,
+      companies: companies,
+      total: companies.length,
+      message: 'Companies fetched successfully'
+    });
+
+  } catch (error) {
+    console.error('Fetch companies error:', error);
+    res.status(500).send({ 
+      success: false,
+      message: 'Server error', 
+      error: error.message,
+      companies: []
+    });
+  }
+});
+// Add this endpoint to your server.js file after the existing endpoints
+
+// ===============================
+// PUBLIC REGISTRATION ENDPOINT
+// ===============================
+
+app.post('/api/register', async (req, res) => {
+  try {
+    const { name, email, password, company_id, profile = {} } = req.body;
+
+    // Validation
+    if (!name || !email || !password || !company_id) {
+      return res.status(400).send({ 
+        message: 'Name, email, password, and company are required' 
+      });
+    }
+
+    // Check if user already exists
+    const existingUser = await db.collection('users').findOne({ email });
+    if (existingUser) {
+      return res.status(400).send({ message: 'Email already exists' });
+    }
+
+    // Verify company exists and is active
+    const company = await db.collection('companies').findOne({ 
+      _id: new ObjectId(company_id),
+      status: 'active'
+    });
+    
+    if (!company) {
+      return res.status(400).send({ message: 'Invalid or inactive company selected' });
+    }
+
+    // Get answerer_user role
+    const role = await db.collection('roles').findOne({ role_name: 'answerer_user' });
+    if (!role) {
+      return res.status(500).send({ message: 'Default user role not found' });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    // Create new user
+    const newUser = {
+      name: name.trim(),
+      email: email.trim().toLowerCase(),
+      password: hashedPassword,
+      role_id: role._id,
+      company_id: new ObjectId(company_id),
+      status: 'active',
+      profile: {
+        job_title: profile.job_title || '',
+        ...profile
+      },
+      created_at: new Date(),
+      last_login: null
+    };
+
+    const result = await db.collection('users').insertOne(newUser);
+
+    console.log(`✅ New user registered: ${email} for company ${company.company_name}`);
+
+    res.status(201).send({
+      success: true,
+      message: 'Registration successful! You can now log in.',
+      user: {
+        id: result.insertedId,
+        name: name.trim(),
+        email: email.trim().toLowerCase(),
+        company: company.company_name,
+        role: 'answerer_user'
+      }
+    });
+
+  } catch (error) {
+    console.error('Public registration error:', error);
+    
+    // Handle duplicate email error
+    if (error.code === 11000) {
+      return res.status(400).send({ 
+        message: 'Email already exists' 
+      });
+    }
+    
+    res.status(500).send({ 
+      message: 'Registration failed. Please try again.', 
+      error: error.message 
+    });
+  }
+});
 app.get('/api/company-admin/users', authenticateToken, async (req, res) => {
   try {
     const requestingUserRole = req.user.role.role_name;
