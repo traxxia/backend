@@ -4,8 +4,8 @@
   "description": "Simple Survey Application Backend with Comprehensive Audit Trail",
   "main": "server.js",
   "scripts": {
-    "start": "node server-updated.js",
-    "dev": "nodemon server-updated.js",
+    "start": "node server.js",
+    "dev": "nodemon server.js",
     "build": "npm install --production",
     "db:setup": "node setup-audit-database.js setup",
     "db:verify": "node verify-setup.js",

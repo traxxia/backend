@@ -3,8 +3,7 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
-const mongoose = require('mongoose');
-const multer = require('multer');
+const { MongoClient, ObjectId } = require('mongodb');
 require('dotenv').config();
 
 const app = express();
@@ -14,1548 +13,2237 @@ const secretKey = process.env.SECRET_KEY || 'default_secret_key';
 app.use(bodyParser.json());
 app.use(cors());
 
-// MongoDB Connection
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_survey';
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_simple'; 
+let db;
 
-mongoose.connect(MONGO_URI, {
-  useNewUrlParser: true 
-})
-.then(() => console.log('✅ Connected to MongoDB'))
-.catch(err => {
-  console.error('❌ MongoDB connection error:', err);
-  process.exit(1);
-});
-
-// User Schema
-const userSchema = new mongoose.Schema({
-  name: { type: String, required: true },
-  email: { type: String, required: true, unique: true },
-  password: { type: String, required: true },
-  role: { 
-    type: String, 
-    enum: ['user', 'admin'], 
-    default: 'user' 
-  },
-  company: String,
-  created_at: { type: Date, default: Date.now }
-});
-
-const User = mongoose.model('User', userSchema);
-
-// Current Questions Schema with versioning
-const currentQuestionsSchema = new mongoose.Schema({
-  questions: { type: Array, required: true },
-  version: { type: String, required: true },
-  updated_by: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User',
-    required: true 
-  },
-  updated_at: { type: Date, default: Date.now }
-});
-
-const CurrentQuestions = mongoose.model('CurrentQuestions', currentQuestionsSchema);
-
-// Survey Responses Schema with version tracking
-const surveyResponseSchema = new mongoose.Schema({
-  user_id: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User',
-    required: true 
-  },
-  question_set_version: { type: String, required: true },
-  questions: { type: Array, required: true },
-  answers: { type: Array, required: true },
-  submitted_at: { type: Date, default: Date.now }
-});
-
-// Compound index to ensure one response per user per question set version
-surveyResponseSchema.index({ user_id: 1, question_set_version: 1 }, { unique: true });
-
-const SurveyResponse = mongoose.model('SurveyResponse', surveyResponseSchema);
-
-<<<<<<< HEAD
 // ===============================
-// NEW: AUDIT TRAIL SCHEMA
+// DATABASE CONNECTION & SETUP
 // ===============================
 
-// Simple Audit Trail Schema - just add this one schema
-const auditTrailSchema = new mongoose.Schema({
-  user_id: {
-    type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
-  },
-  business_name: { type: String, required: true },
-  
-  // Survey data (questions and answers)
-  survey_data: {
-    version: String,
-    questions: { type: Array, required: true }, // All questions from your survey
-    answers: { type: Array, required: true },   // All answers from user
-    completion_percentage: Number,
-    submitted_at: Date
-  },
-  
-  // Analysis result data  
-  analysis_data: {
-    analysis_type: String,        // swot, porter, pestle, etc.
-    analysis_framework: String,   // framework name
-    category: String,             // analysis or strategic
-    generated_result: { type: mongoose.Schema.Types.Mixed, required: true }, // The actual analysis result
-    groq_request_details: {
-      model: String,
-      tokens_used: Number,
-      response_time_ms: Number
-    }
-  },
-  
-  // Save details
-  save_details: {
-    title: { type: String, required: true },
-    description: String,
-    tags: [String]
-  },
-  
-  // Timestamps
-  created_at: { type: Date, default: Date.now },
-  analysis_generated_at: Date,
-  saved_at: { type: Date, default: Date.now }
-});
-
-auditTrailSchema.index({ user_id: 1, created_at: -1 });
-auditTrailSchema.index({ business_name: 1 });
-
-const AuditTrail = mongoose.model('AuditTrail', auditTrailSchema);
-
-=======
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-// Simple CSV conversion function
-function convertToCSV(data) {
-  if (!data || !data.length) return '';
-  
-  const headers = Object.keys(data[0]);
-  const csvRows = [];
-  
-  csvRows.push(headers.map(header => `"${header}"`).join(','));
-  
-  data.forEach(row => {
-    const values = headers.map(header => {
-      const value = row[header] || '';
-      return `"${String(value).replace(/"/g, '""')}"`;
-    });
-    csvRows.push(values.join(','));
-  });
-  
-  return csvRows.join('\n');
+async function connectToMongoDB() {
+  try {
+    const client = new MongoClient(MONGO_URI);
+    await client.connect();
+    db = client.db();
+    await initializeSystem();
+    console.log('Connected to MongoDB');
+  } catch (err) {
+    console.error('MongoDB connection failed:', err);
+    process.exit(1);
+  }
 }
 
-// Configure multer for file uploads
-const upload = multer({
-  dest: 'uploads/',
-  fileFilter: (req, file, cb) => {
-    if (file.mimetype === 'application/json' || file.originalname.endsWith('.json')) {
-      cb(null, true);
-    } else {
-      cb(new Error('Only JSON files are allowed'), false);
+async function initializeSystem() {
+  try {
+    // Create default roles
+    const existingRoles = await db.collection('roles').countDocuments();
+    if (existingRoles === 0) {
+      await db.collection('roles').insertMany([
+        {
+          role_name: 'super_admin',
+          permissions: ['manage_all'],
+          can_view: true,
+          can_answer: true,
+          created_at: new Date()
+        },
+        {
+          role_name: 'company_admin',
+          permissions: ['manage_company'],
+          can_view: true,
+          can_answer: true,
+          created_at: new Date()
+        },
+        {
+          role_name: 'user',
+          permissions: ['answer_questions'],
+          can_view: true,
+          can_answer: true,
+          created_at: new Date()
+        }
+      ]);
     }
-  },
-  limits: { fileSize: 5 * 1024 * 1024 }
-});
 
-// Middleware to verify JWT
+    // Create super admin user
+    const superAdminRole = await db.collection('roles').findOne({ role_name: 'super_admin' });
+    const existingSuperAdmin = await db.collection('users').findOne({ role_id: superAdminRole._id });
+
+    if (!existingSuperAdmin) {
+      const hashedPassword = await bcrypt.hash('admin123', 12);
+      await db.collection('users').insertOne({
+        name: 'Super Admin',
+        email: 'admin@traxxia.com',
+        password: hashedPassword,
+        role_id: superAdminRole._id,
+        company_id: null,
+        created_at: new Date()
+      });
+    }
+  } catch (error) {
+    console.error('System initialization failed:', error);
+  }
+}
+
+// ===============================
+// MIDDLEWARE
+// ===============================
+
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-  
-  if (!token) return res.status(401).send({ message: 'No token provided' });
 
-  jwt.verify(token, secretKey, (err, user) => {
-    if (err) return res.status(403).send({ message: 'Invalid token' });
-    req.user = user;
+  if (!token) return res.status(401).json({ error: 'No token provided' });
+
+  jwt.verify(token, secretKey, async (err, decoded) => {
+    if (err) return res.status(403).json({ error: 'Invalid token' });
+
+    const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
+    if (!user) return res.status(403).json({ error: 'User not found' });
+
+    const role = await db.collection('roles').findOne({ _id: user.role_id });
+    req.user = { ...user, role };
     next();
   });
 };
 
-// Middleware to check admin role
 const requireAdmin = (req, res, next) => {
-  if (req.user.role !== 'admin') {
-    return res.status(403).send({ message: 'Admin access required' });
+  const role = req.user.role.role_name;
+  if (!['super_admin', 'company_admin'].includes(role)) {
+    return res.status(403).json({ error: 'Admin access required' });
+  }
+  next();
+};
+
+const requireSuperAdmin = (req, res, next) => {
+  if (req.user.role.role_name !== 'super_admin') {
+    return res.status(403).json({ error: 'Super admin access required' });
   }
   next();
 };
 
 // ===============================
-// 1. SECURE USER CREATION & AUTHENTICATION - PRIVILEGE ESCALATION FIXED
+// AUTHENTICATION APIs
 // ===============================
-
-app.post('/api/users', async (req, res) => {
-  try {
-    // SECURITY FIX: REMOVED role from destructuring - privilege escalation vulnerability FIXED
-    const { name, email, password, company } = req.body;
-
-    if (!name || !email || !password) {
-      return res.status(400).send({ message: 'Name, email, and password are required' });
-    }
-
-    // Enhanced validation
-    if (name.length < 2 || name.length > 50) {
-      return res.status(400).send({ message: 'Name must be between 2 and 50 characters' });
-    }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      return res.status(400).send({ message: 'Please provide a valid email address' });
-    }
-
-    if (password.length < 8) {
-      return res.status(400).send({ message: 'Password must be at least 8 characters long' });
-    }
-
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return res.status(400).send({ message: 'User already exists with this email' });
-    }
-
-    const hashedPassword = await bcrypt.hash(password, 12); // Increased salt rounds for security
-
-    const newUser = new User({ 
-      name, 
-      email, 
-      password: hashedPassword, 
-      role: 'user',  
-      company 
-    });
-
-    await newUser.save();
- 
-    res.status(201).send({ 
-      message: 'User created successfully',
-      user: {
-        id: newUser._id,
-        name: newUser.name,
-        email: newUser.email,
-        role: newUser.role 
-      }
-    });
-  } catch (error) {
-    console.error('User creation error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
 
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    
+
     if (!email || !password) {
-      return res.status(400).send({ message: 'Email and password are required' });
+      return res.status(400).json({ error: 'Email and password required' });
     }
 
-    const user = await User.findOne({ email });
-    if (!user) {
-      return res.status(400).send({ message: 'Invalid credentials' });
+    const user = await db.collection('users').findOne({ email });
+    if (!user || !await bcrypt.compare(password, user.password)) {
+      return res.status(400).json({ error: 'Invalid credentials' });
     }
 
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) {
-      return res.status(400).send({ message: 'Invalid credentials' });
-    }
+    const role = await db.collection('roles').findOne({ _id: user.role_id });
+    const company = user.company_id ? 
+      await db.collection('companies').findOne({ _id: user.company_id }) : null;
 
-    // Enhanced JWT payload
-    const token = jwt.sign({ 
-      id: user._id, 
-      email: user.email, 
-      role: user.role 
+    const token = jwt.sign({
+      id: user._id,
+      email: user.email,
+      role: role.role_name
     }, secretKey, { expiresIn: '24h' });
-    
-    // Get latest question set version
-    const latestQuestionSet = await CurrentQuestions.findOne().sort({ updated_at: -1 });
-    const latestVersion = latestQuestionSet ? latestQuestionSet.version : null;
-    
-    res.status(200).send({ 
-      message: 'Login successful', 
+
+    res.json({
       token,
       user: {
         id: user._id,
         name: user.name,
         email: user.email,
-        role: user.role
-      },
-      latest_version: latestVersion
-    });
-  } catch (error) {
-    console.error('Login error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===============================
-// 2. QUESTION SET MANAGEMENT (Admin only) - Generic for all versions
-// ===============================
-
-app.post('/api/admin/upload-questions', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { questions, version } = req.body;
-
-    if (!questions || !Array.isArray(questions)) {
-      return res.status(400).send({ message: 'Questions array is required' });
-    }
-
-    if (!version) {
-      return res.status(400).send({ message: 'Version is required' });
-    }
-
-    // Check if version already exists
-    const existingVersion = await CurrentQuestions.findOne({ version });
-    if (existingVersion) {
-      return res.status(400).send({ message: `Version ${version} already exists` });
-    }
-
-<<<<<<< HEAD
-    // Validate and ensure all questions have severity and phase fields
-    const processedQuestions = questions.map(category => ({
-      ...category,
-      questions: category.questions ? category.questions.map(question => {
-        // Validate severity field
-        const severity = question.severity || 'mandatory';
-        if (!['mandatory', 'optional'].includes(severity)) {
-          throw new Error(`Invalid severity "${severity}" for question: ${question.question}. Must be 'mandatory' or 'optional'.`);
-        }
-
-        // Validate phase field  
-        const phase = question.phase || 'initial';
-        if (!['initial', 'essential', 'good', 'excellent'].includes(phase)) {
-          throw new Error(`Invalid phase "${phase}" for question: ${question.question}. Must be 'initial', 'essential', 'good', or 'excellent'.`);
-        }
-
-        return {
-          ...question,
-          severity: severity,
-          phase: phase
-        };
-      }) : []
-    }));
-
-    // Create new question set
-    const newQuestions = new CurrentQuestions({
-      questions: processedQuestions,
-=======
-    // Create new question set
-    const newQuestions = new CurrentQuestions({
-      questions: questions,
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-      version: version,
-      updated_by: req.user.id
-    });
-
-    await newQuestions.save();
-
-<<<<<<< HEAD
-    // Calculate statistics
-    const stats = {
-      totalCategories: processedQuestions.length,
-      totalQuestions: processedQuestions.reduce((sum, cat) => sum + (cat.questions ? cat.questions.length : 0), 0),
-      severityBreakdown: {
-        mandatory: 0,
-        optional: 0
-      },
-      phaseBreakdown: {
-        initial: 0,
-        essential: 0,
-        good: 0,
-        excellent: 0
-      }
-    };
-
-    // Calculate breakdown statistics
-    processedQuestions.forEach(category => {
-      if (category.questions) {
-        category.questions.forEach(question => {
-          stats.severityBreakdown[question.severity]++;
-          stats.phaseBreakdown[question.phase]++;
-        });
+        role: role.role_name,
+        company: company?.company_name || null
       }
     });
-
-    res.status(200).send({ 
-      message: 'Questions uploaded successfully',
-      version: version,
-      statistics: stats
-=======
-    res.status(200).send({ 
-      message: 'Questions uploaded successfully',
-      version: version,
-      totalCategories: questions.length,
-      totalQuestions: questions.reduce((sum, cat) => sum + (cat.questions ? cat.questions.length : 0), 0)
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-    });
-
   } catch (error) {
-    console.error('Upload questions error:', error);
-    res.status(500).send({ message: 'Upload failed', error: error.message });
+    res.status(500).json({ error: 'Login failed' });
   }
 });
 
-// Get latest questions for users (always returns most recent version)
-app.get('/api/questions', authenticateToken, async (req, res) => {
+app.post('/api/register', async (req, res) => {
   try {
-    // Always get the latest version
-    const currentQuestions = await CurrentQuestions.findOne().sort({ updated_at: -1 });
-    
-    if (!currentQuestions) {
-      return res.status(404).send({ message: 'No questions available' });
+    const { name, email, password, company_id } = req.body;
+
+    if (!name || !email || !password || !company_id) {
+      return res.status(400).json({ error: 'All fields required' });
     }
 
-    res.status(200).send({ 
-      questions: currentQuestions.questions,
-      version: currentQuestions.version
+    const existingUser = await db.collection('users').findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    const company = await db.collection('companies').findOne({ 
+      _id: new ObjectId(company_id),
+      status: 'active'
+    });
+    if (!company) {
+      return res.status(400).json({ error: 'Invalid company' });
+    }
+
+    const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    const result = await db.collection('users').insertOne({
+      name,
+      email,
+      password: hashedPassword,
+      role_id: userRole._id,
+      company_id: new ObjectId(company_id),
+      created_at: new Date()
+    });
+
+    res.json({
+      message: 'Registration successful',
+      user_id: result.insertedId
     });
   } catch (error) {
-    console.error('Get questions error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// ===============================
-// 3. SURVEY RESPONSE MANAGEMENT
-// ===============================
-
-app.post('/api/survey/submit', authenticateToken, async (req, res) => {
-  try {
-    const { answers, version } = req.body;
-
-    if (!answers || !Array.isArray(answers)) {
-      return res.status(400).send({ message: 'Answers array is required' });
-    }
-
-    // Get question set (specific version or latest)
-    let questionSet;
-    if (version) {
-      questionSet = await CurrentQuestions.findOne({ version });
-    } else {
-      questionSet = await CurrentQuestions.findOne().sort({ updated_at: -1 });
-    }
-
-    if (!questionSet) {
-      return res.status(404).send({ message: 'Question set not found' });
-    }
-
-    // Delete existing response for this user and version (allows overwrite/resubmission)
-    await SurveyResponse.deleteOne({ 
-      user_id: req.user.id,
-      question_set_version: questionSet.version
-    });
-
-    // Save the new response
-    const surveyResponse = new SurveyResponse({
-      user_id: req.user.id,
-      question_set_version: questionSet.version,
-      questions: questionSet.questions,
-      answers: answers
-    });
-
-    await surveyResponse.save();
-
-    res.status(200).send({ 
-      message: 'Survey submitted successfully',
-      response_id: surveyResponse._id,
-      version: questionSet.version
-    });
-
-  } catch (error) {
-    console.error('Submit survey error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-app.get('/api/survey/my-responses', authenticateToken, async (req, res) => {
-  try {
-    const responses = await SurveyResponse.find({ user_id: req.user.id })
-      .sort({ submitted_at: -1 });
-
-    const responseData = responses.map(response => ({
-      version: response.question_set_version,
-      submitted_at: response.submitted_at,
-      totalAnswers: response.answers.length
-    }));
-
-    res.status(200).send({ 
-      responses: responseData
-    });
-  } catch (error) {
-    console.error('Get user responses error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
+    res.status(500).json({ error: 'Registration failed' });
   }
 });
 
 // ===============================
-// 4. ADMIN USER MANAGEMENT
+// COMPANIES API
 // ===============================
 
-app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+app.get('/api/companies', async (req, res) => {
   try {
-    const { role } = req.query; // ?role=user or ?role=admin or omit for all
-    
-    // Build query based on role parameter
-    let query = {};
-    if (role && ['user', 'admin'].includes(role)) {
-      query.role = role;
-    }
+    const companies = await db.collection('companies')
+      .find({ status: 'active' })
+      .project({ company_name: 1, industry: 1, logo: 1 })
+      .sort({ company_name: 1 })
+      .toArray();
 
-    const users = await User.find(query)
-      .select('name email company role created_at')
-      .sort({ created_at: -1 });
+    res.json({ companies });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch companies' });
+  }
+});
 
-    const usersWithStatus = await Promise.all(
-      users.map(async (user) => {
-        // Get all responses for this user across all versions
-        const responses = await SurveyResponse.find({ user_id: user._id })
-          .sort({ submitted_at: -1 });
+// ===============================
+// BUSINESSES API
+// ===============================
+
+app.get('/api/businesses', authenticateToken, async (req, res) => {
+  try {
+    const businesses = await db.collection('user_businesses')
+      .find({ user_id: new ObjectId(req.user._id) })
+      .sort({ created_at: -1 })
+      .toArray();
+
+    // Get total active questions count
+    const totalQuestions = await db.collection('global_questions')
+      .countDocuments({ is_active: true });
+
+    // Enhanced businesses with question statistics
+    const enhancedBusinesses = await Promise.all(
+      businesses.map(async (business) => {
+        // Get all conversations for this business
+        const conversations = await db.collection('user_business_conversations')
+          .find({
+            user_id: new ObjectId(req.user._id),
+            business_id: business._id,
+            conversation_type: 'question_answer'
+          })
+          .toArray();
+
+        // Group conversations by question_id to find completion status
+        const questionStats = {};
         
+        conversations.forEach(conv => {
+          if (conv.question_id) {
+            const questionId = conv.question_id.toString();
+            
+            // Initialize question stats if not exists
+            if (!questionStats[questionId]) {
+              questionStats[questionId] = {
+                hasAnswers: false,
+                isComplete: false,
+                answerCount: 0
+              };
+            }
+            
+            // Check if there are actual answers
+            if (conv.answer_text && conv.answer_text.trim() !== '') {
+              questionStats[questionId].hasAnswers = true;
+              questionStats[questionId].answerCount++;
+            }
+            
+            // Check completion status from metadata
+            if (conv.metadata && conv.metadata.is_complete === true) {
+              questionStats[questionId].isComplete = true;
+            }
+          }
+        });
+
+        // Count completed and pending questions
+        const completedQuestions = Object.values(questionStats).filter(
+          stat => stat.isComplete || stat.hasAnswers
+        ).length;
+        
+        const pendingQuestions = totalQuestions - completedQuestions;
+
+        // Calculate progress percentage
+        const progressPercentage = totalQuestions > 0 
+          ? Math.round((completedQuestions / totalQuestions) * 100) 
+          : 0;
+
         return {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          company: user.company || '',
-          role: user.role,
-          created_at: user.created_at,
-          total_responses: responses.length,
-          latest_response: responses.length > 0 ? {
-            version: responses[0].question_set_version,
-            submitted_at: responses[0].submitted_at
-          } : null
+          ...business,
+          question_statistics: {
+            total_questions: totalQuestions,
+            completed_questions: completedQuestions,
+            pending_questions: pendingQuestions,
+            progress_percentage: progressPercentage,
+            total_answers_given: Object.values(questionStats).reduce(
+              (sum, stat) => sum + stat.answerCount, 0
+            )
+          }
         };
       })
     );
 
-    res.status(200).send({ 
-      users: usersWithStatus,
-      total: usersWithStatus.length,
-      filter_applied: role || 'none'
+    res.json({ 
+      businesses: enhancedBusinesses,
+      overall_stats: {
+        total_businesses: businesses.length,
+        total_questions_in_system: totalQuestions
+      }
     });
-
   } catch (error) {
-    console.error('Get users error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
+    console.error('Failed to fetch businesses:', error);
+    res.status(500).json({ error: 'Failed to fetch businesses' });
   }
 });
 
-// ===============================
-<<<<<<< HEAD
-// NEW: AUDIT TRAIL APIs
-// ===============================
-
-// API 1: POST - Save Audit Trail (when user clicks save)
-app.post('/api/audit-trail/save', authenticateToken, async (req, res) => {
+app.post('/api/businesses', authenticateToken, async (req, res) => {
   try {
-    const {
+    const { business_name, business_purpose, description } = req.body;
+
+    if (!business_name || !business_purpose) {
+      return res.status(400).json({ error: 'Business name and purpose required' });
+    }
+
+    const existingCount = await db.collection('user_businesses')
+      .countDocuments({ user_id: new ObjectId(req.user._id) });
+
+    if (existingCount >= 5) {
+      return res.status(400).json({ error: 'Maximum 5 businesses allowed' });
+    }
+
+    const result = await db.collection('user_businesses').insertOne({
+      user_id: new ObjectId(req.user._id),
       business_name,
-      survey_data,           // {version, questions, answers, completion_percentage}
-      analysis_data,         // {analysis_type, framework, category, result, groq_details}
-      save_details          // {title, description, tags}
-    } = req.body;
-
-    // Validation
-    if (!business_name || !survey_data || !analysis_data || !save_details?.title) {
-      return res.status(400).send({ 
-        message: 'Business name, survey data, analysis data, and save title are required' 
-      });
-    }
-
-    // Create audit trail entry
-    const auditEntry = new AuditTrail({
-      user_id: req.user.id,
-      business_name: business_name.trim(),
-      
-      survey_data: {
-        version: survey_data.version || 'unknown',
-        questions: survey_data.questions || [],
-        answers: survey_data.answers || [],
-        completion_percentage: survey_data.completion_percentage || 0,
-        submitted_at: survey_data.submitted_at || new Date()
-      },
-      
-      analysis_data: {
-        analysis_type: analysis_data.analysis_type,
-        analysis_framework: analysis_data.analysis_framework,
-        category: analysis_data.category,
-        generated_result: analysis_data.generated_result,
-        groq_request_details: analysis_data.groq_request_details || {}
-      },
-      
-      save_details: {
-        title: save_details.title.trim(),
-        description: save_details.description?.trim() || '',
-        tags: Array.isArray(save_details.tags) ? save_details.tags : []
-      },
-      
-      analysis_generated_at: analysis_data.generated_at || new Date()
+      business_purpose,
+      description: description || '',
+      created_at: new Date()
     });
 
-    await auditEntry.save();
-
-    console.log(`✅ Audit trail saved: ${save_details.title} for ${business_name}`);
-
-    res.status(201).send({
-      message: 'Audit trail saved successfully',
-      audit_id: auditEntry._id,
-      title: auditEntry.save_details.title,
-      created_at: auditEntry.created_at
+    res.json({
+      message: 'Business created',
+      business_id: result.insertedId
     });
-
   } catch (error) {
-    console.error('Save audit trail error:', error);
-    res.status(500).send({ 
-      message: 'Failed to save audit trail', 
-      error: error.message 
-    });
+    res.status(500).json({ error: 'Failed to create business' });
   }
 });
 
-// API 2: GET - Get Audit Trail History
-app.get('/api/audit-trail/history', authenticateToken, async (req, res) => {
+app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 20,
-      business_name,    // Filter by business name
-      analysis_type,    // Filter by analysis type (swot, porter, etc.)
-      date_from,        // Filter from date
-      date_to,          // Filter to date
-      search           // Search in title/description
-    } = req.query;
+    const businessId = new ObjectId(req.params.id);
+    const userId = new ObjectId(req.user._id);
 
-    // Build query for current user
-    const query = { user_id: req.user.id };
-
-    // Apply filters
-    if (business_name) {
-      query.business_name = { $regex: business_name, $options: 'i' };
-    }
-
-    if (analysis_type) {
-      query['analysis_data.analysis_type'] = analysis_type;
-    }
-
-    if (date_from || date_to) {
-      query.created_at = {};
-      if (date_from) query.created_at.$gte = new Date(date_from);
-      if (date_to) query.created_at.$lte = new Date(date_to);
-    }
-
-    if (search) {
-      query.$or = [
-        { 'save_details.title': { $regex: search, $options: 'i' } },
-        { 'save_details.description': { $regex: search, $options: 'i' } },
-        { business_name: { $regex: search, $options: 'i' } }
-      ];
-    }
-
-    // Pagination
-    const skip = (parseInt(page) - 1) * parseInt(limit);
-    
-    const [auditHistory, totalCount] = await Promise.all([
-      AuditTrail.find(query)
-        .populate('user_id', 'name email')
-        .sort({ created_at: -1 })
-        .skip(skip)
-        .limit(parseInt(limit)),
-      AuditTrail.countDocuments(query)
-    ]);
-
-    // Format response
-    const formattedHistory = auditHistory.map(entry => ({
-      id: entry._id,
-      business_name: entry.business_name,
-      
-      // Save details
-      title: entry.save_details.title,
-      description: entry.save_details.description,
-      tags: entry.save_details.tags,
-      
-      // Survey summary
-      survey_summary: {
-        version: entry.survey_data.version,
-        total_questions: entry.survey_data.questions.length,
-        total_answers: entry.survey_data.answers.length,
-        completion_percentage: entry.survey_data.completion_percentage,
-        submitted_at: entry.survey_data.submitted_at
-      },
-      
-      // Analysis summary
-      analysis_summary: {
-        type: entry.analysis_data.analysis_type,
-        framework: entry.analysis_data.analysis_framework,
-        category: entry.analysis_data.category,
-        generated_at: entry.analysis_generated_at
-      },
-      
-      // User info
-      user: entry.user_id ? {
-        name: entry.user_id.name,
-        email: entry.user_id.email
-      } : null,
-      
-      // Timestamps
-      created_at: entry.created_at,
-      saved_at: entry.saved_at
-    }));
-
-    res.status(200).send({
-      audit_history: formattedHistory,
-      pagination: {
-        current_page: parseInt(page),
-        total_pages: Math.ceil(totalCount / parseInt(limit)),
-        total_count: totalCount,
-        per_page: parseInt(limit)
-      },
-      filters_applied: {
-        business_name: business_name || null,
-        analysis_type: analysis_type || null,
-        date_from: date_from || null,
-        date_to: date_to || null,
-        search: search || null
-      }
+    const deleteResult = await db.collection('user_businesses').deleteOne({
+      _id: businessId,
+      user_id: userId
     });
 
+    if (deleteResult.deletedCount === 0) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+
+    // Delete related conversations
+    await db.collection('user_business_conversations').deleteMany({
+      user_id: userId,
+      business_id: businessId
+    });
+
+    res.json({ message: 'Business deleted' });
   } catch (error) {
-    console.error('Get audit trail history error:', error);
-    res.status(500).send({ 
-      message: 'Failed to retrieve audit trail history', 
-      error: error.message 
-    });
-  }
-});
-
-// OPTIONAL: Get specific audit trail entry details
-app.get('/api/audit-trail/:id', authenticateToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-
-    const auditEntry = await AuditTrail.findOne({
-      _id: id,
-      user_id: req.user.id
-    }).populate('user_id', 'name email');
-
-    if (!auditEntry) {
-      return res.status(404).send({ message: 'Audit trail entry not found' });
-    }
-
-    res.status(200).send({
-      id: auditEntry._id,
-      business_name: auditEntry.business_name,
-      
-      // Complete survey data
-      survey_data: auditEntry.survey_data,
-      
-      // Complete analysis data  
-      analysis_data: auditEntry.analysis_data,
-      
-      // Save details
-      save_details: auditEntry.save_details,
-      
-      // User info
-      user: {
-        name: auditEntry.user_id.name,
-        email: auditEntry.user_id.email
-      },
-      
-      // Timestamps
-      created_at: auditEntry.created_at,
-      analysis_generated_at: auditEntry.analysis_generated_at,
-      saved_at: auditEntry.saved_at
-    });
-
-  } catch (error) {
-    console.error('Get audit trail details error:', error);
-    res.status(500).send({ 
-      message: 'Failed to retrieve audit trail details', 
-      error: error.message 
-    });
+    res.status(500).json({ error: 'Failed to delete business' });
   }
 });
 
 // ===============================
-=======
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-// OPTIMIZED TRANSLATION ENDPOINTS
+// QUESTIONS API
 // ===============================
 
-// Helper function for translation with caching and batching
-const translateWithCache = (() => {
-  const cache = new Map();
-  const CACHE_EXPIRY = 3600000; // 1 hour in milliseconds
-  
-  return async (texts, targetLanguage) => {
-    if (targetLanguage === 'en') {
-      return texts;
+app.get('/api/questions', authenticateToken, async (req, res) => {
+  try {
+    const questions = await db.collection('global_questions')
+      .find({ is_active: true })
+      .sort({ order: 1 })  // <-- Changed to sort only by 'order' ascending
+      .toArray();
+
+    res.json({ questions });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch questions' });
+  }
+});
+// ===============================
+// QUESTION MANAGEMENT APIs (Add these to your existing code)
+// ===============================
+
+// 1. Reorder Questions API
+app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { questions, phase } = req.body;
+
+    if (!questions || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({ error: 'Questions array is required' });
     }
 
-    const results = [];
-    const textsToTranslate = [];
-    const indices = [];
-
-    // Check cache first
-    texts.forEach((text, index) => {
-      const cacheKey = `${text.trim()}_${targetLanguage}`;
-      const cached = cache.get(cacheKey);
-      
-      if (cached && (Date.now() - cached.timestamp < CACHE_EXPIRY)) {
-        results[index] = cached.translation;
-      } else if (text && text.trim()) {
-        textsToTranslate.push(text.trim());
-        indices.push(index);
-      } else {
-        results[index] = text;
-      }
-    });
-
-    // If all texts were cached, return immediately
-    if (textsToTranslate.length === 0) {
-      return results;
+    if (!phase) {
+      return res.status(400).json({ error: 'Phase is required for reordering' });
     }
 
-    // Batch translate uncached texts (chunks of 5 to respect rate limits)
-    const BATCH_SIZE = 5;
-    const axios = require('axios');
-    
-    for (let i = 0; i < textsToTranslate.length; i += BATCH_SIZE) {
-      const batch = textsToTranslate.slice(i, i + BATCH_SIZE);
-      const batchIndices = indices.slice(i, i + BATCH_SIZE);
-      
-      // Process batch concurrently with Promise.allSettled for better error handling
-      const promises = batch.map(async (text) => {
-        try {
-          const response = await axios.get('https://api.mymemory.translated.net/get', {
-            params: {
-              q: text,
-              langpair: `en|${targetLanguage}`,
-              de: 'admin@traxxia.com'
-            },
-            timeout: 8000
-          });
-          
-          if (response.data?.responseData?.translatedText) {
-            return response.data.responseData.translatedText;
-          }
-          return text; // Fallback
-        } catch (error) {
-          console.error(`Translation error for "${text}":`, error.message);
-          return text; // Fallback
-        }
-      });
-
-      const batchResults = await Promise.allSettled(promises);
-      
-      // Store results and cache them
-      batchResults.forEach((result, batchIndex) => {
-        const originalIndex = batchIndices[batchIndex];
-        const originalText = textsToTranslate[i + batchIndex];
-        const translation = result.status === 'fulfilled' ? result.value : originalText;
-        
-        results[originalIndex] = translation;
-        
-        // Cache the translation
-        const cacheKey = `${originalText}_${targetLanguage}`;
-        cache.set(cacheKey, {
-          translation,
-          timestamp: Date.now()
+    // Validate that all questions have required fields
+    const validationErrors = [];
+    questions.forEach((question, index) => {
+      if (!question.question_id || !question.order) {
+        validationErrors.push({
+          index: index,
+          error: 'question_id and order are required for each question'
         });
-      });
+      }
+      if (!Number.isInteger(question.order) || question.order < 1) {
+        validationErrors.push({
+          index: index,
+          error: 'order must be a positive integer'
+        });
+      }
+    });
 
-      // Small delay between batches to respect rate limits
-      if (i + BATCH_SIZE < textsToTranslate.length) {
-        await new Promise(resolve => setTimeout(resolve, 300));
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        validation_errors: validationErrors
+      });
+    }
+
+    // Verify all questions exist and belong to the specified phase
+    const questionIds = questions.map(q => new ObjectId(q.question_id));
+    const existingQuestions = await db.collection('global_questions')
+      .find({ 
+        _id: { $in: questionIds },
+        phase: phase
+      })
+      .toArray();
+
+    if (existingQuestions.length !== questions.length) {
+      return res.status(400).json({ 
+        error: 'One or more questions not found or do not belong to the specified phase' 
+      });
+    }
+
+    // Get the maximum order from other phases to maintain global ordering
+    const otherPhasesMaxOrder = await db.collection('global_questions')
+      .find({ 
+        phase: { $ne: phase },
+        is_active: true 
+      })
+      .sort({ order: -1 })
+      .limit(1)
+      .toArray();
+
+    // Get the minimum order from other phases that come after this phase
+    const phaseOrder = ['initial', 'essential', 'good', 'excellent'];
+    const currentPhaseIndex = phaseOrder.indexOf(phase);
+    const laterPhases = phaseOrder.slice(currentPhaseIndex + 1);
+    
+    let nextPhaseMinOrder = null;
+    if (laterPhases.length > 0) {
+      const nextPhaseQuestions = await db.collection('global_questions')
+        .find({ 
+          phase: { $in: laterPhases },
+          is_active: true 
+        })
+        .sort({ order: 1 })
+        .limit(1)
+        .toArray();
+      
+      if (nextPhaseQuestions.length > 0) {
+        nextPhaseMinOrder = nextPhaseQuestions[0].order;
       }
     }
 
-    return results;
-  };
-})();
+    // Calculate the starting order for this phase
+    const earlierPhases = phaseOrder.slice(0, currentPhaseIndex);
+    let phaseStartOrder = 1;
+    
+    if (earlierPhases.length > 0) {
+      const earlierPhasesMaxOrder = await db.collection('global_questions')
+        .find({ 
+          phase: { $in: earlierPhases },
+          is_active: true 
+        })
+        .sort({ order: -1 })
+        .limit(1)
+        .toArray();
+      
+      if (earlierPhasesMaxOrder.length > 0) {
+        phaseStartOrder = earlierPhasesMaxOrder[0].order + 1;
+      }
+    }
 
-// Helper function to format response data (same as get-user-response)
-// Fixed Helper function to format response data (same as get-user-response)
-function formatResponseData(user, response, version, questionSet = null) {
-  if (!response) {
-    // Format for non-submitted response
-    return {
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        company: user.company || ''
-      },
-      survey: {
-        version: version,
-        submitted_at: null,
-        total_questions: questionSet ? questionSet.questions.reduce((sum, cat) => sum + cat.questions.length, 0) : 0,
-        total_answered: 0,
-        status: 'not_submitted'
-      },
-      categories: questionSet ? questionSet.questions.map(category => ({
-        category_id: category.id,
-        category_name: category.name,
-        questions_answered: 0,
-        total_questions: category.questions.length,
-        questions: category.questions.map(question => ({
-          question_id: question.id,
-          question_text: question.question,
-          question_type: question.type,
-          options: question.options || null,
-          nested: question.nested || null,
-<<<<<<< HEAD
-          severity: question.severity || 'mandatory', // NEW FIELD
-          phase: question.phase || 'initial',         // NEW FIELD
-=======
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-          user_answer: null,
-          answered: false
-        }))
-      })) : [],
-      message: 'User has not submitted a survey response for this version yet'
-    };
+    // Calculate new global orders for the reordered questions
+    const bulkOps = questions.map((question, index) => {
+      const newGlobalOrder = phaseStartOrder + index;
+      
+      return {
+        updateOne: {
+          filter: { _id: new ObjectId(question.question_id) },
+          update: { 
+            $set: { 
+              order: newGlobalOrder,
+              updated_at: new Date()
+            } 
+          }
+        }
+      };
+    });
+
+    // If there are later phases, we need to shift their orders if necessary
+    if (nextPhaseMinOrder !== null) {
+      const maxNewOrder = phaseStartOrder + questions.length - 1;
+      if (maxNewOrder >= nextPhaseMinOrder) {
+        // We need to shift later phase questions
+        const shiftAmount = maxNewOrder - nextPhaseMinOrder + 1;
+        
+        await db.collection('global_questions').updateMany(
+          { 
+            phase: { $in: laterPhases },
+            is_active: true 
+          },
+          { 
+            $inc: { order: shiftAmount },
+            $set: { updated_at: new Date() }
+          }
+        );
+      }
+    }
+
+    // Execute the reorder operations
+    const result = await db.collection('global_questions').bulkWrite(bulkOps);
+
+    // Get the updated questions to return
+    const updatedQuestions = await db.collection('global_questions')
+      .find({ phase: phase, is_active: true })
+      .sort({ order: 1 })
+      .toArray();
+
+    res.json({
+      message: 'Questions reordered successfully',
+      modified_count: result.modifiedCount,
+      matched_count: result.matchedCount,
+      phase: phase,
+      updated_questions: updatedQuestions.map(q => ({
+        question_id: q._id,
+        question_text: q.question_text,
+        phase: q.phase,
+        order: q.order
+      }))
+    });
+
+  } catch (error) {
+    console.error('Failed to reorder questions:', error);
+    res.status(500).json({ error: 'Failed to reorder questions' });
   }
+});
 
-<<<<<<< HEAD
-  // Format for submitted response - UPDATED VERSION
-=======
-  // Format for submitted response - FIXED VERSION
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-  return {
-    user: {
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      company: user.company || ''
-    },
-    survey: {
-      version: response.question_set_version,
-      submitted_at: response.submitted_at,
-      total_questions: response.questions.reduce((sum, cat) => sum + cat.questions.length, 0),
-      total_answered: response.answers.length,
-      status: 'submitted'
-    },
-    categories: response.questions.map(category => {
-      const categoryAnswers = response.answers.filter(answer => 
-        category.questions.some(q => q.id === answer.question_id)
+// 2. Delete Question API
+app.delete('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const questionId = req.params.id;
+
+    if (!ObjectId.isValid(questionId)) {
+      return res.status(400).json({ error: 'Invalid question ID' });
+    }
+
+    // Check if question exists
+    const question = await db.collection('global_questions')
+      .findOne({ _id: new ObjectId(questionId) });
+
+    if (!question) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    // Check if question has associated conversations
+    const conversationCount = await db.collection('user_business_conversations')
+      .countDocuments({ question_id: new ObjectId(questionId) });
+
+    if (conversationCount > 0) {
+      return res.status(400).json({ 
+        error: 'Cannot delete question with existing conversations',
+        conversation_count: conversationCount
+      });
+    }
+
+    // Delete the question
+    const result = await db.collection('global_questions')
+      .deleteOne({ _id: new ObjectId(questionId) });
+
+    if (result.deletedCount === 0) {
+      return res.status(500).json({ error: 'Failed to delete question' });
+    }
+
+    res.json({
+      message: 'Question deleted successfully',
+      deleted_question: {
+        id: questionId,
+        question_text: question.question_text,
+        phase: question.phase
+      }
+    });
+
+  } catch (error) {
+    console.error('Failed to delete question:', error);
+    res.status(500).json({ error: 'Failed to delete question' });
+  }
+});
+
+// 3. Edit Question API
+app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const questionId = req.params.id;
+    const { question_text, phase, severity, order, is_active } = req.body;
+
+    if (!ObjectId.isValid(questionId)) {
+      return res.status(400).json({ error: 'Invalid question ID' });
+    }
+
+    // Validate required fields
+    if (!question_text || !phase || !severity) {
+      return res.status(400).json({ error: 'Question text, phase, and severity are required' });
+    }
+
+    // Validate severity
+    const validSeverities = ['mandatory', 'optional'];
+    if (!validSeverities.includes(severity.toLowerCase())) {
+      return res.status(400).json({ 
+        error: `Severity must be one of: ${validSeverities.join(', ')}` 
+      });
+    }
+
+    // Validate order if provided
+    if (order !== undefined && (!Number.isInteger(order) || order < 1)) {
+      return res.status(400).json({ error: 'Order must be a positive integer' });
+    }
+
+    // Check if question exists
+    const existingQuestion = await db.collection('global_questions')
+      .findOne({ _id: new ObjectId(questionId) });
+
+    if (!existingQuestion) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    // Prepare update data
+    const updateData = {
+      question_text: question_text.trim(),
+      phase: phase.trim(),
+      severity: severity.toLowerCase(),
+      updated_at: new Date()
+    };
+
+    if (order !== undefined) {
+      updateData.order = order;
+    }
+
+    if (is_active !== undefined) {
+      updateData.is_active = Boolean(is_active);
+    }
+
+    // Update the question
+    const result = await db.collection('global_questions').updateOne(
+      { _id: new ObjectId(questionId) },
+      { $set: updateData }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    if (result.modifiedCount === 0) {
+      return res.status(200).json({ 
+        message: 'No changes were made to the question',
+        question_id: questionId 
+      });
+    }
+
+    // Fetch and return updated question
+    const updatedQuestion = await db.collection('global_questions')
+      .findOne({ _id: new ObjectId(questionId) });
+
+    res.json({
+      message: 'Question updated successfully',
+      question: {
+        id: updatedQuestion._id,
+        question_text: updatedQuestion.question_text,
+        phase: updatedQuestion.phase,
+        severity: updatedQuestion.severity,
+        order: updatedQuestion.order,
+        is_active: updatedQuestion.is_active,
+        updated_at: updatedQuestion.updated_at
+      }
+    });
+
+  } catch (error) {
+    console.error('Failed to update question:', error);
+    res.status(500).json({ error: 'Failed to update question' });
+  }
+});
+
+app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { questions } = req.body;
+
+    if (!questions || !Array.isArray(questions) || questions.length === 0) {
+      return res.status(400).json({ 
+        error: 'Questions array is required and must contain at least one question' 
+      });
+    }
+
+    if (questions.length > 1000) {
+      return res.status(400).json({ 
+        error: 'Maximum 1000 questions allowed per bulk upload' 
+      });
+    }
+
+    // Validation results
+    const validationErrors = [];
+    const validQuestions = [];
+    
+    // Validate each question
+    questions.forEach((question, index) => {
+      const errors = [];
+      
+      // Required fields validation
+      if (!question.question_text || typeof question.question_text !== 'string' || question.question_text.trim() === '') {
+        errors.push('question_text is required and must be a non-empty string');
+      }
+      
+      if (!question.phase || typeof question.phase !== 'string' || question.phase.trim() === '') {
+        errors.push('phase is required and must be a non-empty string');
+      }
+      
+      if (!question.severity || typeof question.severity !== 'string' || question.severity.trim() === '') {
+        errors.push('severity is required and must be a non-empty string');
+      }
+
+      // Optional fields validation
+      if (question.order !== undefined && (!Number.isInteger(question.order) || question.order < 1)) {
+        errors.push('order must be a positive integer');
+      }
+
+      if (question.is_active !== undefined && typeof question.is_active !== 'boolean') {
+        errors.push('is_active must be a boolean');
+      }
+
+      // Valid severity values
+      const validSeverities = ['mandatory', 'optional'];
+      if (question.severity && !validSeverities.includes(question.severity.toLowerCase())) {
+        errors.push(`severity must be one of: ${validSeverities.join(', ')}`);
+      }
+
+      if (errors.length > 0) {
+        validationErrors.push({
+          index: index,
+          question_text: question.question_text || 'N/A',
+          errors: errors
+        });
+      } else {
+        // Prepare valid question for insertion
+        validQuestions.push({
+          question_text: question.question_text.trim(),
+          phase: question.phase.trim(),
+          severity: question.severity.toLowerCase(),
+          order: question.order || 1,
+          is_active: question.is_active !== undefined ? question.is_active : true,
+          created_at: new Date(),
+          created_by: req.user._id
+        });
+      }
+    });
+
+    // If there are validation errors, return them
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        error: 'Validation failed for some questions',
+        validation_errors: validationErrors,
+        valid_questions_count: validQuestions.length,
+        invalid_questions_count: validationErrors.length
+      });
+    }
+
+    // Check for duplicate questions (same question_text and phase)
+    const duplicateCheck = [];
+    const questionMap = new Map();
+    
+    validQuestions.forEach((question, index) => {
+      const key = `${question.question_text.toLowerCase()}-${question.phase.toLowerCase()}`;
+      if (questionMap.has(key)) {
+        duplicateCheck.push({
+          index: index,
+          question_text: question.question_text,
+          phase: question.phase,
+          duplicate_of_index: questionMap.get(key)
+        });
+      } else {
+        questionMap.set(key, index);
+      }
+    });
+
+    if (duplicateCheck.length > 0) {
+      return res.status(400).json({
+        error: 'Duplicate questions found in the payload',
+        duplicates: duplicateCheck
+      });
+    }
+
+    // Check for existing questions in database
+    const existingQuestions = await db.collection('global_questions').find(
+      {
+        $or: validQuestions.map(q => ({
+          question_text: { $regex: new RegExp(`^${q.question_text}$`, 'i') },
+          phase: { $regex: new RegExp(`^${q.phase}$`, 'i') }
+        }))
+      }
+    ).toArray();
+
+    if (existingQuestions.length > 0) {
+      return res.status(400).json({
+        error: 'Some questions already exist in the database',
+        existing_questions: existingQuestions.map(q => ({
+          question_text: q.question_text,
+          phase: q.phase,
+          existing_id: q._id
+        }))
+      });
+    }
+
+    // Insert all valid questions
+    const result = await db.collection('global_questions').insertMany(validQuestions);
+
+    res.json({
+      message: 'Questions uploaded successfully',
+      inserted_count: result.insertedCount,
+      inserted_ids: result.insertedIds,
+      questions_summary: {
+        total_processed: questions.length,
+        successfully_inserted: result.insertedCount,
+        failed: 0
+      }
+    });
+
+  } catch (error) {
+    console.error('Bulk questions upload failed:', error);
+    res.status(500).json({ error: 'Failed to upload questions' });
+  }
+});
+
+// ===============================
+// CONVERSATIONS API
+// =============================== 
+
+app.get('/api/conversations', authenticateToken, async (req, res) => {
+  try {
+    const { phase, business_id, user_id } = req.query;
+    
+    // Determine which user's conversations to fetch
+    let targetUserId;
+    
+    if (user_id) {
+      // Admin is requesting another user's conversations
+      if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: 'Admin access required to view other users conversations' });
+      }
+      
+      // Validate user exists and access permissions
+      const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      
+      // Company admin can only view users from their company
+      if (req.user.role.role_name === 'company_admin') {
+        if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
+          return res.status(403).json({ error: 'Access denied - user not in your company' });
+        }
+      }
+      
+      targetUserId = new ObjectId(user_id);
+    } else {
+      // Regular user requesting their own conversations
+      targetUserId = new ObjectId(req.user._id);
+    }
+    
+    // Get questions for the phase
+    let questionFilter = { is_active: true };
+    if (phase) questionFilter.phase = phase;
+    
+    const questions = await db.collection('global_questions')
+      .find(questionFilter)
+      .sort({ order: 1 })
+      .toArray();
+
+    // Get user's conversations
+    const conversations = await db.collection('user_business_conversations')
+      .find({
+        user_id: targetUserId,
+        conversation_type: 'question_answer',
+        business_id: business_id ? new ObjectId(business_id) : null
+      })
+      .sort({ created_at: 1 })
+      .toArray();
+
+    // Get phase analysis results
+    const phaseAnalysis = await db.collection('user_business_conversations')
+      .find({
+        user_id: targetUserId,
+        conversation_type: 'phase_analysis',
+        business_id: business_id ? new ObjectId(business_id) : null,
+        ...(phase && { 'metadata.phase': phase })
+      })
+      .sort({ created_at: -1 })
+      .toArray();
+
+    // Process each question
+    const result = questions.map(question => {
+      const questionConvs = conversations.filter(c => 
+        c.question_id && c.question_id.toString() === question._id.toString()
       );
 
+      // Get all conversation entries for this question (ordered by creation time)
+      const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      
+      // Build conversation flow with questions and answers
+      const conversationFlow = [];
+      allEntries.forEach(entry => {
+        if (entry.message_type === 'bot' && entry.message_text) {
+          // Followup question from bot
+          conversationFlow.push({
+            type: 'question',
+            text: entry.message_text,
+            timestamp: entry.created_at,
+            is_followup: entry.is_followup || false
+          });
+        }
+        if (entry.answer_text && entry.answer_text.trim() !== '') {
+          // User answer
+          conversationFlow.push({
+            type: 'answer',
+            text: entry.answer_text,
+            timestamp: entry.created_at,
+            is_followup: entry.is_followup || false
+          });
+        }
+      });
+      
+      // Determine completion status - get the most recent status entry
+      const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
+      const latestStatusEntry = statusEntries.length > 0 
+        ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
+        : null;
+      const status = latestStatusEntry?.metadata?.is_complete ? 'complete' : 'incomplete';
+
+      // Count answers only
+      const answerCount = conversationFlow.filter(item => item.type === 'answer').length;
+
       return {
-        category_id: category.id,
-        category_name: category.name,
-        questions_answered: categoryAnswers.length,
-        total_questions: category.questions.length,
-        questions: category.questions.map(question => {
-          const userAnswer = response.answers.find(ans => ans.question_id === question.id);
-          
-          return {
-            question_id: question.id,
-            question_text: question.question,
-            question_type: question.type,
-            options: question.options || null,
-            nested: question.nested || null,
-<<<<<<< HEAD
-            severity: question.severity || 'mandatory', // NEW FIELD
-            phase: question.phase || 'initial',         // NEW FIELD
-=======
-            // FIXED: This should match the original get-user-response format exactly
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-            user_answer: userAnswer ? {
-              answer: userAnswer.answer || null,
-              selected_option: userAnswer.selected_option || null,
-              selected_options: userAnswer.selected_options || null,
-              rating: userAnswer.rating || null
-            } : null,
-            answered: !!userAnswer
-          };
-        })
+        question_id: question._id,
+        question_text: question.question_text,
+        phase: question.phase,
+        order: question.order,
+        
+        conversation_flow: conversationFlow,
+        total_interactions: conversationFlow.length,
+        total_answers: answerCount,
+        completion_status: status,
+        last_updated: allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null
       };
-    })
-  };
-}
-
-<<<<<<< HEAD
-app.get('/api/admin/question-statistics', authenticateToken, requireAdmin, async (req, res) => {
-  try {
-    const { version } = req.query;
-    
-    let query = {};
-    if (version) {
-      query.version = version;
-    }
-    
-    const questionSets = await CurrentQuestions.find(query).sort({ updated_at: -1 });
-    
-    if (questionSets.length === 0) {
-      return res.status(404).send({ message: 'No question sets found' });
-    }
-    
-    const statistics = questionSets.map(questionSet => {
-      const stats = {
-        version: questionSet.version,
-        updated_at: questionSet.updated_at,
-        totalCategories: questionSet.questions.length,
-        totalQuestions: 0,
-        severityBreakdown: {
-          mandatory: 0,
-          optional: 0
-        },
-        phaseBreakdown: {
-          initial: 0,
-          essential: 0,
-          good: 0,
-          excellent: 0
-        },
-        detailedBreakdown: {
-          mandatory_by_phase: { initial: 0, essential: 0, good: 0, excellent: 0 },
-          optional_by_phase: { initial: 0, essential: 0, good: 0, excellent: 0 }
-        }
-      };
-      
-      questionSet.questions.forEach(category => {
-        if (category.questions) {
-          category.questions.forEach(question => {
-            stats.totalQuestions++;
-            
-            const severity = question.severity || 'mandatory';
-            const phase = question.phase || 'initial';
-            
-            stats.severityBreakdown[severity]++;
-            stats.phaseBreakdown[phase]++;
-            stats.detailedBreakdown[`${severity}_by_phase`][phase]++;
-          });
-        }
-      });
-      
-      return stats;
     });
-    
-    res.status(200).send({
-      statistics: version ? statistics[0] : statistics,
-      total_versions: questionSets.length
-    });
-    
-  } catch (error) {
-    console.error('Get question statistics error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
 
-// UPDATE 4: New endpoint to filter questions by severity and phase
-app.post('/api/questions/filtered', authenticateToken, async (req, res) => {
-  try {
-    const { 
-      version, 
-      severity,  // 'mandatory', 'optional', or null for all
-      phase,     // 'initial', 'essential', 'good', 'excellent', or null for all
-      category_ids // Array of category IDs to filter by
-    } = req.body;
-    
-    // Get question set (specific version or latest)
-    let questionSet;
-    if (version) {
-      questionSet = await CurrentQuestions.findOne({ version });
-    } else {
-      questionSet = await CurrentQuestions.findOne().sort({ updated_at: -1 });
-    }
-    
-    if (!questionSet) {
-      return res.status(404).send({ message: 'Question set not found' });
-    }
-    
-    // Filter questions based on criteria
-    const filteredCategories = questionSet.questions
-      .filter(category => {
-        // Filter by category IDs if provided
-        if (category_ids && category_ids.length > 0) {
-          return category_ids.includes(category.id);
-        }
-        return true;
-      })
-      .map(category => ({
-        ...category,
-        questions: category.questions ? category.questions.filter(question => {
-          // Filter by severity
-          if (severity && question.severity !== severity) {
-            return false;
-          }
-          
-          // Filter by phase
-          if (phase && question.phase !== phase) {
-            return false;
-          }
-          
-          return true;
-        }) : []
-      }))
-      .filter(category => category.questions.length > 0); // Remove empty categories
-    
-    const filteredStats = {
-      total_categories: filteredCategories.length,
-      total_questions: filteredCategories.reduce((sum, cat) => sum + cat.questions.length, 0),
-      applied_filters: {
-        version: version || 'latest',
-        severity: severity || 'all',
-        phase: phase || 'all',
-        category_ids: category_ids || 'all'
+    const latestAnalysisMap = new Map();
+
+    phaseAnalysis.forEach(analysis => {
+      const key = `${analysis.metadata?.phase}-${analysis.metadata?.analysis_type}`;
+      if (!latestAnalysisMap.has(key)) {
+        latestAnalysisMap.set(key, {
+          analysis_type: analysis.metadata?.analysis_type || 'unknown',
+          analysis_name: analysis.message_text,
+          analysis_data: analysis.analysis_result,
+          created_at: analysis.created_at,
+          phase: analysis.metadata?.phase
+        });
       }
-    };
-    
-    res.status(200).send({
-      questions: filteredCategories,
-      version: questionSet.version,
-      statistics: filteredStats
     });
-    
+
+    const analysisResults = Array.from(latestAnalysisMap.values());
+
+    res.json({
+      conversations: result,
+      phase_analysis: analysisResults,
+      total_questions: questions.length,
+      completed: result.filter(r => r.completion_status === 'complete').length,
+      phase: phase || 'all',
+      user_id: targetUserId.toString() // Include the user ID in response for admin context
+    });
+
   } catch (error) {
-    console.error('Get filtered questions error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
+    console.error('Failed to fetch conversations:', error);
+    res.status(500).json({ error: 'Failed to fetch conversations' });
   }
 });
 
-=======
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-// OPTIMIZED: Single translation endpoint with consistent response format
-app.post('/api/get-user-response-translated', authenticateToken, async (req, res) => {
+
+// Get user businesses (for admin viewing other users' businesses)
+app.get('/api/businesses', authenticateToken, async (req, res) => {
   try {
-    const { user_id, version, language = 'en' } = req.body;
-
-    if (!user_id || !version) {
-      return res.status(400).send({ message: 'User ID and version are required' });
-    }
-
-    // Get user and response data (same logic as original get-user-response)
-    const user = await User.findById(user_id).select('name email company');
-    if (!user) {
-      return res.status(404).send({ message: `User with ID '${user_id}' not found` });
-    }
-
-    const response = await SurveyResponse.findOne({ 
-      user_id: user_id,
-      question_set_version: version
-    });
-
-    let responseData;
-
-    // Build response data exactly like the original get-user-response endpoint
-    if (!response) {
-      // Get the question set for this version to show available questions
-      const questionSet = await CurrentQuestions.findOne({ version });
+    const { user_id } = req.query;
+    
+    // Determine which user's businesses to fetch
+    let targetUserId;
+    
+    if (user_id) {
+      // Admin is requesting another user's businesses
+      if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: 'Admin access required to view other users businesses' });
+      }
       
-      responseData = {
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          company: user.company || ''
-        },
-        survey: {
-          version: version,
-          submitted_at: null,
-          total_questions: questionSet ? questionSet.questions.reduce((sum, cat) => sum + cat.questions.length, 0) : 0,
-          total_answered: 0,
-          status: 'not_submitted'
-        },
-        categories: questionSet ? questionSet.questions.map(category => ({
-          category_id: category.id,
-          category_name: category.name,
-          questions_answered: 0,
-          total_questions: category.questions.length,
-          questions: category.questions.map(question => ({
-            question_id: question.id,
-            question_text: question.question,
-            question_type: question.type,
-            options: question.options || null,
-            nested: question.nested || null,
-            user_answer: null,
-            answered: false
-          }))
-        })) : [],
-        message: 'User has not submitted a survey response for this version yet'
-      };
+      // Validate user exists and access permissions
+      const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      
+      // Company admin can only view users from their company
+      if (req.user.role.role_name === 'company_admin') {
+        if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
+          return res.status(403).json({ error: 'Access denied - user not in your company' });
+        }
+      }
+      
+      targetUserId = new ObjectId(user_id);
     } else {
-      // Format the response data exactly like the original endpoint
-      responseData = {
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          company: user.company || ''
-        },
-        survey: {
-          version: response.question_set_version,
-          submitted_at: response.submitted_at,
-          total_questions: response.questions.reduce((sum, cat) => sum + cat.questions.length, 0),
-          total_answered: response.answers.length,
-          status: 'submitted'
-        },
-        categories: response.questions.map(category => {
-          const categoryAnswers = response.answers.filter(answer => 
-            category.questions.some(q => q.id === answer.question_id)
-          );
+      // Regular user requesting their own businesses
+      targetUserId = new ObjectId(req.user._id);
+    }
 
-          return {
-            category_id: category.id,
-            category_name: category.name,
-            questions_answered: categoryAnswers.length,
-            total_questions: category.questions.length,
-            questions: category.questions.map(question => {
-              const userAnswer = response.answers.find(ans => ans.question_id === question.id);
-              
-              return {
-                question_id: question.id,
-                question_text: question.question,
-                question_type: question.type,
-                options: question.options || null,
-                nested: question.nested || null,
-                user_answer: userAnswer ? {
-                  answer: userAnswer.answer || null,
-                  selected_option: userAnswer.selected_option || null,
-                  selected_options: userAnswer.selected_options || null,
-                  rating: userAnswer.rating || null
-                } : null,
-                answered: !!userAnswer
+    const businesses = await db.collection('user_businesses')
+      .find({ user_id: targetUserId })
+      .sort({ created_at: -1 })
+      .toArray();
+
+    // Get total active questions count
+    const totalQuestions = await db.collection('global_questions')
+      .countDocuments({ is_active: true });
+
+    // Enhanced businesses with question statistics
+    const enhancedBusinesses = await Promise.all(
+      businesses.map(async (business) => {
+        // Get all conversations for this business
+        const conversations = await db.collection('user_business_conversations')
+          .find({
+            user_id: targetUserId,
+            business_id: business._id,
+            conversation_type: 'question_answer'
+          })
+          .toArray();
+
+        // Group conversations by question_id to find completion status
+        const questionStats = {};
+        
+        conversations.forEach(conv => {
+          if (conv.question_id) {
+            const questionId = conv.question_id.toString();
+            
+            // Initialize question stats if not exists
+            if (!questionStats[questionId]) {
+              questionStats[questionId] = {
+                hasAnswers: false,
+                isComplete: false,
+                answerCount: 0
               };
-            })
-          };
-        })
-      };
-    }
-
-    // If language is English, return as-is
-    if (language === 'en') {
-      return res.status(200).send({
-        ...responseData,
-        translated: false,
-        target_language: language
-      });
-    }
-
-    // Collect all texts that need translation
-    const textsToTranslate = [];
-    const textMappings = [];
-
-    responseData.categories.forEach((category, categoryIndex) => {
-      // Category name
-      if (category.category_name) {
-        textsToTranslate.push(category.category_name);
-        textMappings.push({ type: 'category_name', categoryIndex });
-      }
-
-      // Questions
-      category.questions?.forEach((question, questionIndex) => {
-        // Main question
-        if (question.question_text) {
-          textsToTranslate.push(question.question_text);
-          textMappings.push({ type: 'question_text', categoryIndex, questionIndex });
-        }
-
-        // Nested question
-        if (question.nested?.question) {
-          textsToTranslate.push(question.nested.question);
-          textMappings.push({ type: 'nested_question', categoryIndex, questionIndex });
-        }
-
-        // Options
-        if (question.options && Array.isArray(question.options)) {
-          question.options.forEach((option, optionIndex) => {
-            if (option) {
-              textsToTranslate.push(option);
-              textMappings.push({ type: 'option', categoryIndex, questionIndex, optionIndex });
             }
-          });
-        }
-      });
-    });
+            
+            // Check if there are actual answers
+            if (conv.answer_text && conv.answer_text.trim() !== '') {
+              questionStats[questionId].hasAnswers = true;
+              questionStats[questionId].answerCount++;
+            }
+            
+            // Check completion status from metadata
+            if (conv.metadata && conv.metadata.is_complete === true) {
+              questionStats[questionId].isComplete = true;
+            }
+          }
+        });
 
-    console.log(`Starting optimized translation for ${textsToTranslate.length} texts to ${language}`);
-    const startTime = Date.now();
+        // Count completed and pending questions
+        const completedQuestions = Object.values(questionStats).filter(
+          stat => stat.isComplete || stat.hasAnswers
+        ).length;
+        
+        const pendingQuestions = totalQuestions - completedQuestions;
 
-    // Translate all texts using optimized function
-    const translatedTexts = await translateWithCache(textsToTranslate, language);
-
-    console.log(`Translation completed in ${Date.now() - startTime}ms`);
-
-    // Apply translations back to data structure
-    const translatedData = JSON.parse(JSON.stringify(responseData));
-    
-    translatedTexts.forEach((translatedText, index) => {
-      const mapping = textMappings[index];
-      
-      switch (mapping.type) {
-        case 'category_name':
-          translatedData.categories[mapping.categoryIndex].category_name = translatedText;
-          break;
-        case 'question_text':
-          translatedData.categories[mapping.categoryIndex].questions[mapping.questionIndex].question_text = translatedText;
-          break;
-        case 'nested_question':
-          translatedData.categories[mapping.categoryIndex].questions[mapping.questionIndex].nested.question = translatedText;
-          break;
-        case 'option':
-          translatedData.categories[mapping.categoryIndex].questions[mapping.questionIndex].options[mapping.optionIndex] = translatedText;
-          break;
-      }
-    });
-
-    res.status(200).send({
-      ...translatedData,
-      translated: true,
-      target_language: language,
-      translation_time_ms: Date.now() - startTime
-    });
-
-  } catch (error) {
-    console.error('Get user response with translation error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
-  }
-});
-
-// Clear translation cache endpoint (admin only)
-app.post('/api/admin/clear-translation-cache', authenticateToken, requireAdmin, (req, res) => {
-  try {
-    res.status(200).send({ 
-      message: 'Translation cache cleared. Note: Cache will be fully cleared on server restart.' 
-    });
-  } catch (error) {
-    res.status(500).send({ message: 'Failed to clear cache', error: error.message });
-  }
-});
-
-// Simple translation endpoint for testing
-app.post('/api/translate', authenticateToken, async (req, res) => {
-  try {
-    const { text, targetLanguage = 'es' } = req.body;
-    
-    if (!text) {
-      return res.status(400).json({ error: 'Text is required' });
-    }
-
-    const translatedTexts = await translateWithCache([text], targetLanguage);
-    
-    res.json({ 
-      translatedText: translatedTexts[0],
-      cached: false
-    });
-    
-  } catch (error) {
-    console.error('Translation error:', error);
-    res.status(500).json({ 
-      error: 'Translation failed', 
-      translatedText: req.body.text
-    });
-  }
-});
-
-// ===============================
-// 5. USER RESPONSE RETRIEVAL
-// ===============================
-
-app.post('/api/get-user-response', authenticateToken, async (req, res) => {
-  try {
-    const { user_id, version } = req.body;
-
-    if (!user_id) {
-      return res.status(400).send({ message: 'User ID is required' });
-    }
-
-    if (!version) {
-      return res.status(400).send({ message: 'Version is required' });
-    }
-
-    // Find user by ID
-    const user = await User.findById(user_id).select('name email company');
-
-    if (!user) {
-      return res.status(404).send({ message: `User with ID '${user_id}' not found` });
-    }
-
-    // Get user's survey response for the specified version
-    const response = await SurveyResponse.findOne({ 
-      user_id: user_id,
-      question_set_version: version
-    });
-
-    // If no response found, return user info with empty survey data
-    if (!response) {
-      // Get the question set for this version to show available questions
-      const questionSet = await CurrentQuestions.findOne({ version });
-      
-      return res.status(200).send({
-        user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          company: user.company || ''
-        },
-        survey: {
-          version: version,
-          submitted_at: null,
-          total_questions: questionSet ? questionSet.questions.reduce((sum, cat) => sum + cat.questions.length, 0) : 0,
-          total_answered: 0,
-          status: 'not_submitted'
-        },
-        categories: questionSet ? questionSet.questions.map(category => ({
-          category_id: category.id,
-          category_name: category.name,
-          questions_answered: 0,
-          total_questions: category.questions.length,
-          questions: category.questions.map(question => ({
-            question_id: question.id,
-            question_text: question.question,
-            question_type: question.type,
-            options: question.options || null,
-            nested: question.nested || null,
-            user_answer: null,
-            answered: false
-          }))
-        })) : [],
-        message: 'User has not submitted a survey response for this version yet'
-      });
-    }
-
-    // Format the response data (existing code for when response exists)
-    const formattedResponse = {
-      user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-        company: user.company || ''
-      },
-      survey: {
-        version: response.question_set_version,
-        submitted_at: response.submitted_at,
-        total_questions: response.questions.reduce((sum, cat) => sum + cat.questions.length, 0),
-        total_answered: response.answers.length,
-        status: 'submitted'
-      },
-      categories: response.questions.map(category => {
-        const categoryAnswers = response.answers.filter(answer => 
-          category.questions.some(q => q.id === answer.question_id)
-        );
+        // Calculate progress percentage
+        const progressPercentage = totalQuestions > 0 
+          ? Math.round((completedQuestions / totalQuestions) * 100) 
+          : 0;
 
         return {
-          category_id: category.id,
-          category_name: category.name,
-          questions_answered: categoryAnswers.length,
-          total_questions: category.questions.length,
-          questions: category.questions.map(question => {
-            const userAnswer = response.answers.find(ans => ans.question_id === question.id);
-            
-            return {
-              question_id: question.id,
-              question_text: question.question,
-              question_type: question.type,
-              options: question.options || null,
-              nested: question.nested || null,
-              user_answer: userAnswer ? {
-                answer: userAnswer.answer || null,
-                selected_option: userAnswer.selected_option || null,
-                selected_options: userAnswer.selected_options || null,
-                rating: userAnswer.rating || null
-              } : null,
-              answered: !!userAnswer
-            };
-          })
+          ...business,
+          question_statistics: {
+            total_questions: totalQuestions,
+            completed_questions: completedQuestions,
+            pending_questions: pendingQuestions,
+            progress_percentage: progressPercentage,
+            total_answers_given: Object.values(questionStats).reduce(
+              (sum, stat) => sum + stat.answerCount, 0
+            )
+          }
         };
       })
+    );
+
+    res.json({ 
+      businesses: enhancedBusinesses,
+      overall_stats: {
+        total_businesses: businesses.length,
+        total_questions_in_system: totalQuestions
+      },
+      user_id: targetUserId.toString() // Include the user ID in response for admin context
+    });
+  } catch (error) {
+    console.error('Failed to fetch businesses:', error);
+    res.status(500).json({ error: 'Failed to fetch businesses' });
+  }
+});
+
+// Get phase analysis results (updated for admin access)
+app.get('/api/phase-analysis', authenticateToken, async (req, res) => {
+  try {
+    const { phase, business_id, analysis_type, user_id } = req.query;
+    
+    // Determine which user's phase analysis to fetch
+    let targetUserId;
+    
+    if (user_id) {
+      // Admin is requesting another user's phase analysis
+      if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: 'Admin access required to view other users phase analysis' });
+      }
+      
+      // Validate user exists and access permissions
+      const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      
+      // Company admin can only view users from their company
+      if (req.user.role.role_name === 'company_admin') {
+        if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
+          return res.status(403).json({ error: 'Access denied - user not in your company' });
+        }
+      }
+      
+      targetUserId = new ObjectId(user_id);
+    } else {
+      // Regular user requesting their own phase analysis
+      targetUserId = new ObjectId(req.user._id);
+    }
+    
+    let filter = {
+      user_id: targetUserId,
+      conversation_type: 'phase_analysis'
     };
 
-    res.status(200).send(formattedResponse);
+    if (business_id) filter.business_id = new ObjectId(business_id);
+    if (phase) filter['metadata.phase'] = phase;
+    if (analysis_type) filter['metadata.analysis_type'] = analysis_type;
+
+    const analysisResults = await db.collection('user_business_conversations')
+      .find(filter)
+      .sort({ created_at: -1 })
+      .toArray();
+
+    const formattedResults = analysisResults.map(analysis => ({
+      analysis_id: analysis._id,
+      phase: analysis.metadata?.phase,
+      analysis_type: analysis.metadata?.analysis_type,
+      analysis_name: analysis.message_text,
+      analysis_data: analysis.analysis_result,
+      created_at: analysis.created_at
+    }));
+
+    // Group by phase
+    const resultsByPhase = formattedResults.reduce((acc, result) => {
+      const phase = result.phase || 'unknown';
+      if (!acc[phase]) {
+        acc[phase] = [];
+      }
+      acc[phase].push(result);
+      return acc;
+    }, {});
+
+    res.json({
+      analysis_results: formattedResults,
+      results_by_phase: resultsByPhase,
+      total_analyses: formattedResults.length,
+      user_id: targetUserId.toString() // Include the user ID in response for admin context
+    });
 
   } catch (error) {
-    console.error('Get user response error:', error);
-    res.status(500).send({ message: 'Server error', error: error.message });
+    console.error('Failed to fetch phase analysis:', error);
+    res.status(500).json({ error: 'Failed to fetch phase analysis' });
   }
 });
 
-// ===============================
-// 6. CSV DOWNLOAD API
-// ===============================
-
-app.get('/api/download-csv/:userId', authenticateToken, async (req, res) => {
+// Enhanced admin endpoint to get user data (conversations + businesses + phase analysis)
+app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const { userId } = req.params;
-    const { version } = req.query; // Version parameter required
-
-    if (!version) {
-      return res.status(400).send({ message: 'Version parameter is required' });
-    }
-
-    const user = await User.findById(userId).select('name email company');
-    if (!user) {
-      return res.status(404).send({ message: 'User not found' });
-    }
-
-    const response = await SurveyResponse.findOne({ 
-      user_id: userId,
-      question_set_version: version
-    });
-
-    if (!response) {
-      return res.status(404).send({ 
-        message: `No survey response found for user in version ${version}` 
-      });
-    }
-
-    // Prepare CSV data
-    const csvData = [];
-
-    // User info
-    csvData.push({
-      'Section': 'User Information',
-      'Question': 'Name',
-      'Answer': user.name
-    });
-    csvData.push({
-      'Section': 'User Information',
-      'Question': 'Email',
-      'Answer': user.email
-    });
-
-    csvData.push({ 'Section': '', 'Question': '', 'Answer': '' });
-
-    // Questions and answers
-    response.questions.forEach((category) => {
-      category.questions.forEach((question) => {
-        const answer = response.answers.find(ans => ans.question_id === question.id);
-        
-        csvData.push({
-          'Section': category.name,
-          'Question': question.question,
-          'Answer': answer ? (answer.answer || answer.selected_option || answer.rating || '') : 'No Answer'
-        });
-      });
-    });
-
-    const csv = convertToCSV(csvData);
-    const filename = `survey-response-${user.name.replace(/\s+/g, '-')}-v${version}-${Date.now()}.csv`;
+    const { user_id } = req.params;
+    const { business_id } = req.query;
     
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.status(200).send(csv);
+    if (!ObjectId.isValid(user_id)) {
+      return res.status(400).json({ error: 'Invalid user ID' });
+    }
+    
+    // Validate user exists and access permissions
+    const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
+    if (!targetUser) {
+      return res.status(404).json({ error: 'User not found' });
+    }
+    
+    // Company admin can only view users from their company
+    if (req.user.role.role_name === 'company_admin') {
+      if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
+        return res.status(403).json({ error: 'Access denied - user not in your company' });
+      }
+    }
+    
+    const targetUserId = new ObjectId(user_id);
+    
+    // Build conversation filter
+    let conversationFilter = {
+      user_id: targetUserId,
+      conversation_type: 'question_answer'
+    };
+    
+    // Build phase analysis filter
+    let phaseAnalysisFilter = {
+      user_id: targetUserId,
+      conversation_type: 'phase_analysis'
+    };
+    
+    // Build business filter
+    let businessFilter = { user_id: targetUserId };
+    
+    // If business_id is specified, filter data for that business only
+    if (business_id && ObjectId.isValid(business_id)) {
+      const businessObjectId = new ObjectId(business_id);
+      conversationFilter.business_id = businessObjectId;
+      phaseAnalysisFilter.business_id = businessObjectId;
+      
+      // Also validate that the business belongs to the user
+      const businessExists = await db.collection('user_businesses').findOne({
+        _id: businessObjectId,
+        user_id: targetUserId
+      });
+      
+      if (!businessExists) {
+        return res.status(404).json({ error: 'Business not found for this user' });
+      }
+    }
+    
+    // Get all conversations for this user (and business if specified)
+    const conversations = await db.collection('user_business_conversations')
+      .find(conversationFilter)
+      .sort({ created_at: 1 })
+      .toArray();
+    
+    // Get all phase analysis for this user (and business if specified)
+    const phaseAnalysis = await db.collection('user_business_conversations')
+      .find(phaseAnalysisFilter)
+      .sort({ created_at: -1 })
+      .toArray();
+    
+    // Get all businesses for this user (always return all businesses for dropdown)
+    const businesses = await db.collection('user_businesses')
+      .find(businessFilter)
+      .sort({ created_at: -1 })
+      .toArray();
+    
+    // Get all questions for reference
+    const questions = await db.collection('global_questions')
+      .find({ is_active: true })
+      .sort({ order: 1 })
+      .toArray();
+    
+    // Transform conversations into phases structure
+    const phaseMap = new Map();
+    
+    // Group conversations by question and build phase structure
+    questions.forEach(question => {
+      const questionConvs = conversations.filter(c => 
+        c.question_id && c.question_id.toString() === question._id.toString()
+      );
+      
+      if (questionConvs.length > 0) {
+        const phase = question.phase;
+        
+        if (!phaseMap.has(phase)) {
+          phaseMap.set(phase, {
+            phase: phase,
+            severity: question.severity || 'mandatory',
+            questions: []
+          });
+        }
+        
+        const phaseData = phaseMap.get(phase);
+        
+        // Get all entries for this question (ordered by creation time)
+        const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+        
+        // Build conversation flow
+        const conversationFlow = [];
+        let finalAnswer = '';
+        
+        allEntries.forEach(entry => {
+          if (entry.message_type === 'bot' && entry.message_text) {
+            conversationFlow.push({
+              type: 'question',
+              text: entry.message_text,
+              timestamp: entry.created_at,
+              is_followup: entry.is_followup || false
+            });
+          }
+          if (entry.answer_text && entry.answer_text.trim() !== '') {
+            conversationFlow.push({
+              type: 'answer',
+              text: entry.answer_text,
+              timestamp: entry.created_at,
+              is_followup: entry.is_followup || false
+            });
+            finalAnswer = entry.answer_text; // Keep track of the final answer
+          }
+        });
+        
+        // Check completion status
+        const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
+        const latestStatusEntry = statusEntries.length > 0 
+          ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
+          : null;
+        const isComplete = latestStatusEntry?.metadata?.is_complete || false;
+        
+        // Only add to phase if there are actual answers (completed questions)
+        if (isComplete && finalAnswer) {
+          phaseData.questions.push({
+            question: question.question_text,
+            answer: finalAnswer,
+            question_id: question._id,
+            conversation_flow: conversationFlow,
+            is_complete: isComplete,
+            last_updated: allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null
+          });
+        }
+      }
+    });
+    
+    // Convert phase map to array and filter out empty phases
+    const conversationPhases = Array.from(phaseMap.values()).filter(phase => phase.questions.length > 0);
+    
+    // Transform phase analysis into system format
+    const systemAnalysis = phaseAnalysis.map(analysis => ({
+      name: analysis.metadata?.analysis_type || 'unknown_analysis',
+      analysis_result: analysis.analysis_result,
+      created_at: analysis.created_at,
+      phase: analysis.metadata?.phase,
+      message_text: analysis.message_text
+    }));
+    
+    // Calculate statistics
+    const totalQuestions = questions.length;
+    const completedQuestions = conversationPhases.reduce((sum, phase) => sum + phase.questions.length, 0);
+    
+    // Add question statistics to businesses
+    const enhancedBusinesses = await Promise.all(
+      businesses.map(async (business) => {
+        // Get conversations for this specific business
+        const businessConversations = await db.collection('user_business_conversations')
+          .find({
+            user_id: targetUserId,
+            business_id: business._id,
+            conversation_type: 'question_answer'
+          })
+          .toArray();
 
+        // Calculate business-specific statistics
+        const businessQuestionStats = {};
+        
+        businessConversations.forEach(conv => {
+          if (conv.question_id) {
+            const questionId = conv.question_id.toString();
+            
+            if (!businessQuestionStats[questionId]) {
+              businessQuestionStats[questionId] = {
+                hasAnswers: false,
+                isComplete: false,
+                answerCount: 0
+              };
+            }
+            
+            if (conv.answer_text && conv.answer_text.trim() !== '') {
+              businessQuestionStats[questionId].hasAnswers = true;
+              businessQuestionStats[questionId].answerCount++;
+            }
+            
+            if (conv.metadata && conv.metadata.is_complete === true) {
+              businessQuestionStats[questionId].isComplete = true;
+            }
+          }
+        });
+
+        const completedQuestionsForBusiness = Object.values(businessQuestionStats).filter(
+          stat => stat.isComplete || stat.hasAnswers
+        ).length;
+        
+        const progressPercentage = totalQuestions > 0 
+          ? Math.round((completedQuestionsForBusiness / totalQuestions) * 100) 
+          : 0;
+
+        return {
+          ...business,
+          question_statistics: {
+            total_questions: totalQuestions,
+            completed_questions: completedQuestionsForBusiness,
+            pending_questions: totalQuestions - completedQuestionsForBusiness,
+            progress_percentage: progressPercentage,
+            total_answers_given: Object.values(businessQuestionStats).reduce(
+              (sum, stat) => sum + stat.answerCount, 0
+            )
+          }
+        };
+      })
+    );
+    
+    const responseData = {
+      user_info: {
+        user_id: targetUser._id,
+        name: targetUser.name,
+        email: targetUser.email,
+        created_at: targetUser.created_at
+      },
+      conversation: conversationPhases,
+      system: systemAnalysis,
+      businesses: enhancedBusinesses,
+      stats: {
+        total_questions: totalQuestions,
+        completed_questions: completedQuestions,
+        completion_percentage: totalQuestions > 0 ? Math.round((completedQuestions / totalQuestions) * 100) : 0,
+        total_businesses: enhancedBusinesses.length,
+        total_analyses: systemAnalysis.length
+      },
+      filter_info: {
+        filtered_by_business: business_id ? true : false,
+        business_id: business_id || null,
+        showing_all_businesses: !business_id
+      }
+    };
+    
+    res.json(responseData);
+    
   } catch (error) {
-    console.error('Download CSV error:', error);
-    res.status(500).send({ message: 'Download failed', error: error.message });
+    console.error('Failed to fetch user data:', error);
+    res.status(500).json({ error: 'Failed to fetch user data' });
   }
 });
 
-// Health check
-app.get('/health', (req, res) => {
-<<<<<<< HEAD
-  res.status(200).send('Traxxia Survey Backend with Audit Trail is running 🚀');
+app.get('/api/conversations', authenticateToken, async (req, res) => {
+  try {
+    const { phase, business_id } = req.query;
+    
+    // Get questions for the phase
+    let questionFilter = { is_active: true };
+    if (phase) questionFilter.phase = phase;
+    
+    const questions = await db.collection('global_questions')
+      .find(questionFilter)
+      .sort({ order: 1 })
+      .toArray();
+
+    // Get user's conversations
+    const conversations = await db.collection('user_business_conversations')
+      .find({
+        user_id: new ObjectId(req.user._id),
+        conversation_type: 'question_answer',
+        business_id: business_id ? new ObjectId(business_id) : null
+      })
+      .sort({ created_at: 1 })
+      .toArray();
+
+    // Get phase analysis results
+    const phaseAnalysis = await db.collection('user_business_conversations')
+      .find({
+        user_id: new ObjectId(req.user._id),
+        conversation_type: 'phase_analysis',
+        business_id: business_id ? new ObjectId(business_id) : null,
+        ...(phase && { 'metadata.phase': phase })
+      })
+      .sort({ created_at: -1 })
+      .toArray();
+
+    // Process each question
+    const result = questions.map(question => {
+      const questionConvs = conversations.filter(c => 
+        c.question_id && c.question_id.toString() === question._id.toString()
+      );
+
+      // Get all conversation entries for this question (ordered by creation time)
+      const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
+      
+      // Build conversation flow with questions and answers
+      const conversationFlow = [];
+      allEntries.forEach(entry => {
+        if (entry.message_type === 'bot' && entry.message_text) {
+          // Followup question from bot
+          conversationFlow.push({
+            type: 'question',
+            text: entry.message_text,
+            timestamp: entry.created_at,
+            is_followup: entry.is_followup || false
+          });
+        }
+        if (entry.answer_text && entry.answer_text.trim() !== '') {
+          // User answer
+          conversationFlow.push({
+            type: 'answer',
+            text: entry.answer_text,
+            timestamp: entry.created_at,
+            is_followup: entry.is_followup || false
+          });
+        }
+      });
+      
+      // FIXED: Determine completion status - get the most recent status entry
+      const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
+      const latestStatusEntry = statusEntries.length > 0 
+        ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
+        : null;
+      const status = latestStatusEntry?.metadata?.is_complete ? 'complete' : 'incomplete';
+
+      // Count answers only
+      const answerCount = conversationFlow.filter(item => item.type === 'answer').length;
+
+      return {
+        question_id: question._id,
+        question_text: question.question_text,
+        phase: question.phase,
+        order: question.order,
+        
+        conversation_flow: conversationFlow,
+        total_interactions: conversationFlow.length,
+        total_answers: answerCount,
+        completion_status: status,
+        last_updated: allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null
+      };
+    });
+
+    const latestAnalysisMap = new Map();
+
+    phaseAnalysis.forEach(analysis => {
+      const key = `${analysis.metadata?.phase}-${analysis.metadata?.analysis_type}`;
+      if (!latestAnalysisMap.has(key)) {
+        latestAnalysisMap.set(key, {
+          analysis_type: analysis.metadata?.analysis_type || 'unknown',
+          analysis_name: analysis.message_text,
+          analysis_data: analysis.analysis_result,
+          created_at: analysis.created_at,
+          phase: analysis.metadata?.phase
+        });
+      }
+    });
+
+    const analysisResults = Array.from(latestAnalysisMap.values());
+
+    res.json({
+      conversations: result,
+      phase_analysis: analysisResults,
+      total_questions: questions.length,
+      completed: result.filter(r => r.completion_status === 'complete').length,
+      phase: phase || 'all'
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch conversations' });
+  }
 });
 
-// NEW: Console log showing new audit trail endpoints
-console.log('🎯 Audit Trail APIs loaded successfully!');
-console.log('📊 New endpoints available:');
+app.post('/api/conversations', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      question_id,
+      answer_text,
+      is_followup = false,
+      business_id,
+      is_complete = false,
+      metadata 
+    } = req.body;
 
+    if (!question_id || !answer_text) {
+      return res.status(400).json({ error: 'Question ID and answer text required' });
+    }
 
-=======
-  res.status(200).send('Traxxia Survey Backend with JWT is running 🚀');
+    const conversation = {
+      user_id: new ObjectId(req.user._id),
+      business_id: business_id ? new ObjectId(business_id) : null,
+      question_id: new ObjectId(question_id),
+      conversation_type: 'question_answer',
+      message_type: 'user',
+      message_text: '',
+      answer_text,
+      is_followup,
+      analysis_result: null,
+      metadata: {
+        ...metadata,
+        is_complete
+      },
+      attempt_count: 1,
+      timestamp: new Date(),
+      created_at: new Date()
+    };
+
+    const result = await db.collection('user_business_conversations')
+      .insertOne(conversation);
+
+    res.json({
+      message: 'Answer saved',
+      conversation_id: result.insertedId,
+      is_complete
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save answer' });
+  }
 });
 
->>>>>>> 4fea36c8a6e5b94aadc1405b0639359da9ada375
-app.listen(port, '0.0.0.0', () => console.log(`🚀 Traxxia Survey Backend running on port ${port}`));
+// Save followup question generated by Groq
+app.post('/api/conversations/followup-question', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      question_id,
+      followup_question_text,
+      business_id,
+      metadata 
+    } = req.body;
+
+    if (!question_id || !followup_question_text) {
+      return res.status(400).json({ error: 'Question ID and followup question text required' });
+    }
+
+    const conversation = {
+      user_id: new ObjectId(req.user._id),
+      business_id: business_id ? new ObjectId(business_id) : null,
+      question_id: new ObjectId(question_id),
+      conversation_type: 'question_answer',
+      message_type: 'bot',
+      message_text: followup_question_text,
+      answer_text: null,
+      is_followup: true,
+      analysis_result: null,
+      metadata: metadata || {},
+      timestamp: new Date(),
+      created_at: new Date()
+    };
+
+    const result = await db.collection('user_business_conversations')
+      .insertOne(conversation);
+
+    res.json({
+      message: 'Followup question saved',
+      conversation_id: result.insertedId
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save followup question' });
+  }
+});
+
+// Save phase analysis results (SWOT, Customer Segmentation, etc.)
+app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      phase,
+      analysis_type, // 'swot', 'customer_segmentation', 'market_analysis', etc.
+      analysis_name,
+      analysis_data,
+      business_id,
+      metadata 
+    } = req.body;
+
+    if (!phase || !analysis_type || !analysis_name || !analysis_data) {
+      return res.status(400).json({ error: 'Phase, analysis type, name, and data are required' });
+    }
+
+    const phaseAnalysis = {
+      user_id: new ObjectId(req.user._id),
+      business_id: business_id ? new ObjectId(business_id) : null,
+      question_id: null,
+      conversation_type: 'phase_analysis',
+      message_type: 'system',
+      message_text: analysis_name,
+      answer_text: null,
+      is_followup: false,
+      analysis_result: analysis_data,
+      metadata: {
+        phase: phase,
+        analysis_type: analysis_type,
+        ...metadata
+      },
+      timestamp: new Date(),
+      created_at: new Date()
+    };
+
+    const result = await db.collection('user_business_conversations').updateOne(
+      {
+        user_id: new ObjectId(req.user._id),
+        business_id: business_id ? new ObjectId(business_id) : null,
+        conversation_type: 'phase_analysis',
+        'metadata.phase': phase,
+        'metadata.analysis_type': analysis_type
+      },
+      {
+        $set: {
+          question_id: null,
+          message_type: 'system',
+          message_text: analysis_name,
+          answer_text: null,
+          is_followup: false,
+          analysis_result: analysis_data,
+          metadata: {
+            phase: phase,
+            analysis_type: analysis_type,
+            ...metadata
+          },
+          timestamp: new Date(),
+          created_at: new Date()
+        }
+      },
+      { upsert: true }
+    );
+
+    res.json({
+      message: 'Phase analysis saved',
+      analysis_id: result.insertedId,
+      analysis_type: analysis_type
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save phase analysis' });
+  }
+});
+
+// Add API to mark question as complete/incomplete
+app.put('/api/conversations/:question_id/status', authenticateToken, async (req, res) => {
+  try {
+    const { question_id } = req.params;
+    const { completion_status, analysis_result } = req.body;
+
+    if (!['complete', 'incomplete'].includes(completion_status)) {
+      return res.status(400).json({ error: 'Status must be complete or incomplete' });
+    }
+
+    // Create a status update record
+    const statusUpdate = {
+      user_id: new ObjectId(req.user._id),
+      question_id: new ObjectId(question_id),
+      conversation_type: 'question_answer',
+      message_type: 'system',
+      message_text: `Question marked as ${completion_status}`,
+      answer_text: null,
+      is_followup: false,
+      analysis_result: analysis_result || null,
+      metadata: {
+        is_complete: completion_status === 'complete',
+        status_update: true
+      },
+      timestamp: new Date(),
+      created_at: new Date()
+    };
+
+    const result = await db.collection('user_business_conversations')
+      .insertOne(statusUpdate);
+
+    res.json({
+      message: `Question marked as ${completion_status}`,
+      status_id: result.insertedId
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update status' });
+  }
+});
+
+app.delete('/api/conversations', authenticateToken, async (req, res) => {
+  try {
+    const { business_id } = req.query;
+    let filter = { user_id: new ObjectId(req.user._id) };
+
+    if (business_id) {
+      filter.business_id = new ObjectId(business_id);
+    }
+
+    const result = await db.collection('user_business_conversations')
+      .deleteMany(filter);
+
+    res.json({
+      message: 'Conversations cleared',
+      deleted_count: result.deletedCount
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to clear conversations' });
+  }
+});
+
+// Get phase analysis results only
+app.get('/api/phase-analysis', authenticateToken, async (req, res) => {
+  try {
+    const { phase, business_id, analysis_type } = req.query;
+    
+    let filter = {
+      user_id: new ObjectId(req.user._id),
+      conversation_type: 'phase_analysis'
+    };
+
+    if (business_id) filter.business_id = new ObjectId(business_id);
+    if (phase) filter['metadata.phase'] = phase;
+    if (analysis_type) filter['metadata.analysis_type'] = analysis_type;
+
+    const analysisResults = await db.collection('user_business_conversations')
+      .find(filter)
+      .sort({ created_at: -1 })
+      .toArray();
+
+    const formattedResults = analysisResults.map(analysis => ({
+      analysis_id: analysis._id,
+      phase: analysis.metadata?.phase,
+      analysis_type: analysis.metadata?.analysis_type,
+      analysis_name: analysis.message_text,
+      analysis_data: analysis.analysis_result,
+      created_at: analysis.created_at
+    }));
+
+    // Group by phase
+    const resultsByPhase = formattedResults.reduce((acc, result) => {
+      const phase = result.phase || 'unknown';
+      if (!acc[phase]) {
+        acc[phase] = [];
+      }
+      acc[phase].push(result);
+      return acc;
+    }, {});
+
+    res.json({
+      analysis_results: formattedResults,
+      results_by_phase: resultsByPhase,
+      total_analyses: formattedResults.length
+    });
+
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to fetch phase analysis' });
+  }
+});
+
+// ===============================
+// ADMIN APIs
+// ===============================
+// Add this GET endpoint to your backend after the existing admin endpoints
+// This should go in the ADMIN APIs section
+
+app.get('/api/admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    // Get all companies with their admin details
+    const companies = await db.collection('companies').aggregate([
+      {
+        $lookup: {
+          from: 'users',
+          let: { companyId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: ['$company_id', '$$companyId'] },
+                role_id: { $exists: true }
+              }
+            },
+            {
+              $lookup: {
+                from: 'roles',
+                localField: 'role_id',
+                foreignField: '_id',
+                as: 'role'
+              }
+            },
+            {
+              $unwind: '$role'
+            },
+            {
+              $match: {
+                'role.role_name': 'company_admin'
+              }
+            },
+            {
+              $limit: 1
+            }
+          ],
+          as: 'admin'
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: 'company_id',
+          as: 'users'
+        }
+      },
+      {
+        $addFields: {
+          admin_name: { $arrayElemAt: ['$admin.name', 0] },
+          admin_email: { $arrayElemAt: ['$admin.email', 0] },
+          admin_created_at: { $arrayElemAt: ['$admin.created_at', 0] },
+          total_users: { $size: '$users' },
+          active_users: {
+            $size: {
+              $filter: {
+                input: '$users',
+                cond: { $ne: ['$$this.status', 'inactive'] }
+              }
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          company_name: 1,
+          industry: 1,
+          size: 1,
+          logo: 1,
+          status: 1,
+          created_at: 1,
+          logo_updated_at: 1,
+          admin_name: 1,
+          admin_email: 1,
+          admin_created_at: 1,
+          total_users: 1,
+          active_users: 1
+        }
+      },
+      {
+        $sort: { created_at: -1 }
+      }
+    ]).toArray();
+
+    // If no admin found, set default values
+    const enhancedCompanies = companies.map(company => ({
+      ...company,
+      admin_name: company.admin_name || 'No Admin Assigned',
+      admin_email: company.admin_email || 'No Email',
+      total_users: company.total_users || 0,
+      active_users: company.active_users || 0
+    }));
+
+    res.json({ 
+      companies: enhancedCompanies,
+      total_count: enhancedCompanies.length
+    });
+  } catch (error) {
+    console.error('Error fetching companies:', error);
+    res.status(500).json({ error: 'Failed to fetch companies' });
+  }
+});
+
+app.post('/api/admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { company_name, industry, size, admin_name, admin_email, admin_password } = req.body;
+
+    if (!company_name || !admin_name || !admin_email || !admin_password) {
+      return res.status(400).json({ error: 'Company name and admin details required' });
+    }
+
+    // Check if admin email exists
+    const existingUser = await db.collection('users').findOne({ email: admin_email });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Admin email already exists' });
+    }
+
+    // Create company with size field
+    const companyResult = await db.collection('companies').insertOne({
+      company_name,
+      industry: industry || '',
+      size: size || '', // Add size field
+      logo: req.body.logo || null,
+      status: 'active',
+      created_at: new Date()
+    });
+
+    // Create company admin
+    const companyAdminRole = await db.collection('roles').findOne({ role_name: 'company_admin' });
+    const hashedPassword = await bcrypt.hash(admin_password, 12);
+
+    const adminResult = await db.collection('users').insertOne({
+      name: admin_name,
+      email: admin_email,
+      password: hashedPassword,
+      role_id: companyAdminRole._id,
+      company_id: companyResult.insertedId,
+      created_at: new Date()
+    });
+
+    // Return the created company with admin details
+    const createdCompany = {
+      _id: companyResult.insertedId,
+      company_name,
+      industry: industry || '',
+      size: size || '',
+      status: 'active',
+      created_at: new Date(),
+      admin_name,
+      admin_email,
+      total_users: 1,
+      active_users: 1
+    };
+
+    res.json({
+      message: 'Company and admin created successfully',
+      company_id: companyResult.insertedId,
+      admin_id: adminResult.insertedId,
+      company: createdCompany
+    });
+  } catch (error) {
+    console.error('Error creating company:', error);
+    res.status(500).json({ error: 'Failed to create company' });
+  }
+});
+
+app.post('/api/admin/questions', authenticateToken, requireSuperAdmin, async (req, res) => {
+  try {
+    const { question_text, phase, severity, order } = req.body;
+
+    if (!question_text || !phase || !severity) {
+      return res.status(400).json({ error: 'Question text, phase, and severity required' });
+    }
+
+    const result = await db.collection('global_questions').insertOne({
+      question_text,
+      phase,
+      severity,
+      order: order || 1,
+      is_active: true,
+      created_at: new Date()
+    });
+
+    res.json({
+      message: 'Question created',
+      question_id: result.insertedId
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create question' });
+  }
+});
+
+// Company Admin APIs
+app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { company_id } = req.query;
+    let filter = {};
+    
+    // Handle company filtering based on user role
+    if (req.user.role.role_name === 'company_admin') {
+      // Company admin can only see users from their own company
+      filter.company_id = req.user.company_id;
+    } else if (req.user.role.role_name === 'super_admin') {
+      // Super admin can filter by specific company if provided
+      if (company_id) {
+        try {
+          filter.company_id = new ObjectId(company_id);
+        } catch (error) {
+          return res.status(400).json({ error: 'Invalid company ID format' });
+        }
+      }
+      // If no company_id provided, show all users (no additional filter)
+    } 
+
+    const users = await db.collection('users').aggregate([
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'roles',
+          localField: 'role_id',
+          foreignField: '_id',
+          as: 'role'
+        }
+      },
+      {
+        $lookup: {
+          from: 'companies',
+          localField: 'company_id',
+          foreignField: '_id',
+          as: 'company'
+        }
+      },
+      { $unwind: { path: '$role', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: '$company', preserveNullAndEmptyArrays: true } },
+      {
+        $project: {
+          name: 1,
+          email: 1,
+          created_at: 1,
+          role_name: '$role.role_name',
+          company_name: '$company.company_name',
+          company_id: 1 // Include company_id for debugging
+        }
+      },
+      { $sort: { created_at: -1 } }
+    ]).toArray();
+
+    res.json({ 
+      users,
+      filter_applied: filter,
+      total_count: users.length
+    });
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    res.status(500).json({ error: 'Failed to fetch users' });
+  }
+});
+
+app.post('/api/admin/users', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { name, email, password } = req.body;
+
+    if (!name || !email || !password) {
+      return res.status(400).json({ error: 'Name, email, and password required' });
+    }
+
+    const existingUser = await db.collection('users').findOne({ email });
+    if (existingUser) {
+      return res.status(400).json({ error: 'Email already exists' });
+    }
+
+    let companyId = req.user.company_id;
+    if (req.user.role.role_name === 'super_admin' && req.body.company_id) {
+      companyId = new ObjectId(req.body.company_id);
+    }
+
+    if (!companyId) {
+      return res.status(400).json({ error: 'Company ID required' });
+    }
+
+    const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+    const hashedPassword = await bcrypt.hash(password, 12);
+
+    const result = await db.collection('users').insertOne({
+      name,
+      email,
+      password: hashedPassword,
+      role_id: userRole._id,
+      company_id: companyId,
+      created_at: new Date()
+    });
+
+    res.json({
+      message: 'User created',
+      user_id: result.insertedId
+    });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to create user' });
+  }
+});
+
+app.put('/api/companies/:id/logo', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const companyId = req.params.id;
+    const { logo } = req.body;
+
+    if (!logo) {
+      return res.status(400).json({ error: 'Logo is required' });
+    }
+
+    // Validate company access for company admin
+    if (req.user.role.role_name === 'company_admin') {
+      if (req.user.company_id.toString() !== companyId) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    }
+
+    const result = await db.collection('companies').updateOne(
+      { _id: new ObjectId(companyId) },
+      { 
+        $set: { 
+          logo: logo,
+          logo_updated_at: new Date()
+        } 
+      }
+    );
+
+    if (result.matchedCount === 0) {
+      return res.status(404).json({ error: 'Company not found' });
+    }
+
+    res.json({ message: 'Company logo updated successfully' });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to update company logo' });
+  }
+});
+
+// ===============================
+// HEALTH CHECK
+// ===============================
+
+app.get('/health', async (req, res) => {
+  try {
+    const stats = await Promise.all([
+      db.collection('companies').countDocuments(),
+      db.collection('users').countDocuments(),
+      db.collection('global_questions').countDocuments(),
+      db.collection('user_businesses').countDocuments(),
+      db.collection('user_business_conversations').countDocuments()
+    ]);
+
+    res.json({
+      status: 'healthy',
+      database: 'connected',
+      stats: {
+        companies: stats[0],
+        users: stats[1],
+        questions: stats[2],
+        businesses: stats[3],
+        conversations: stats[4]
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ status: 'unhealthy', error: error.message });
+  }
+});
+
+// ===============================
+// START SERVER
+// ===============================
+
+connectToMongoDB().then(() => {
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`Traxxia API running on port ${port}`);
+  });
+}).catch(err => {
+  console.error('Failed to start server:', err);
+  process.exit(1);
+});
