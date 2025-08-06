@@ -7,15 +7,22 @@ const { MongoClient, ObjectId } = require('mongodb');
 require('dotenv').config();
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 5001;
 const secretKey = process.env.SECRET_KEY || 'default_secret_key';
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+
 
 app.use(bodyParser.json());
 app.use(cors());
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_simple'; 
 let db;
-
+const uploadsDir = path.join(__dirname, 'uploads', 'logos');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
 // ===============================
 // DATABASE CONNECTION & SETUP
 // ===============================
@@ -119,6 +126,30 @@ const requireSuperAdmin = (req, res, next) => {
   }
   next();
 };
+const logoUpload = multer({
+  storage: multer.diskStorage({
+    destination: function (req, file, cb) {
+      cb(null, uploadsDir);
+    },
+    filename: function (req, file, cb) {
+      const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+      const ext = path.extname(file.originalname);
+      cb(null, 'company_logo_' + uniqueSuffix + ext);
+    }
+  }),
+  limits: {
+    fileSize: 5 * 1024 * 1024, // 5MB limit
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only images are allowed.'), false);
+    }
+  }
+});
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 
 // ===============================
 // AUTHENTICATION APIs
@@ -138,8 +169,15 @@ app.post('/api/login', async (req, res) => {
     }
 
     const role = await db.collection('roles').findOne({ _id: user.role_id });
-    const company = user.company_id ? 
-      await db.collection('companies').findOne({ _id: user.company_id }) : null;
+    
+    // Get company details including logo
+    let company = null;
+    if (user.company_id) {
+      company = await db.collection('companies').findOne(
+        { _id: user.company_id },
+        { projection: { company_name: 1, logo: 1, industry: 1 } }
+      );
+    }
 
     const token = jwt.sign({
       id: user._id,
@@ -154,20 +192,25 @@ app.post('/api/login', async (req, res) => {
         name: user.name,
         email: user.email,
         role: role.role_name,
-        company: company?.company_name || null
+        company: company ? {
+          name: company.company_name,
+          logo: company.logo,
+          industry: company.industry
+        } : null
       }
     });
   } catch (error) {
+    console.error('Login error:', error);
     res.status(500).json({ error: 'Login failed' });
   }
 });
 
 app.post('/api/register', async (req, res) => {
   try {
-    const { name, email, password, company_id } = req.body;
+    const { name, email, password, company_id, terms_accepted } = req.body;
 
-    if (!name || !email || !password || !company_id) {
-      return res.status(400).json({ error: 'All fields required' });
+    if (!name || !email || !password || !company_id || !terms_accepted) {
+      return res.status(400).json({ error: 'All fields required including terms acceptance' });
     }
 
     const existingUser = await db.collection('users').findOne({ email });
@@ -192,6 +235,7 @@ app.post('/api/register', async (req, res) => {
       password: hashedPassword,
       role_id: userRole._id,
       company_id: new ObjectId(company_id),
+      terms_accepted,
       created_at: new Date()
     });
 
@@ -1868,7 +1912,126 @@ app.get('/api/phase-analysis', authenticateToken, async (req, res) => {
 // ===============================
 // Add this GET endpoint to your backend after the existing admin endpoints
 // This should go in the ADMIN APIs section
+// Updated GET endpoint for /api/admin/companies
+app.get('/api/admin/companies', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    let matchFilter = {};
+    
+    // Filter based on user role
+    if (req.user.role.role_name === 'company_admin') {
+      // Company admin can only see their own company
+      if (!req.user.company_id) {
+        return res.status(400).json({ error: 'No company associated with admin account' });
+      }
+      matchFilter._id = req.user.company_id;
+    }
+    // Super admin sees all companies (no filter needed)
 
+    // Get companies with their admin details
+    const companies = await db.collection('companies').aggregate([
+      {
+        $match: matchFilter
+      },
+      {
+        $lookup: {
+          from: 'users',
+          let: { companyId: '$_id' },
+          pipeline: [
+            {
+              $match: {
+                $expr: { $eq: ['$company_id', '$$companyId'] },
+                role_id: { $exists: true }
+              }
+            },
+            {
+              $lookup: {
+                from: 'roles',
+                localField: 'role_id',
+                foreignField: '_id',
+                as: 'role'
+              }
+            },
+            {
+              $unwind: '$role'
+            },
+            {
+              $match: {
+                'role.role_name': 'company_admin'
+              }
+            },
+            {
+              $limit: 1
+            }
+          ],
+          as: 'admin'
+        }
+      },
+      {
+        $lookup: {
+          from: 'users',
+          localField: '_id',
+          foreignField: 'company_id',
+          as: 'users'
+        }
+      },
+      {
+        $addFields: {
+          admin_name: { $arrayElemAt: ['$admin.name', 0] },
+          admin_email: { $arrayElemAt: ['$admin.email', 0] },
+          admin_created_at: { $arrayElemAt: ['$admin.created_at', 0] },
+          total_users: { $size: '$users' },
+          active_users: {
+            $size: {
+              $filter: {
+                input: '$users',
+                cond: { $ne: ['$$this.status', 'inactive'] }
+              }
+            }
+          }
+        }
+      },
+      {
+        $project: {
+          company_name: 1,
+          industry: 1,
+          size: 1,
+          logo: 1,
+          status: 1,
+          created_at: 1,
+          logo_updated_at: 1,
+          admin_name: 1,
+          admin_email: 1,
+          admin_created_at: 1,
+          total_users: 1,
+          active_users: 1
+        }
+      },
+      {
+        $sort: { created_at: -1 }
+      }
+    ]).toArray();
+
+    // If no admin found, set default values
+    const enhancedCompanies = companies.map(company => ({
+      ...company,
+      admin_name: company.admin_name || 'No Admin Assigned',
+      admin_email: company.admin_email || 'No Email',
+      total_users: company.total_users || 0,
+      active_users: company.active_users || 0
+    }));
+
+    res.json({ 
+      companies: enhancedCompanies,
+      total_count: enhancedCompanies.length,
+      user_role: req.user.role.role_name,
+      filtered_by_company: req.user.role.role_name === 'company_admin'
+    });
+  } catch (error) {
+    console.error('Error fetching companies:', error);
+    res.status(500).json({ error: 'Failed to fetch companies' });
+  }
+});
+ 
 app.get('/api/admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
     // Get all companies with their admin details
@@ -1971,7 +2134,7 @@ app.get('/api/admin/companies', authenticateToken, requireSuperAdmin, async (req
   }
 });
 
-app.post('/api/admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
+app.post('/api/admin/companies', authenticateToken, requireSuperAdmin, logoUpload.single('logo'), async (req, res) => {
   try {
     const { company_name, industry, size, admin_name, admin_email, admin_password } = req.body;
 
@@ -1985,14 +2148,21 @@ app.post('/api/admin/companies', authenticateToken, requireSuperAdmin, async (re
       return res.status(400).json({ error: 'Admin email already exists' });
     }
 
-    // Create company with size field
+    // Handle logo if uploaded
+    let logoUrl = null;
+    if (req.file) {
+      logoUrl = `${req.protocol}://${req.get('host')}/uploads/logos/${req.file.filename}`;
+    }
+
+    // Create company with logo
     const companyResult = await db.collection('companies').insertOne({
       company_name,
       industry: industry || '',
-      size: size || '', // Add size field
-      logo: req.body.logo || null,
+      size: size || '',
+      logo: logoUrl,
       status: 'active',
-      created_at: new Date()
+      created_at: new Date(),
+      logo_updated_at: logoUrl ? new Date() : null
     });
 
     // Create company admin
@@ -2008,26 +2178,13 @@ app.post('/api/admin/companies', authenticateToken, requireSuperAdmin, async (re
       created_at: new Date()
     });
 
-    // Return the created company with admin details
-    const createdCompany = {
-      _id: companyResult.insertedId,
-      company_name,
-      industry: industry || '',
-      size: size || '',
-      status: 'active',
-      created_at: new Date(),
-      admin_name,
-      admin_email,
-      total_users: 1,
-      active_users: 1
-    };
-
     res.json({
       message: 'Company and admin created successfully',
       company_id: companyResult.insertedId,
       admin_id: adminResult.insertedId,
-      company: createdCompany
+      logo_url: logoUrl
     });
+
   } catch (error) {
     console.error('Error creating company:', error);
     res.status(500).json({ error: 'Failed to create company' });
@@ -2234,7 +2391,20 @@ app.get('/health', async (req, res) => {
     res.status(500).json({ status: 'unhealthy', error: error.message });
   }
 });
-
+app.use((error, req, res, next) => {
+  if (error instanceof multer.MulterError) {
+    if (error.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ error: 'Logo file size too large. Maximum size is 5MB.' });
+    }
+    return res.status(400).json({ error: `File upload error: ${error.message}` });
+  }
+  
+  if (error.message.includes('Invalid file type')) {
+    return res.status(400).json({ error: error.message });
+  }
+  
+  next(error);
+});
 // ===============================
 // START SERVER
 // ===============================
@@ -2242,6 +2412,7 @@ app.get('/health', async (req, res) => {
 connectToMongoDB().then(() => {
   app.listen(port, '0.0.0.0', () => {
     console.log(`Traxxia API running on port ${port}`);
+    console.log(`Server accessible at: http://localhost:${port}`);
   });
 }).catch(err => {
   console.error('Failed to start server:', err);
