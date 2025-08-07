@@ -394,11 +394,13 @@ app.post('/api/businesses', authenticateToken, async (req, res) => {
   }
 });
 
+// Simple DELETE business API - replaces your existing one
 app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
   try {
     const businessId = new ObjectId(req.params.id);
     const userId = new ObjectId(req.user._id);
 
+    // Delete the business
     const deleteResult = await db.collection('user_businesses').deleteOne({
       _id: businessId,
       user_id: userId
@@ -408,14 +410,15 @@ app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Business not found' });
     }
 
-    // Delete related conversations
+    // Delete all related conversations
     await db.collection('user_business_conversations').deleteMany({
       user_id: userId,
       business_id: businessId
     });
 
-    res.json({ message: 'Business deleted' });
+    res.json({ message: 'Business and conversations deleted successfully' });
   } catch (error) {
+    console.error('Delete business error:', error);
     res.status(500).json({ error: 'Failed to delete business' });
   }
 });
@@ -915,13 +918,11 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         return res.status(403).json({ error: 'Admin access required to view other users conversations' });
       }
       
-      // Validate user exists and access permissions
       const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
       if (!targetUser) {
         return res.status(404).json({ error: 'User not found' });
       }
       
-      // Company admin can only view users from their company
       if (req.user.role.role_name === 'company_admin') {
         if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
           return res.status(403).json({ error: 'Access denied - user not in your company' });
@@ -930,7 +931,6 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       
       targetUserId = new ObjectId(user_id);
     } else {
-      // Regular user requesting their own conversations
       targetUserId = new ObjectId(req.user._id);
     }
     
@@ -970,14 +970,15 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         c.question_id && c.question_id.toString() === question._id.toString()
       );
 
-      // Get all conversation entries for this question (ordered by creation time)
       const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
       
-      // Build conversation flow with questions and answers
+      // Check if question is skipped
+      const isSkipped = allEntries.some(entry => entry.is_skipped === true);
+      
+      // Build conversation flow
       const conversationFlow = [];
       allEntries.forEach(entry => {
         if (entry.message_type === 'bot' && entry.message_text) {
-          // Followup question from bot
           conversationFlow.push({
             type: 'question',
             text: entry.message_text,
@@ -986,7 +987,6 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
           });
         }
         if (entry.answer_text && entry.answer_text.trim() !== '') {
-          // User answer
           conversationFlow.push({
             type: 'answer',
             text: entry.answer_text,
@@ -996,14 +996,19 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         }
       });
       
-      // Determine completion status - get the most recent status entry
+      // Determine completion status
       const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
       const latestStatusEntry = statusEntries.length > 0 
         ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
         : null;
-      const status = latestStatusEntry?.metadata?.is_complete ? 'complete' : 'incomplete';
+      
+      let status = 'incomplete';
+      if (isSkipped) {
+        status = 'skipped';
+      } else if (latestStatusEntry?.metadata?.is_complete) {
+        status = 'complete';
+      }
 
-      // Count answers only
       const answerCount = conversationFlow.filter(item => item.type === 'answer').length;
 
       return {
@@ -1015,13 +1020,13 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         conversation_flow: conversationFlow,
         total_interactions: conversationFlow.length,
         total_answers: answerCount,
-        completion_status: status,
+        completion_status: status, // Now includes 'skipped'
+        is_skipped: isSkipped, // New field
         last_updated: allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null
       };
     });
 
     const latestAnalysisMap = new Map();
-
     phaseAnalysis.forEach(analysis => {
       const key = `${analysis.metadata?.phase}-${analysis.metadata?.analysis_type}`;
       if (!latestAnalysisMap.has(key)) {
@@ -1042,8 +1047,9 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       phase_analysis: analysisResults,
       total_questions: questions.length,
       completed: result.filter(r => r.completion_status === 'complete').length,
+      skipped: result.filter(r => r.completion_status === 'skipped').length, // New stat
       phase: phase || 'all',
-      user_id: targetUserId.toString() // Include the user ID in response for admin context
+      user_id: targetUserId.toString()
     });
 
   } catch (error) {
@@ -1635,8 +1641,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch conversations' });
   }
 });
-
-app.post('/api/conversations', authenticateToken, async (req, res) => {
+ app.post('/api/conversations', authenticateToken, async (req, res) => {
   try {
     const { 
       question_id,
@@ -1644,13 +1649,51 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
       is_followup = false,
       business_id,
       is_complete = false,
+      is_skipped = false,
       metadata 
     } = req.body;
 
-    if (!question_id || !answer_text) {
-      return res.status(400).json({ error: 'Question ID and answer text required' });
+    if (!question_id || (!answer_text && !is_skipped)) {
+      return res.status(400).json({ error: 'Question ID and answer text (or skip) required' });
     }
 
+    // Check if this is an edit from the brief section
+    const isEdit = metadata?.from_editable_brief === true;
+
+    if (isEdit && answer_text && answer_text.trim() !== '') {
+      // For edits, update existing conversation instead of creating new one
+      const updateResult = await db.collection('user_business_conversations')
+        .updateOne(
+          {
+            user_id: new ObjectId(req.user._id),
+            business_id: business_id ? new ObjectId(business_id) : null,
+            question_id: new ObjectId(question_id),
+            conversation_type: 'question_answer'
+          },
+          {
+            $set: {
+              answer_text: answer_text.trim(),
+              is_skipped: false, // Un-skip if it was skipped
+              metadata: {
+                ...metadata,
+                is_complete: true,
+                is_edit: true
+              },
+              timestamp: new Date()
+            }
+          }
+        );
+
+      if (updateResult.modifiedCount > 0) {
+        return res.json({
+          message: 'Answer updated',
+          is_complete: true,
+          action: 'updated'
+        });
+      }
+    }
+
+    // Original logic for new conversations
     const conversation = {
       user_id: new ObjectId(req.user._id),
       business_id: business_id ? new ObjectId(business_id) : null,
@@ -1658,12 +1701,14 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
       conversation_type: 'question_answer',
       message_type: 'user',
       message_text: '',
-      answer_text,
+      answer_text: answer_text || '',
       is_followup,
+      is_skipped,
       analysis_result: null,
       metadata: {
         ...metadata,
-        is_complete
+        is_complete,
+        is_skipped
       },
       attempt_count: 1,
       timestamp: new Date(),
@@ -1674,15 +1719,75 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
       .insertOne(conversation);
 
     res.json({
-      message: 'Answer saved',
+      message: is_skipped ? 'Question skipped' : 'Answer saved',
       conversation_id: result.insertedId,
-      is_complete
+      is_complete,
+      is_skipped,
+      action: 'created'
     });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to save answer' });
+    console.error('Error saving conversation:', error);
+    res.status(500).json({ error: 'Failed to save conversation' });
   }
 });
+app.post('/api/conversations/skip', authenticateToken, async (req, res) => {
+  try {
+    const { 
+      question_id,
+      business_id,
+      metadata 
+    } = req.body;
 
+    if (!question_id) {
+      return res.status(400).json({ error: 'Question ID is required' });
+    }
+
+    // Validate that the question exists
+    const question = await db.collection('global_questions').findOne({ 
+      _id: new ObjectId(question_id) 
+    });
+    
+    if (!question) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    // Create a conversation record for the skipped question
+    const conversation = {
+      user_id: new ObjectId(req.user._id),
+      business_id: business_id ? new ObjectId(business_id) : null,
+      question_id: new ObjectId(question_id),
+      conversation_type: 'question_answer',
+      message_type: 'user',
+      message_text: '',
+      answer_text: '[Question Skipped]',
+      is_followup: false,
+      is_skipped: true,
+      analysis_result: null,
+      metadata: {
+        ...metadata,
+        is_complete: true, // Mark as complete since it's skipped
+        is_skipped: true,
+        skip_reason: 'user_skipped'
+      },
+      attempt_count: 1,
+      timestamp: new Date(),
+      created_at: new Date()
+    };
+
+    const result = await db.collection('user_business_conversations')
+      .insertOne(conversation);
+
+    res.json({
+      message: 'Question skipped successfully',
+      conversation_id: result.insertedId,
+      is_complete: true,
+      is_skipped: true
+    });
+  } catch (error) {
+    console.error('Failed to skip question:', error);
+    res.status(500).json({ error: 'Failed to skip question' });
+  }
+});
 // Save followup question generated by Groq
 app.post('/api/conversations/followup-question', authenticateToken, async (req, res) => {
   try {
