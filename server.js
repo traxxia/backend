@@ -1020,34 +1020,54 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         conversation_flow: conversationFlow,
         total_interactions: conversationFlow.length,
         total_answers: answerCount,
-        completion_status: status, // Now includes 'skipped'
-        is_skipped: isSkipped, // New field
+        completion_status: status,
+        is_skipped: isSkipped,
         last_updated: allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null
       };
     });
 
-    const latestAnalysisMap = new Map();
+    // NEW: Organize analysis results by phase
+    const analysisResultsByPhase = {};
+    
     phaseAnalysis.forEach(analysis => {
-      const key = `${analysis.metadata?.phase}-${analysis.metadata?.analysis_type}`;
-      if (!latestAnalysisMap.has(key)) {
-        latestAnalysisMap.set(key, {
-          analysis_type: analysis.metadata?.analysis_type || 'unknown',
-          analysis_name: analysis.message_text,
-          analysis_data: analysis.analysis_result,
-          created_at: analysis.created_at,
-          phase: analysis.metadata?.phase
-        });
+      const analysisPhase = analysis.metadata?.phase || 'unknown';
+      const analysisType = analysis.metadata?.analysis_type || 'unknown';
+      
+      if (!analysisResultsByPhase[analysisPhase]) {
+        analysisResultsByPhase[analysisPhase] = {
+          phase: analysisPhase,
+          analyses: []
+        };
+      }
+      
+      // Only keep the latest analysis for each type within a phase
+      const existingIndex = analysisResultsByPhase[analysisPhase].analyses
+        .findIndex(a => a.analysis_type === analysisType);
+      
+      const analysisData = {
+        analysis_type: analysisType,
+        analysis_name: analysis.message_text || `${analysisType.toUpperCase()} Analysis`,
+        analysis_data: analysis.analysis_result,
+        created_at: analysis.created_at,
+        phase: analysisPhase
+      };
+      
+      if (existingIndex !== -1) {
+        // Replace if this one is newer
+        if (new Date(analysis.created_at) > new Date(analysisResultsByPhase[analysisPhase].analyses[existingIndex].created_at)) {
+          analysisResultsByPhase[analysisPhase].analyses[existingIndex] = analysisData;
+        }
+      } else {
+        analysisResultsByPhase[analysisPhase].analyses.push(analysisData);
       }
     });
 
-    const analysisResults = Array.from(latestAnalysisMap.values());
-
     res.json({
       conversations: result,
-      phase_analysis: analysisResults,
+      phase_analysis: analysisResultsByPhase,
       total_questions: questions.length,
       completed: result.filter(r => r.completion_status === 'complete').length,
-      skipped: result.filter(r => r.completion_status === 'skipped').length, // New stat
+      skipped: result.filter(r => r.completion_status === 'skipped').length,
       phase: phase || 'all',
       user_id: targetUserId.toString()
     });
@@ -1057,7 +1077,6 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch conversations' });
   }
 });
-
 
 // Get user businesses (for admin viewing other users' businesses)
 app.get('/api/businesses', authenticateToken, async (req, res) => {
