@@ -17,7 +17,7 @@ const fs = require('fs');
 app.use(bodyParser.json());
 app.use(cors());
 
-const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_simple'; 
+const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_simple';
 let db;
 const uploadsDir = path.join(__dirname, 'uploads', 'logos');
 if (!fs.existsSync(uploadsDir)) {
@@ -169,7 +169,7 @@ app.post('/api/login', async (req, res) => {
     }
 
     const role = await db.collection('roles').findOne({ _id: user.role_id });
-    
+
     // Get company details including logo
     let company = null;
     if (user.company_id) {
@@ -218,7 +218,7 @@ app.post('/api/register', async (req, res) => {
       return res.status(400).json({ error: 'Email already exists' });
     }
 
-    const company = await db.collection('companies').findOne({ 
+    const company = await db.collection('companies').findOne({
       _id: new ObjectId(company_id),
       status: 'active'
     });
@@ -295,11 +295,11 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
 
         // Group conversations by question_id to find completion status
         const questionStats = {};
-        
+
         conversations.forEach(conv => {
           if (conv.question_id) {
             const questionId = conv.question_id.toString();
-            
+
             // Initialize question stats if not exists
             if (!questionStats[questionId]) {
               questionStats[questionId] = {
@@ -308,13 +308,13 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
                 answerCount: 0
               };
             }
-            
+
             // Check if there are actual answers
             if (conv.answer_text && conv.answer_text.trim() !== '') {
               questionStats[questionId].hasAnswers = true;
               questionStats[questionId].answerCount++;
             }
-            
+
             // Check completion status from metadata
             if (conv.metadata && conv.metadata.is_complete === true) {
               questionStats[questionId].isComplete = true;
@@ -326,12 +326,12 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
         const completedQuestions = Object.values(questionStats).filter(
           stat => stat.isComplete || stat.hasAnswers
         ).length;
-        
+
         const pendingQuestions = totalQuestions - completedQuestions;
 
         // Calculate progress percentage
-        const progressPercentage = totalQuestions > 0 
-          ? Math.round((completedQuestions / totalQuestions) * 100) 
+        const progressPercentage = totalQuestions > 0
+          ? Math.round((completedQuestions / totalQuestions) * 100)
           : 0;
 
         return {
@@ -349,7 +349,7 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
       })
     );
 
-    res.json({ 
+    res.json({
       businesses: enhancedBusinesses,
       overall_stats: {
         total_businesses: businesses.length,
@@ -483,23 +483,23 @@ app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, as
     // Verify all questions exist and belong to the specified phase
     const questionIds = questions.map(q => new ObjectId(q.question_id));
     const existingQuestions = await db.collection('global_questions')
-      .find({ 
+      .find({
         _id: { $in: questionIds },
         phase: phase
       })
       .toArray();
 
     if (existingQuestions.length !== questions.length) {
-      return res.status(400).json({ 
-        error: 'One or more questions not found or do not belong to the specified phase' 
+      return res.status(400).json({
+        error: 'One or more questions not found or do not belong to the specified phase'
       });
     }
 
     // Get the maximum order from other phases to maintain global ordering
     const otherPhasesMaxOrder = await db.collection('global_questions')
-      .find({ 
+      .find({
         phase: { $ne: phase },
-        is_active: true 
+        is_active: true
       })
       .sort({ order: -1 })
       .limit(1)
@@ -509,18 +509,18 @@ app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, as
     const phaseOrder = ['initial', 'essential', 'good', 'excellent'];
     const currentPhaseIndex = phaseOrder.indexOf(phase);
     const laterPhases = phaseOrder.slice(currentPhaseIndex + 1);
-    
+
     let nextPhaseMinOrder = null;
     if (laterPhases.length > 0) {
       const nextPhaseQuestions = await db.collection('global_questions')
-        .find({ 
+        .find({
           phase: { $in: laterPhases },
-          is_active: true 
+          is_active: true
         })
         .sort({ order: 1 })
         .limit(1)
         .toArray();
-      
+
       if (nextPhaseQuestions.length > 0) {
         nextPhaseMinOrder = nextPhaseQuestions[0].order;
       }
@@ -529,17 +529,17 @@ app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, as
     // Calculate the starting order for this phase
     const earlierPhases = phaseOrder.slice(0, currentPhaseIndex);
     let phaseStartOrder = 1;
-    
+
     if (earlierPhases.length > 0) {
       const earlierPhasesMaxOrder = await db.collection('global_questions')
-        .find({ 
+        .find({
           phase: { $in: earlierPhases },
-          is_active: true 
+          is_active: true
         })
         .sort({ order: -1 })
         .limit(1)
         .toArray();
-      
+
       if (earlierPhasesMaxOrder.length > 0) {
         phaseStartOrder = earlierPhasesMaxOrder[0].order + 1;
       }
@@ -548,15 +548,15 @@ app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, as
     // Calculate new global orders for the reordered questions
     const bulkOps = questions.map((question, index) => {
       const newGlobalOrder = phaseStartOrder + index;
-      
+
       return {
         updateOne: {
           filter: { _id: new ObjectId(question.question_id) },
-          update: { 
-            $set: { 
+          update: {
+            $set: {
               order: newGlobalOrder,
               updated_at: new Date()
-            } 
+            }
           }
         }
       };
@@ -568,13 +568,13 @@ app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, as
       if (maxNewOrder >= nextPhaseMinOrder) {
         // We need to shift later phase questions
         const shiftAmount = maxNewOrder - nextPhaseMinOrder + 1;
-        
+
         await db.collection('global_questions').updateMany(
-          { 
+          {
             phase: { $in: laterPhases },
-            is_active: true 
+            is_active: true
           },
-          { 
+          {
             $inc: { order: shiftAmount },
             $set: { updated_at: new Date() }
           }
@@ -632,7 +632,7 @@ app.delete('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, asy
       .countDocuments({ question_id: new ObjectId(questionId) });
 
     if (conversationCount > 0) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         error: 'Cannot delete question with existing conversations',
         conversation_count: conversationCount
       });
@@ -679,8 +679,8 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
     // Validate severity
     const validSeverities = ['mandatory', 'optional'];
     if (!validSeverities.includes(severity.toLowerCase())) {
-      return res.status(400).json({ 
-        error: `Severity must be one of: ${validSeverities.join(', ')}` 
+      return res.status(400).json({
+        error: `Severity must be one of: ${validSeverities.join(', ')}`
       });
     }
 
@@ -724,9 +724,9 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
     }
 
     if (result.modifiedCount === 0) {
-      return res.status(200).json({ 
+      return res.status(200).json({
         message: 'No changes were made to the question',
-        question_id: questionId 
+        question_id: questionId
       });
     }
 
@@ -758,34 +758,34 @@ app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, asyn
     const { questions } = req.body;
 
     if (!questions || !Array.isArray(questions) || questions.length === 0) {
-      return res.status(400).json({ 
-        error: 'Questions array is required and must contain at least one question' 
+      return res.status(400).json({
+        error: 'Questions array is required and must contain at least one question'
       });
     }
 
     if (questions.length > 1000) {
-      return res.status(400).json({ 
-        error: 'Maximum 1000 questions allowed per bulk upload' 
+      return res.status(400).json({
+        error: 'Maximum 1000 questions allowed per bulk upload'
       });
     }
 
     // Validation results
     const validationErrors = [];
     const validQuestions = [];
-    
+
     // Validate each question
     questions.forEach((question, index) => {
       const errors = [];
-      
+
       // Required fields validation
       if (!question.question_text || typeof question.question_text !== 'string' || question.question_text.trim() === '') {
         errors.push('question_text is required and must be a non-empty string');
       }
-      
+
       if (!question.phase || typeof question.phase !== 'string' || question.phase.trim() === '') {
         errors.push('phase is required and must be a non-empty string');
       }
-      
+
       if (!question.severity || typeof question.severity !== 'string' || question.severity.trim() === '') {
         errors.push('severity is required and must be a non-empty string');
       }
@@ -838,7 +838,7 @@ app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, asyn
     // Check for duplicate questions (same question_text and phase)
     const duplicateCheck = [];
     const questionMap = new Map();
-    
+
     validQuestions.forEach((question, index) => {
       const key = `${question.question_text.toLowerCase()}-${question.phase.toLowerCase()}`;
       if (questionMap.has(key)) {
@@ -908,36 +908,36 @@ app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, asyn
 app.get('/api/conversations', authenticateToken, async (req, res) => {
   try {
     const { phase, business_id, user_id } = req.query;
-    
+
     // Determine which user's conversations to fetch
     let targetUserId;
-    
+
     if (user_id) {
       // Admin is requesting another user's conversations
       if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
         return res.status(403).json({ error: 'Admin access required to view other users conversations' });
       }
-      
+
       const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
       if (!targetUser) {
         return res.status(404).json({ error: 'User not found' });
       }
-      
+
       if (req.user.role.role_name === 'company_admin') {
         if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
           return res.status(403).json({ error: 'Access denied - user not in your company' });
         }
       }
-      
+
       targetUserId = new ObjectId(user_id);
     } else {
       targetUserId = new ObjectId(req.user._id);
     }
-    
+
     // Get questions for the phase
     let questionFilter = { is_active: true };
     if (phase) questionFilter.phase = phase;
-    
+
     const questions = await db.collection('global_questions')
       .find(questionFilter)
       .sort({ order: 1 })
@@ -953,7 +953,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       .sort({ created_at: 1 })
       .toArray();
 
-    // Get phase analysis results
+    // Get phase analysis results - UPDATED to handle phase-specific strategic analysis
     const phaseAnalysis = await db.collection('user_business_conversations')
       .find({
         user_id: targetUserId,
@@ -966,15 +966,15 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
 
     // Process each question
     const result = questions.map(question => {
-      const questionConvs = conversations.filter(c => 
+      const questionConvs = conversations.filter(c =>
         c.question_id && c.question_id.toString() === question._id.toString()
       );
 
       const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-      
+
       // Check if question is skipped
       const isSkipped = allEntries.some(entry => entry.is_skipped === true);
-      
+
       // Build conversation flow
       const conversationFlow = [];
       allEntries.forEach(entry => {
@@ -995,13 +995,13 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
           });
         }
       });
-      
+
       // Determine completion status
       const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
-      const latestStatusEntry = statusEntries.length > 0 
+      const latestStatusEntry = statusEntries.length > 0
         ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
         : null;
-      
+
       let status = 'incomplete';
       if (isSkipped) {
         status = 'skipped';
@@ -1016,7 +1016,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         question_text: question.question_text,
         phase: question.phase,
         order: question.order,
-        
+
         conversation_flow: conversationFlow,
         total_interactions: conversationFlow.length,
         total_answers: answerCount,
@@ -1026,24 +1026,24 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       };
     });
 
-    // NEW: Organize analysis results by phase
+    // UPDATED: Organize analysis results by phase AND analysis type
     const analysisResultsByPhase = {};
-    
+
     phaseAnalysis.forEach(analysis => {
-      const analysisPhase = analysis.metadata?.phase || 'unknown';
+      const analysisPhase = analysis.metadata?.phase || 'initial';
       const analysisType = analysis.metadata?.analysis_type || 'unknown';
-      
+
       if (!analysisResultsByPhase[analysisPhase]) {
         analysisResultsByPhase[analysisPhase] = {
           phase: analysisPhase,
           analyses: []
         };
       }
-      
-      // Only keep the latest analysis for each type within a phase
+
+      // For strategic analysis, keep both initial and essential phases separate
       const existingIndex = analysisResultsByPhase[analysisPhase].analyses
         .findIndex(a => a.analysis_type === analysisType);
-      
+
       const analysisData = {
         analysis_type: analysisType,
         analysis_name: analysis.message_text || `${analysisType.toUpperCase()} Analysis`,
@@ -1051,7 +1051,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         created_at: analysis.created_at,
         phase: analysisPhase
       };
-      
+
       if (existingIndex !== -1) {
         // Replace if this one is newer
         if (new Date(analysis.created_at) > new Date(analysisResultsByPhase[analysisPhase].analyses[existingIndex].created_at)) {
@@ -1078,33 +1078,34 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
   }
 });
 
+
 // Get user businesses (for admin viewing other users' businesses)
 app.get('/api/businesses', authenticateToken, async (req, res) => {
   try {
     const { user_id } = req.query;
-    
+
     // Determine which user's businesses to fetch
     let targetUserId;
-    
+
     if (user_id) {
       // Admin is requesting another user's businesses
       if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
         return res.status(403).json({ error: 'Admin access required to view other users businesses' });
       }
-      
+
       // Validate user exists and access permissions
       const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
       if (!targetUser) {
         return res.status(404).json({ error: 'User not found' });
       }
-      
+
       // Company admin can only view users from their company
       if (req.user.role.role_name === 'company_admin') {
         if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
           return res.status(403).json({ error: 'Access denied - user not in your company' });
         }
       }
-      
+
       targetUserId = new ObjectId(user_id);
     } else {
       // Regular user requesting their own businesses
@@ -1134,11 +1135,11 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
 
         // Group conversations by question_id to find completion status
         const questionStats = {};
-        
+
         conversations.forEach(conv => {
           if (conv.question_id) {
             const questionId = conv.question_id.toString();
-            
+
             // Initialize question stats if not exists
             if (!questionStats[questionId]) {
               questionStats[questionId] = {
@@ -1147,13 +1148,13 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
                 answerCount: 0
               };
             }
-            
+
             // Check if there are actual answers
             if (conv.answer_text && conv.answer_text.trim() !== '') {
               questionStats[questionId].hasAnswers = true;
               questionStats[questionId].answerCount++;
             }
-            
+
             // Check completion status from metadata
             if (conv.metadata && conv.metadata.is_complete === true) {
               questionStats[questionId].isComplete = true;
@@ -1165,12 +1166,12 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
         const completedQuestions = Object.values(questionStats).filter(
           stat => stat.isComplete || stat.hasAnswers
         ).length;
-        
+
         const pendingQuestions = totalQuestions - completedQuestions;
 
         // Calculate progress percentage
-        const progressPercentage = totalQuestions > 0 
-          ? Math.round((completedQuestions / totalQuestions) * 100) 
+        const progressPercentage = totalQuestions > 0
+          ? Math.round((completedQuestions / totalQuestions) * 100)
           : 0;
 
         return {
@@ -1188,7 +1189,7 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
       })
     );
 
-    res.json({ 
+    res.json({
       businesses: enhancedBusinesses,
       overall_stats: {
         total_businesses: businesses.length,
@@ -1206,35 +1207,35 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
 app.get('/api/phase-analysis', authenticateToken, async (req, res) => {
   try {
     const { phase, business_id, analysis_type, user_id } = req.query;
-    
+
     // Determine which user's phase analysis to fetch
     let targetUserId;
-    
+
     if (user_id) {
       // Admin is requesting another user's phase analysis
       if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
         return res.status(403).json({ error: 'Admin access required to view other users phase analysis' });
       }
-      
+
       // Validate user exists and access permissions
       const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
       if (!targetUser) {
         return res.status(404).json({ error: 'User not found' });
       }
-      
+
       // Company admin can only view users from their company
       if (req.user.role.role_name === 'company_admin') {
         if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
           return res.status(403).json({ error: 'Access denied - user not in your company' });
         }
       }
-      
+
       targetUserId = new ObjectId(user_id);
     } else {
       // Regular user requesting their own phase analysis
       targetUserId = new ObjectId(req.user._id);
     }
-    
+
     let filter = {
       user_id: targetUserId,
       conversation_type: 'phase_analysis'
@@ -1286,94 +1287,94 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
   try {
     const { user_id } = req.params;
     const { business_id } = req.query;
-    
+
     if (!ObjectId.isValid(user_id)) {
       return res.status(400).json({ error: 'Invalid user ID' });
     }
-    
+
     // Validate user exists and access permissions
     const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
     if (!targetUser) {
       return res.status(404).json({ error: 'User not found' });
     }
-    
+
     // Company admin can only view users from their company
     if (req.user.role.role_name === 'company_admin') {
       if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
         return res.status(403).json({ error: 'Access denied - user not in your company' });
       }
     }
-    
+
     const targetUserId = new ObjectId(user_id);
-    
+
     // Build conversation filter
     let conversationFilter = {
       user_id: targetUserId,
       conversation_type: 'question_answer'
     };
-    
+
     // Build phase analysis filter
     let phaseAnalysisFilter = {
       user_id: targetUserId,
       conversation_type: 'phase_analysis'
     };
-    
+
     // Build business filter
     let businessFilter = { user_id: targetUserId };
-    
+
     // If business_id is specified, filter data for that business only
     if (business_id && ObjectId.isValid(business_id)) {
       const businessObjectId = new ObjectId(business_id);
       conversationFilter.business_id = businessObjectId;
       phaseAnalysisFilter.business_id = businessObjectId;
-      
+
       // Also validate that the business belongs to the user
       const businessExists = await db.collection('user_businesses').findOne({
         _id: businessObjectId,
         user_id: targetUserId
       });
-      
+
       if (!businessExists) {
         return res.status(404).json({ error: 'Business not found for this user' });
       }
     }
-    
+
     // Get all conversations for this user (and business if specified)
     const conversations = await db.collection('user_business_conversations')
       .find(conversationFilter)
       .sort({ created_at: 1 })
       .toArray();
-    
+
     // Get all phase analysis for this user (and business if specified)
     const phaseAnalysis = await db.collection('user_business_conversations')
       .find(phaseAnalysisFilter)
       .sort({ created_at: -1 })
       .toArray();
-    
+
     // Get all businesses for this user (always return all businesses for dropdown)
     const businesses = await db.collection('user_businesses')
       .find(businessFilter)
       .sort({ created_at: -1 })
       .toArray();
-    
+
     // Get all questions for reference
     const questions = await db.collection('global_questions')
       .find({ is_active: true })
       .sort({ order: 1 })
       .toArray();
-    
+
     // Transform conversations into phases structure
     const phaseMap = new Map();
-    
+
     // Group conversations by question and build phase structure
     questions.forEach(question => {
-      const questionConvs = conversations.filter(c => 
+      const questionConvs = conversations.filter(c =>
         c.question_id && c.question_id.toString() === question._id.toString()
       );
-      
+
       if (questionConvs.length > 0) {
         const phase = question.phase;
-        
+
         if (!phaseMap.has(phase)) {
           phaseMap.set(phase, {
             phase: phase,
@@ -1381,16 +1382,16 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
             questions: []
           });
         }
-        
+
         const phaseData = phaseMap.get(phase);
-        
+
         // Get all entries for this question (ordered by creation time)
         const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-        
+
         // Build conversation flow
         const conversationFlow = [];
         let finalAnswer = '';
-        
+
         allEntries.forEach(entry => {
           if (entry.message_type === 'bot' && entry.message_text) {
             conversationFlow.push({
@@ -1410,14 +1411,14 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
             finalAnswer = entry.answer_text; // Keep track of the final answer
           }
         });
-        
+
         // Check completion status
         const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
-        const latestStatusEntry = statusEntries.length > 0 
+        const latestStatusEntry = statusEntries.length > 0
           ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
           : null;
         const isComplete = latestStatusEntry?.metadata?.is_complete || false;
-        
+
         // Only add to phase if there are actual answers (completed questions)
         if (isComplete && finalAnswer) {
           phaseData.questions.push({
@@ -1431,10 +1432,10 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
         }
       }
     });
-    
+
     // Convert phase map to array and filter out empty phases
     const conversationPhases = Array.from(phaseMap.values()).filter(phase => phase.questions.length > 0);
-    
+
     // Transform phase analysis into system format
     const systemAnalysis = phaseAnalysis.map(analysis => ({
       name: analysis.metadata?.analysis_type || 'unknown_analysis',
@@ -1443,11 +1444,11 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
       phase: analysis.metadata?.phase,
       message_text: analysis.message_text
     }));
-    
+
     // Calculate statistics
     const totalQuestions = questions.length;
     const completedQuestions = conversationPhases.reduce((sum, phase) => sum + phase.questions.length, 0);
-    
+
     // Add question statistics to businesses
     const enhancedBusinesses = await Promise.all(
       businesses.map(async (business) => {
@@ -1462,11 +1463,11 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
 
         // Calculate business-specific statistics
         const businessQuestionStats = {};
-        
+
         businessConversations.forEach(conv => {
           if (conv.question_id) {
             const questionId = conv.question_id.toString();
-            
+
             if (!businessQuestionStats[questionId]) {
               businessQuestionStats[questionId] = {
                 hasAnswers: false,
@@ -1474,12 +1475,12 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
                 answerCount: 0
               };
             }
-            
+
             if (conv.answer_text && conv.answer_text.trim() !== '') {
               businessQuestionStats[questionId].hasAnswers = true;
               businessQuestionStats[questionId].answerCount++;
             }
-            
+
             if (conv.metadata && conv.metadata.is_complete === true) {
               businessQuestionStats[questionId].isComplete = true;
             }
@@ -1489,9 +1490,9 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
         const completedQuestionsForBusiness = Object.values(businessQuestionStats).filter(
           stat => stat.isComplete || stat.hasAnswers
         ).length;
-        
-        const progressPercentage = totalQuestions > 0 
-          ? Math.round((completedQuestionsForBusiness / totalQuestions) * 100) 
+
+        const progressPercentage = totalQuestions > 0
+          ? Math.round((completedQuestionsForBusiness / totalQuestions) * 100)
           : 0;
 
         return {
@@ -1508,7 +1509,7 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
         };
       })
     );
-    
+
     const responseData = {
       user_info: {
         user_id: targetUser._id,
@@ -1532,9 +1533,9 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
         showing_all_businesses: !business_id
       }
     };
-    
+
     res.json(responseData);
-    
+
   } catch (error) {
     console.error('Failed to fetch user data:', error);
     res.status(500).json({ error: 'Failed to fetch user data' });
@@ -1544,11 +1545,11 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
 app.get('/api/conversations', authenticateToken, async (req, res) => {
   try {
     const { phase, business_id } = req.query;
-    
+
     // Get questions for the phase
     let questionFilter = { is_active: true };
     if (phase) questionFilter.phase = phase;
-    
+
     const questions = await db.collection('global_questions')
       .find(questionFilter)
       .sort({ order: 1 })
@@ -1577,13 +1578,13 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
 
     // Process each question
     const result = questions.map(question => {
-      const questionConvs = conversations.filter(c => 
+      const questionConvs = conversations.filter(c =>
         c.question_id && c.question_id.toString() === question._id.toString()
       );
 
       // Get all conversation entries for this question (ordered by creation time)
       const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-      
+
       // Build conversation flow with questions and answers
       const conversationFlow = [];
       allEntries.forEach(entry => {
@@ -1606,10 +1607,10 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
           });
         }
       });
-      
+
       // FIXED: Determine completion status - get the most recent status entry
       const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
-      const latestStatusEntry = statusEntries.length > 0 
+      const latestStatusEntry = statusEntries.length > 0
         ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
         : null;
       const status = latestStatusEntry?.metadata?.is_complete ? 'complete' : 'incomplete';
@@ -1622,7 +1623,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         question_text: question.question_text,
         phase: question.phase,
         order: question.order,
-        
+
         conversation_flow: conversationFlow,
         total_interactions: conversationFlow.length,
         total_answers: answerCount,
@@ -1660,16 +1661,16 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch conversations' });
   }
 });
- app.post('/api/conversations', authenticateToken, async (req, res) => {
+app.post('/api/conversations', authenticateToken, async (req, res) => {
   try {
-    const { 
+    const {
       question_id,
       answer_text,
       is_followup = false,
       business_id,
       is_complete = false,
       is_skipped = false,
-      metadata 
+      metadata
     } = req.body;
 
     if (!question_id || (!answer_text && !is_skipped)) {
@@ -1751,10 +1752,10 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
 });
 app.post('/api/conversations/skip', authenticateToken, async (req, res) => {
   try {
-    const { 
+    const {
       question_id,
       business_id,
-      metadata 
+      metadata
     } = req.body;
 
     if (!question_id) {
@@ -1762,10 +1763,10 @@ app.post('/api/conversations/skip', authenticateToken, async (req, res) => {
     }
 
     // Validate that the question exists
-    const question = await db.collection('global_questions').findOne({ 
-      _id: new ObjectId(question_id) 
+    const question = await db.collection('global_questions').findOne({
+      _id: new ObjectId(question_id)
     });
-    
+
     if (!question) {
       return res.status(404).json({ error: 'Question not found' });
     }
@@ -1810,11 +1811,11 @@ app.post('/api/conversations/skip', authenticateToken, async (req, res) => {
 // Save followup question generated by Groq
 app.post('/api/conversations/followup-question', authenticateToken, async (req, res) => {
   try {
-    const { 
+    const {
       question_id,
       followup_question_text,
       business_id,
-      metadata 
+      metadata
     } = req.body;
 
     if (!question_id || !followup_question_text) {
@@ -1847,22 +1848,105 @@ app.post('/api/conversations/followup-question', authenticateToken, async (req, 
     res.status(500).json({ error: 'Failed to save followup question' });
   }
 });
+app.get('/api/phase-analysis/:phase', authenticateToken, async (req, res) => {
+  try {
+    const { phase } = req.params;
+    const { business_id, analysis_type, user_id } = req.query;
 
+    // Determine which user's phase analysis to fetch
+    let targetUserId;
+
+    if (user_id) {
+      // Admin is requesting another user's phase analysis
+      if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: 'Admin access required to view other users phase analysis' });
+      }
+
+      const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+
+      if (req.user.role.role_name === 'company_admin') {
+        if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
+          return res.status(403).json({ error: 'Access denied - user not in your company' });
+        }
+      }
+
+      targetUserId = new ObjectId(user_id);
+    } else {
+      targetUserId = new ObjectId(req.user._id);
+    }
+
+    let filter = {
+      user_id: targetUserId,
+      conversation_type: 'phase_analysis',
+      'metadata.phase': phase
+    };
+
+    if (business_id) filter.business_id = new ObjectId(business_id);
+    if (analysis_type) filter['metadata.analysis_type'] = analysis_type;
+
+    const analysisResults = await db.collection('user_business_conversations')
+      .find(filter)
+      .sort({ created_at: -1 })
+      .toArray();
+
+    const formattedResults = analysisResults.map(analysis => ({
+      analysis_id: analysis._id,
+      phase: analysis.metadata?.phase,
+      analysis_type: analysis.metadata?.analysis_type,
+      analysis_name: analysis.message_text,
+      analysis_data: analysis.analysis_result,
+      created_at: analysis.created_at
+    }));
+
+    // Group by analysis type
+    const resultsByType = formattedResults.reduce((acc, result) => {
+      const type = result.analysis_type || 'unknown';
+      if (!acc[type]) {
+        acc[type] = [];
+      }
+      acc[type].push(result);
+      return acc;
+    }, {});
+
+    res.json({
+      phase: phase,
+      analysis_results: formattedResults,
+      results_by_type: resultsByType,
+      total_analyses: formattedResults.length,
+      user_id: targetUserId.toString()
+    });
+
+  } catch (error) {
+    console.error('Failed to fetch phase analysis:', error);
+    res.status(500).json({ error: 'Failed to fetch phase analysis' });
+  }
+});
 // Save phase analysis results (SWOT, Customer Segmentation, etc.)
 app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res) => {
   try {
-    const { 
+    const {
       phase,
-      analysis_type, // 'swot', 'customer_segmentation', 'market_analysis', etc.
+      analysis_type,
       analysis_name,
       analysis_data,
       business_id,
-      metadata 
+      metadata
     } = req.body;
 
     if (!phase || !analysis_type || !analysis_name || !analysis_data) {
       return res.status(400).json({ error: 'Phase, analysis type, name, and data are required' });
     }
+
+    // For strategic analysis, ensure we can distinguish between phases
+    const enhancedMetadata = {
+      phase: phase,
+      analysis_type: analysis_type,
+      generated_at: new Date().toISOString(),
+      ...metadata
+    };
 
     const phaseAnalysis = {
       user_id: new ObjectId(req.user._id),
@@ -1874,15 +1958,12 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
       answer_text: null,
       is_followup: false,
       analysis_result: analysis_data,
-      metadata: {
-        phase: phase,
-        analysis_type: analysis_type,
-        ...metadata
-      },
+      metadata: enhancedMetadata,
       timestamp: new Date(),
       created_at: new Date()
     };
 
+    // For strategic analysis, use upsert to replace existing analysis for the same phase
     const result = await db.collection('user_business_conversations').updateOne(
       {
         user_id: new ObjectId(req.user._id),
@@ -1892,31 +1973,19 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
         'metadata.analysis_type': analysis_type
       },
       {
-        $set: {
-          question_id: null,
-          message_type: 'system',
-          message_text: analysis_name,
-          answer_text: null,
-          is_followup: false,
-          analysis_result: analysis_data,
-          metadata: {
-            phase: phase,
-            analysis_type: analysis_type,
-            ...metadata
-          },
-          timestamp: new Date(),
-          created_at: new Date()
-        }
+        $set: phaseAnalysis
       },
       { upsert: true }
     );
 
     res.json({
       message: 'Phase analysis saved',
-      analysis_id: result.insertedId,
-      analysis_type: analysis_type
+      analysis_id: result.insertedId || 'updated',
+      analysis_type: analysis_type,
+      phase: phase
     });
   } catch (error) {
+    console.error('Failed to save phase analysis:', error);
     res.status(500).json({ error: 'Failed to save phase analysis' });
   }
 });
@@ -1986,7 +2055,7 @@ app.delete('/api/conversations', authenticateToken, async (req, res) => {
 app.get('/api/phase-analysis', authenticateToken, async (req, res) => {
   try {
     const { phase, business_id, analysis_type } = req.query;
-    
+
     let filter = {
       user_id: new ObjectId(req.user._id),
       conversation_type: 'phase_analysis'
@@ -2040,7 +2109,7 @@ app.get('/api/phase-analysis', authenticateToken, async (req, res) => {
 app.get('/api/admin/companies', authenticateToken, requireAdmin, async (req, res) => {
   try {
     let matchFilter = {};
-    
+
     // Filter based on user role
     if (req.user.role.role_name === 'company_admin') {
       // Company admin can only see their own company
@@ -2144,7 +2213,7 @@ app.get('/api/admin/companies', authenticateToken, requireAdmin, async (req, res
       active_users: company.active_users || 0
     }));
 
-    res.json({ 
+    res.json({
       companies: enhancedCompanies,
       total_count: enhancedCompanies.length,
       user_role: req.user.role.role_name,
@@ -2155,7 +2224,7 @@ app.get('/api/admin/companies', authenticateToken, requireAdmin, async (req, res
     res.status(500).json({ error: 'Failed to fetch companies' });
   }
 });
- 
+
 app.get('/api/admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
     // Get all companies with their admin details
@@ -2248,7 +2317,7 @@ app.get('/api/admin/companies', authenticateToken, requireSuperAdmin, async (req
       active_users: company.active_users || 0
     }));
 
-    res.json({ 
+    res.json({
       companies: enhancedCompanies,
       total_count: enhancedCompanies.length
     });
@@ -2346,7 +2415,7 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
   try {
     const { company_id } = req.query;
     let filter = {};
-    
+
     // Handle company filtering based on user role
     if (req.user.role.role_name === 'company_admin') {
       // Company admin can only see users from their own company
@@ -2361,7 +2430,7 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
         }
       }
       // If no company_id provided, show all users (no additional filter)
-    } 
+    }
 
     const users = await db.collection('users').aggregate([
       { $match: filter },
@@ -2396,7 +2465,7 @@ app.get('/api/admin/users', authenticateToken, requireAdmin, async (req, res) =>
       { $sort: { created_at: -1 } }
     ]).toArray();
 
-    res.json({ 
+    res.json({
       users,
       filter_applied: filter,
       total_count: users.length
@@ -2468,11 +2537,11 @@ app.put('/api/companies/:id/logo', authenticateToken, requireAdmin, async (req, 
 
     const result = await db.collection('companies').updateOne(
       { _id: new ObjectId(companyId) },
-      { 
-        $set: { 
+      {
+        $set: {
           logo: logo,
           logo_updated_at: new Date()
-        } 
+        }
       }
     );
 
@@ -2522,11 +2591,11 @@ app.use((error, req, res, next) => {
     }
     return res.status(400).json({ error: `File upload error: ${error.message}` });
   }
-  
+
   if (error.message.includes('Invalid file type')) {
     return res.status(400).json({ error: error.message });
   }
-  
+
   next(error);
 });
 // ===============================
