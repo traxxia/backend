@@ -29,9 +29,18 @@ if (!fs.existsSync(uploadsDir)) {
 
 async function connectToMongoDB() {
   try {
+    console.log('=== MONGODB DEBUG INFO ===');
+    console.log('Raw MONGO_URI from env:', process.env.MONGO_URI ? 'SET' : 'NOT SET');
+    console.log('Using MONGO_URI:', MONGO_URI.replace(/\/\/.*:.*@/, '//***:***@'));
+    
     const client = new MongoClient(MONGO_URI);
     await client.connect();
     db = client.db();
+    
+    // Log the actual database name being used
+    console.log('Connected to database:', db.databaseName);
+    console.log('=== END DEBUG INFO ===');
+    
     await initializeSystem();
     console.log('Connected to MongoDB');
   } catch (err) {
@@ -2558,7 +2567,18 @@ app.put('/api/companies/:id/logo', authenticateToken, requireAdmin, async (req, 
 // ===============================
 // HEALTH CHECK
 // ===============================
-
+app.get('/debug', async (req, res) => {
+  try {
+    res.json({
+      env_mongo_uri: process.env.MONGO_URI ? 'SET' : 'NOT SET',
+      used_mongo_uri: MONGO_URI.replace(/\/\/.*:.*@/, '//***:***@'),
+      database_name: db ? db.databaseName : 'NOT CONNECTED',
+      collections: db ? await db.listCollections().toArray() : []
+    });
+  } catch (error) {
+    res.json({ error: error.message });
+  }
+});
 app.get('/health', async (req, res) => {
   try {
     const stats = await Promise.all([
