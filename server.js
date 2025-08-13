@@ -48,9 +48,36 @@ async function connectToMongoDB() {
     process.exit(1);
   }
 }
+async function createAuditIndexes() {
+  try {
+    // Create indexes for better query performance
+    await db.collection('audit_trail').createIndexes([
+      // Index on user_id for filtering by user
+      { key: { user_id: 1 } },
+      
+      // Index on timestamp for date range queries (descending for recent first)
+      { key: { timestamp: -1 } },
+      
+      // Index on event_type for filtering by event type
+      { key: { event_type: 1 } },
+      
+      // Compound index for common query patterns
+      { key: { user_id: 1, timestamp: -1 } },
+      { key: { event_type: 1, timestamp: -1 } },
+      
+      // TTL index to automatically delete old audit entries after 1 year
+      { key: { timestamp: 1 }, expireAfterSeconds: 31536000 } // 365 days
+    ]);
+    
+    console.log('Audit trail indexes created successfully');
+  } catch (error) {
+    console.error('Failed to create audit trail indexes:', error);
+  }
+}
 
 async function initializeSystem() {
   try {
+    await createAuditIndexes();
     // Create default roles
     const existingRoles = await db.collection('roles').countDocuments();
     if (existingRoles === 0) {
@@ -107,23 +134,57 @@ const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) return res.status(401).json({ error: 'No token provided' });
+  console.log('=== AUTH TOKEN DEBUG ===');
+  console.log('Auth header received:', authHeader ? 'Yes' : 'No');
+  console.log('Token extracted:', token ? 'Yes' : 'No');
+  console.log('Request URL:', req.url);
+  console.log('Request method:', req.method);
+
+  if (!token) {
+    console.log('❌ No token provided');
+    return res.status(401).json({ error: 'No token provided' });
+  }
 
   jwt.verify(token, secretKey, async (err, decoded) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
+    if (err) {
+      console.log('❌ JWT verification failed:', err.message);
+      return res.status(403).json({ error: 'Invalid token' });
+    }
+
+    console.log('✅ JWT decoded successfully');
+    console.log('Decoded user ID:', decoded.id);
+    console.log('Decoded email:', decoded.email);
+    console.log('Decoded role:', decoded.role);
 
     const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
-    if (!user) return res.status(403).json({ error: 'User not found' });
+    if (!user) {
+      console.log('❌ User not found in database');
+      return res.status(403).json({ error: 'User not found' });
+    }
 
     const role = await db.collection('roles').findOne({ _id: user.role_id });
+    console.log('✅ User found:', user.email);
+    console.log('✅ Role found:', role?.role_name);
+    
     req.user = { ...user, role };
+    console.log('=== END AUTH DEBUG ===');
     next();
   });
 };
 
 const requireAdmin = (req, res, next) => {
-  const role = req.user.role.role_name;
-  if (!['super_admin', 'company_admin'].includes(role)) {
+  console.log('=== ADMIN PERMISSION CHECK ===');
+  console.log('User email:', req.user?.email);
+  console.log('User role:', req.user?.role?.role_name);
+  console.log('Required roles: super_admin, company_admin');
+  
+  const role = req.user?.role?.role_name;
+  const isAdmin = ['super_admin', 'company_admin'].includes(role);
+  
+  console.log('Is admin?', isAdmin);
+  console.log('=== END ADMIN CHECK ===');
+  
+  if (!isAdmin) {
     return res.status(403).json({ error: 'Admin access required' });
   }
   next();
@@ -174,6 +235,10 @@ app.post('/api/login', async (req, res) => {
 
     const user = await db.collection('users').findOne({ email });
     if (!user || !await bcrypt.compare(password, user.password)) {
+      // Log failed login attempt
+      if (user) {
+        await logAuditEvent(user._id, 'login_failed', { email });
+      }
       return res.status(400).json({ error: 'Invalid credentials' });
     }
 
@@ -193,6 +258,13 @@ app.post('/api/login', async (req, res) => {
       email: user.email,
       role: role.role_name
     }, secretKey, { expiresIn: '24h' });
+
+    // Log successful login
+    await logAuditEvent(user._id, 'login_success', { 
+      email,
+      role: role.role_name,
+      company: company?.company_name 
+    });
 
     res.json({
       token,
@@ -394,11 +466,20 @@ app.post('/api/businesses', authenticateToken, async (req, res) => {
       created_at: new Date()
     });
 
+    // Log business creation
+    await logAuditEvent(req.user._id, 'business_created', {
+      business_id: result.insertedId,
+      business_name,
+      business_purpose,
+      description: description || ''
+    });
+
     res.json({
       message: 'Business created',
       business_id: result.insertedId
     });
   } catch (error) {
+    console.error('Failed to create business:', error);
     res.status(500).json({ error: 'Failed to create business' });
   }
 });
@@ -408,6 +489,23 @@ app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
   try {
     const businessId = new ObjectId(req.params.id);
     const userId = new ObjectId(req.user._id);
+
+    // Get business details before deletion for audit log
+    const business = await db.collection('user_businesses').findOne({
+      _id: businessId,
+      user_id: userId
+    });
+
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+
+    // Count related conversations for audit info
+    const conversationCount = await db.collection('user_business_conversations')
+      .countDocuments({
+        user_id: userId,
+        business_id: businessId
+      });
 
     // Delete the business
     const deleteResult = await db.collection('user_businesses').deleteOne({
@@ -423,6 +521,15 @@ app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
     await db.collection('user_business_conversations').deleteMany({
       user_id: userId,
       business_id: businessId
+    });
+
+    // Log business deletion
+    await logAuditEvent(req.user._id, 'business_deleted', {
+      business_id: businessId,
+      business_name: business.business_name,
+      business_purpose: business.business_purpose,
+      conversations_deleted: conversationCount,
+      deleted_at: new Date()
     });
 
     res.json({ message: 'Business and conversations deleted successfully' });
@@ -1735,6 +1842,9 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Question ID and answer text (or skip) required' });
     }
 
+    // Get question details for audit
+    const question = await db.collection('global_questions').findOne({ _id: new ObjectId(question_id) });
+
     // Check if this is an edit from the brief section
     const isEdit = metadata?.from_editable_brief === true;
 
@@ -1751,7 +1861,7 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
           {
             $set: {
               answer_text: answer_text.trim(),
-              is_skipped: false, // Un-skip if it was skipped
+              is_skipped: false,
               metadata: {
                 ...metadata,
                 is_complete: true,
@@ -1763,6 +1873,13 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
         );
 
       if (updateResult.modifiedCount > 0) {
+        // Log question edit
+        await logAuditEvent(req.user._id, 'question_edited', {
+          question_id,
+          question_text: question?.question_text?.substring(0, 100) + '...',
+          answer_preview: answer_text.substring(0, 200) + '...'
+        }, business_id);
+
         return res.json({
           message: 'Answer updated',
           is_complete: true,
@@ -1795,6 +1912,15 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
 
     const result = await db.collection('user_business_conversations')
       .insertOne(conversation);
+
+    // Log question answered or skipped
+    const eventType = is_skipped ? 'question_skipped' : 'question_answered';
+    await logAuditEvent(req.user._id, eventType, {
+      question_id,
+      question_text: question?.question_text?.substring(0, 100) + '...',
+      answer_preview: answer_text ? answer_text.substring(0, 200) + '...' : 'N/A',
+      is_followup
+    }, business_id);
 
     res.json({
       message: is_skipped ? 'Question skipped' : 'Answer saved',
@@ -1998,7 +2124,6 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
       return res.status(400).json({ error: 'Phase, analysis type, name, and data are required' });
     }
 
-    // For strategic analysis, ensure we can distinguish between phases
     const enhancedMetadata = {
       phase: phase,
       analysis_type: analysis_type,
@@ -2021,7 +2146,6 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
       created_at: new Date()
     };
 
-    // For strategic analysis, use upsert to replace existing analysis for the same phase
     const result = await db.collection('user_business_conversations').updateOne(
       {
         user_id: new ObjectId(req.user._id),
@@ -2036,6 +2160,30 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
       { upsert: true }
     );
 
+    // Enhanced audit logging with analysis result
+    await logAuditEvent(req.user._id, 'analysis_generated', {
+      analysis_type,
+      analysis_name,
+      phase,
+      // Store the full analysis result in audit trail
+      analysis_result: analysis_data,
+      // Additional metadata for audit purposes
+      metadata: {
+        generated_at: new Date().toISOString(),
+        was_update: result.upsertedId ? false : true,
+        database_operation: result.upsertedId ? 'insert' : 'update',
+        ...enhancedMetadata
+      },
+      // Store data size for monitoring
+      data_size: JSON.stringify(analysis_data).length,
+      // Store analysis summary for quick reference
+      analysis_summary: {
+        data_keys: Object.keys(analysis_data || {}),
+        has_data: !!analysis_data,
+        data_type: typeof analysis_data
+      }
+    }, business_id);
+
     res.json({
       message: 'Phase analysis saved',
       analysis_id: result.insertedId || 'updated',
@@ -2048,6 +2196,222 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
   }
 });
 
+
+app.get('/api/admin/audit-trail', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { user_id, event_type, start_date, end_date, limit = 100, page = 1, include_analysis_data = false } = req.query;
+    
+    let filter = {};
+    
+    // Role-based filtering
+    if (req.user.role.role_name === 'company_admin') {
+      // Company admin can only see audit trail for users in their company
+      const companyUsers = await db.collection('users')
+        .find({ company_id: req.user.company_id })
+        .project({ _id: 1 })
+        .toArray();
+      
+      const userIds = companyUsers.map(u => u._id);
+      filter.user_id = { $in: userIds };
+    }
+    
+    // Additional filters
+    if (user_id) {
+      filter.user_id = new ObjectId(user_id);
+    }
+    
+    if (event_type) {
+      filter.event_type = event_type;
+    }
+    
+    if (start_date || end_date) {
+      filter.timestamp = {};
+      if (start_date) filter.timestamp.$gte = new Date(start_date);
+      if (end_date) filter.timestamp.$lte = new Date(end_date);
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    // Define projection based on whether to include analysis data
+    let projection = {
+      event_type: 1,
+      event_data: 1,
+      timestamp: 1,
+      additional_info: 1,
+      user_name: '$user.name',
+      user_email: '$user.email',
+      company_name: '$company.company_name'
+    };
+
+    // If include_analysis_data is false, exclude large analysis_result from event_data
+    if (include_analysis_data === 'false' || !include_analysis_data) {
+      projection.event_data_summary = {
+        $cond: {
+          if: { $eq: ['$event_type', 'analysis_generated'] },
+          then: {
+            analysis_type: '$event_data.analysis_type',
+            analysis_name: '$event_data.analysis_name',
+            phase: '$event_data.phase',
+            data_size: '$event_data.data_size',
+            analysis_summary: '$event_data.analysis_summary',
+            metadata: '$event_data.metadata',
+            // Exclude analysis_result for summary view
+            has_analysis_result: { $ne: ['$event_data.analysis_result', null] }
+          },
+          else: '$event_data'
+        }
+      };
+      // Don't include full event_data for analysis_generated events
+      projection.event_data = {
+        $cond: {
+          if: { $eq: ['$event_type', 'analysis_generated'] },
+          then: '$$REMOVE',
+          else: '$event_data'
+        }
+      };
+    }
+    
+    // Get audit entries with user details
+    const auditEntries = await db.collection('audit_trail').aggregate([
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user_id',
+          foreignField: '_id',
+          as: 'user'
+        }
+      },
+      {
+        $lookup: {
+          from: 'companies',
+          localField: 'user.company_id',
+          foreignField: '_id',
+          as: 'company'
+        }
+      },
+      { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: '$company', preserveNullAndEmptyArrays: true } },
+      {
+        $project: projection
+      },
+      { $sort: { timestamp: -1 } },
+      { $skip: skip },
+      { $limit: parseInt(limit) }
+    ]).toArray();
+
+    // Get total count for pagination
+    const totalCount = await db.collection('audit_trail').countDocuments(filter);
+
+    // Get analysis generation statistics
+    const analysisStats = await db.collection('audit_trail').aggregate([
+      {
+        $match: {
+          ...filter,
+          event_type: 'analysis_generated'
+        }
+      },
+      {
+        $group: {
+          _id: '$event_data.analysis_type',
+          count: { $sum: 1 },
+          latest: { $max: '$timestamp' }
+        }
+      }
+    ]).toArray();
+
+    res.json({
+      audit_entries: auditEntries,
+      pagination: {
+        total: totalCount,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total_pages: Math.ceil(totalCount / parseInt(limit))
+      },
+      analysis_statistics: analysisStats,
+      data_inclusion: {
+        includes_full_analysis_data: include_analysis_data === 'true',
+        note: include_analysis_data === 'true' ? 
+          'Full analysis results included - may be large' : 
+          'Analysis results summarized for performance'
+      }
+    });
+
+  } catch (error) {
+    console.error('Failed to fetch audit trail:', error);
+    res.status(500).json({ error: 'Failed to fetch audit trail' });
+  }
+});
+
+app.get('/api/admin/audit-trail/:audit_id/analysis-data', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { audit_id } = req.params;
+
+    if (!ObjectId.isValid(audit_id)) {
+      return res.status(400).json({ error: 'Invalid audit ID' });
+    }
+
+    const auditEntry = await db.collection('audit_trail').findOne({
+      _id: new ObjectId(audit_id),
+      event_type: 'analysis_generated'
+    });
+
+    if (!auditEntry) {
+      return res.status(404).json({ error: 'Analysis audit entry not found' });
+    }
+
+    // Role-based access control
+    if (req.user.role.role_name === 'company_admin') {
+      const user = await db.collection('users').findOne({ _id: auditEntry.user_id });
+      if (!user || user.company_id.toString() !== req.user.company_id.toString()) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    }
+
+    res.json({
+      audit_id: auditEntry._id,
+      timestamp: auditEntry.timestamp,
+      analysis_result: auditEntry.event_data.analysis_result,
+      analysis_metadata: {
+        type: auditEntry.event_data.analysis_type,
+        name: auditEntry.event_data.analysis_name,
+        phase: auditEntry.event_data.phase,
+        data_size: auditEntry.event_data.data_size
+      }
+    });
+
+  } catch (error) {
+    console.error('Failed to fetch analysis data from audit trail:', error);
+    res.status(500).json({ error: 'Failed to fetch analysis data' });
+  }
+});
+// Get audit event types for filtering
+app.get('/api/admin/audit-trail/event-types', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const eventTypes = await db.collection('audit_trail').distinct('event_type');
+    
+    res.json({
+      event_types: eventTypes.sort()
+    });
+  } catch (error) {
+    console.error('Failed to fetch event types:', error);
+    res.status(500).json({ error: 'Failed to fetch event types' });
+  }
+});
+
+app.post('/api/logout', authenticateToken, async (req, res) => {
+  try {
+    // Log logout event
+    await logAuditEvent(req.user._id, 'logout', {
+      email: req.user.email
+    });
+
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ error: 'Logout failed' });
+  }
+});
 // Add API to mark question as complete/incomplete
 app.put('/api/conversations/:question_id/status', authenticateToken, async (req, res) => {
   try {
@@ -2615,6 +2979,39 @@ app.put('/api/companies/:id/logo', authenticateToken, requireAdmin, async (req, 
     res.status(500).json({ error: 'Failed to update company logo' });
   }
 });
+
+const logAuditEvent = async (userId, eventType, eventData = {}, businessId = null) => {
+  try {
+    const auditEntry = {
+      user_id: new ObjectId(userId),
+      business_id: businessId ? new ObjectId(businessId) : null,
+      event_type: eventType,
+      event_data: eventData,
+      timestamp: new Date(),
+      ip_address: null, // Can be enhanced later
+      user_agent: null  // Can be enhanced later
+    };
+
+    // For analysis_generated events, add additional tracking
+    if (eventType === 'analysis_generated') {
+      auditEntry.additional_info = {
+        data_stored: true,
+        analysis_phase: eventData.phase,
+        analysis_type: eventData.analysis_type,
+        logged_at: new Date().toISOString()
+      };
+    }
+
+    await db.collection('audit_trail').insertOne(auditEntry);
+    
+    // Optional: Log successful audit entry for debugging
+    console.log(`✅ Audit event logged: ${eventType} for user ${userId}`);
+    
+  } catch (error) {
+    console.error('Failed to log audit event:', error);
+    // Don't throw error to avoid breaking main functionality
+  }
+};
 
 // ===============================
 // HEALTH CHECK
