@@ -32,15 +32,15 @@ async function connectToMongoDB() {
     console.log('=== MONGODB DEBUG INFO ===');
     console.log('Raw MONGO_URI from env:', process.env.MONGO_URI ? 'SET' : 'NOT SET');
     console.log('Using MONGO_URI:', MONGO_URI.replace(/\/\/.*:.*@/, '//***:***@'));
-    
+
     const client = new MongoClient(MONGO_URI);
     await client.connect();
     db = client.db();
-    
+
     // Log the actual database name being used
     console.log('Connected to database:', db.databaseName);
     console.log('=== END DEBUG INFO ===');
-    
+
     await initializeSystem();
     console.log('Connected to MongoDB');
   } catch (err) {
@@ -48,9 +48,36 @@ async function connectToMongoDB() {
     process.exit(1);
   }
 }
+async function createAuditIndexes() {
+  try {
+    // Create indexes for better query performance
+    await db.collection('audit_trail').createIndexes([
+      // Index on user_id for filtering by user
+      { key: { user_id: 1 } },
+      
+      // Index on timestamp for date range queries (descending for recent first)
+      { key: { timestamp: -1 } },
+      
+      // Index on event_type for filtering by event type
+      { key: { event_type: 1 } },
+      
+      // Compound index for common query patterns
+      { key: { user_id: 1, timestamp: -1 } },
+      { key: { event_type: 1, timestamp: -1 } },
+      
+      // TTL index to automatically delete old audit entries after 1 year
+      { key: { timestamp: 1 }, expireAfterSeconds: 31536000 } // 365 days
+    ]);
+    
+    console.log('Audit trail indexes created successfully');
+  } catch (error) {
+    console.error('Failed to create audit trail indexes:', error);
+  }
+}
 
 async function initializeSystem() {
   try {
+    await createAuditIndexes();
     // Create default roles
     const existingRoles = await db.collection('roles').countDocuments();
     if (existingRoles === 0) {
@@ -107,23 +134,57 @@ const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
 
-  if (!token) return res.status(401).json({ error: 'No token provided' });
+  console.log('=== AUTH TOKEN DEBUG ===');
+  console.log('Auth header received:', authHeader ? 'Yes' : 'No');
+  console.log('Token extracted:', token ? 'Yes' : 'No');
+  console.log('Request URL:', req.url);
+  console.log('Request method:', req.method);
+
+  if (!token) {
+    console.log('❌ No token provided');
+    return res.status(401).json({ error: 'No token provided' });
+  }
 
   jwt.verify(token, secretKey, async (err, decoded) => {
-    if (err) return res.status(403).json({ error: 'Invalid token' });
+    if (err) {
+      console.log('❌ JWT verification failed:', err.message);
+      return res.status(403).json({ error: 'Invalid token' });
+    }
+
+    console.log('✅ JWT decoded successfully');
+    console.log('Decoded user ID:', decoded.id);
+    console.log('Decoded email:', decoded.email);
+    console.log('Decoded role:', decoded.role);
 
     const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
-    if (!user) return res.status(403).json({ error: 'User not found' });
+    if (!user) {
+      console.log('❌ User not found in database');
+      return res.status(403).json({ error: 'User not found' });
+    }
 
     const role = await db.collection('roles').findOne({ _id: user.role_id });
+    console.log('✅ User found:', user.email);
+    console.log('✅ Role found:', role?.role_name);
+    
     req.user = { ...user, role };
+    console.log('=== END AUTH DEBUG ===');
     next();
   });
 };
 
 const requireAdmin = (req, res, next) => {
-  const role = req.user.role.role_name;
-  if (!['super_admin', 'company_admin'].includes(role)) {
+  console.log('=== ADMIN PERMISSION CHECK ===');
+  console.log('User email:', req.user?.email);
+  console.log('User role:', req.user?.role?.role_name);
+  console.log('Required roles: super_admin, company_admin');
+  
+  const role = req.user?.role?.role_name;
+  const isAdmin = ['super_admin', 'company_admin'].includes(role);
+  
+  console.log('Is admin?', isAdmin);
+  console.log('=== END ADMIN CHECK ===');
+  
+  if (!isAdmin) {
     return res.status(403).json({ error: 'Admin access required' });
   }
   next();
@@ -174,6 +235,10 @@ app.post('/api/login', async (req, res) => {
 
     const user = await db.collection('users').findOne({ email });
     if (!user || !await bcrypt.compare(password, user.password)) {
+      // Log failed login attempt
+      if (user) {
+        await logAuditEvent(user._id, 'login_failed', { email });
+      }
       return res.status(400).json({ error: 'Invalid credentials' });
     }
 
@@ -193,6 +258,13 @@ app.post('/api/login', async (req, res) => {
       email: user.email,
       role: role.role_name
     }, secretKey, { expiresIn: '24h' });
+
+    // Log successful login
+    await logAuditEvent(user._id, 'login_success', { 
+      email,
+      role: role.role_name,
+      company: company?.company_name 
+    });
 
     res.json({
       token,
@@ -394,11 +466,20 @@ app.post('/api/businesses', authenticateToken, async (req, res) => {
       created_at: new Date()
     });
 
+    // Log business creation
+    await logAuditEvent(req.user._id, 'business_created', {
+      business_id: result.insertedId,
+      business_name,
+      business_purpose,
+      description: description || ''
+    });
+
     res.json({
       message: 'Business created',
       business_id: result.insertedId
     });
   } catch (error) {
+    console.error('Failed to create business:', error);
     res.status(500).json({ error: 'Failed to create business' });
   }
 });
@@ -408,6 +489,23 @@ app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
   try {
     const businessId = new ObjectId(req.params.id);
     const userId = new ObjectId(req.user._id);
+
+    // Get business details before deletion for audit log
+    const business = await db.collection('user_businesses').findOne({
+      _id: businessId,
+      user_id: userId
+    });
+
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found' });
+    }
+
+    // Count related conversations for audit info
+    const conversationCount = await db.collection('user_business_conversations')
+      .countDocuments({
+        user_id: userId,
+        business_id: businessId
+      });
 
     // Delete the business
     const deleteResult = await db.collection('user_businesses').deleteOne({
@@ -423,6 +521,15 @@ app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
     await db.collection('user_business_conversations').deleteMany({
       user_id: userId,
       business_id: businessId
+    });
+
+    // Log business deletion
+    await logAuditEvent(req.user._id, 'business_deleted', {
+      business_id: businessId,
+      business_name: business.business_name,
+      business_purpose: business.business_purpose,
+      conversations_deleted: conversationCount,
+      deleted_at: new Date()
     });
 
     res.json({ message: 'Business and conversations deleted successfully' });
@@ -451,6 +558,169 @@ app.get('/api/questions', authenticateToken, async (req, res) => {
 // ===============================
 // QUESTION MANAGEMENT APIs (Add these to your existing code)
 // ===============================
+
+app.post('/api/questions/missing-for-analysis', authenticateToken, async (req, res) => {
+  try {
+    const { analysis_type, business_id } = req.body;
+
+    if (!analysis_type) {
+      return res.status(400).json({ error: 'Analysis type is required' });
+    }
+
+    // Define which analysis types map to which question criteria (exact matches from your database)
+    const analysisQuestionMap = {
+      'swot': ['swot'],
+      'customerSegmentation': ['customerSegmentation'],
+      'purchaseCriteria': ['purchaseCriteria'],
+      'channelHeatmap': ['channelHeatmap'],
+      'loyaltyNPS': ['loyaltyNPS'],
+      'capabilityHeatmap': ['capabilityHeatmap'],
+      'porters': ['porters'],
+      'pestel': ['pestel'],
+      'strategic': ['strategic'],
+      'fullSwot': ['swot'],
+      'competitiveAdvantage': ['competitiveAdvantage'],
+      'channelEffectiveness': ['channelEffectiveness'],
+      'expandedCapability': ['expandedCapability'],
+      'strategicGoals': ['strategicGoals'],
+      'strategicRadar': ['strategic'],
+      'cultureProfile': ['cultureProfile'],
+      'productivityMetrics': ['productivityMetrics'],
+      'maturityScore': ['maturityScore']
+    };
+
+    const searchTerms = analysisQuestionMap[analysis_type] || [analysis_type];
+    
+    // Create regex patterns for multiple search terms
+    const regexPatterns = searchTerms.map(term => new RegExp(term, 'i'));
+
+    // Get required questions for this analysis using exact string matching
+    let requiredQuestions = [];
+    
+    for (const searchTerm of searchTerms) {
+      const questions = await db.collection('global_questions')
+        .find({
+          is_active: true,
+          used_for: { $regex: new RegExp(`\\b${searchTerm}\\b`, 'i') } // Word boundary match
+        })
+        .sort({ order: 1 })
+        .toArray();
+      
+      requiredQuestions = requiredQuestions.concat(questions);
+    }
+    
+    // Remove duplicates based on _id
+    const uniqueQuestions = requiredQuestions.filter((question, index, self) =>
+      index === self.findIndex(q => q._id.toString() === question._id.toString())
+    );
+
+    // Add debug logging
+    console.log(`Searching for ${analysis_type} with terms:`, searchTerms);
+    console.log(`Found ${uniqueQuestions.length} specific questions`);
+
+    // For customer segmentation, if no specific questions found, 
+    // require essential phase questions (typically questions 8-15)
+    let questionsToCheck = uniqueQuestions;
+    if (uniqueQuestions.length === 0) {
+      if (analysis_type === 'customerSegmentation') {
+        // Customer segmentation typically needs essential phase questions
+        questionsToCheck = await db.collection('global_questions')
+          .find({ 
+            is_active: true,
+            $or: [
+              { phase: 'essential' },
+              { order: { $gte: 8, $lte: 15 } } // Questions 8-15 are typically essential
+            ]
+          })
+          .sort({ order: 1 })
+          .toArray();
+        
+        console.log(`Using essential phase questions: ${questionsToCheck.length} questions`);
+      } else {
+        // For other analyses, use first 7 questions as basic requirement
+        questionsToCheck = await db.collection('global_questions')
+          .find({ 
+            is_active: true,
+            order: { $lte: 7 }
+          })
+          .sort({ order: 1 })
+          .toArray();
+        
+        console.log(`Using basic requirements: ${questionsToCheck.length} questions`);
+      }
+    } else {
+      console.log(`Using ${uniqueQuestions.length} questions found with specific criteria`);
+    }
+
+    // Get user's answered questions for this business
+    const conversations = await db.collection('user_business_conversations')
+      .find({
+        user_id: new ObjectId(req.user._id),
+        business_id: business_id ? new ObjectId(business_id) : null,
+        conversation_type: 'question_answer',
+        $or: [
+          { 'metadata.is_complete': true },
+          { completion_status: 'complete' },
+          { 
+            answer_text: { 
+              $exists: true, 
+              $ne: '', 
+              $ne: '[Question Skipped]' 
+            } 
+          }
+        ]
+      })
+      .toArray();
+
+    const answeredQuestionIds = new Set(
+      conversations.map(conv => conv.question_id?.toString()).filter(Boolean)
+    );
+
+    console.log(`User has answered ${answeredQuestionIds.size} questions`);
+
+    // Find missing questions
+    const missingQuestions = questionsToCheck.filter(q =>
+      !answeredQuestionIds.has(q._id.toString())
+    );
+
+    // Calculate completion status
+    const totalRequired = questionsToCheck.length;
+    const answered = totalRequired - missingQuestions.length;
+    const isComplete = missingQuestions.length === 0;
+
+    console.log(`Missing ${missingQuestions.length} out of ${totalRequired} required questions`);
+
+    res.json({
+      analysis_type,
+      total_required: totalRequired,
+      answered: answered,
+      missing_count: missingQuestions.length,
+      missing_questions: missingQuestions.map(q => ({
+        _id: q._id,
+        order: q.order,
+        question_text: q.question_text,
+        objective: q.objective,
+        required_info: q.required_info,
+        used_for: q.used_for
+      })),
+      is_complete: isComplete,
+      message: isComplete
+        ? `All required questions answered for ${analysis_type}`
+        : `Please answer ${missingQuestions.length} more question${missingQuestions.length > 1 ? 's' : ''} to generate ${analysis_type} analysis`,
+      search_criteria: searchTerms.join(', '),
+      debug_info: {
+        search_terms_used: searchTerms,
+        questions_found_with_criteria: uniqueQuestions.length,
+        fallback_used: uniqueQuestions.length === 0,
+        total_answered_questions: answeredQuestionIds.size
+      }
+    });
+
+  } catch (error) {
+    console.error('Error checking missing questions:', error);
+    res.status(500).json({ error: 'Failed to check missing questions' });
+  }
+});
 
 // 1. Reorder Questions API
 app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, async (req, res) => {
@@ -504,38 +774,9 @@ app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, as
       });
     }
 
-    // Get the maximum order from other phases to maintain global ordering
-    const otherPhasesMaxOrder = await db.collection('global_questions')
-      .find({
-        phase: { $ne: phase },
-        is_active: true
-      })
-      .sort({ order: -1 })
-      .limit(1)
-      .toArray();
-
-    // Get the minimum order from other phases that come after this phase
+    // Calculate new global orders for the reordered questions
     const phaseOrder = ['initial', 'essential', 'good', 'excellent'];
     const currentPhaseIndex = phaseOrder.indexOf(phase);
-    const laterPhases = phaseOrder.slice(currentPhaseIndex + 1);
-
-    let nextPhaseMinOrder = null;
-    if (laterPhases.length > 0) {
-      const nextPhaseQuestions = await db.collection('global_questions')
-        .find({
-          phase: { $in: laterPhases },
-          is_active: true
-        })
-        .sort({ order: 1 })
-        .limit(1)
-        .toArray();
-
-      if (nextPhaseQuestions.length > 0) {
-        nextPhaseMinOrder = nextPhaseQuestions[0].order;
-      }
-    }
-
-    // Calculate the starting order for this phase
     const earlierPhases = phaseOrder.slice(0, currentPhaseIndex);
     let phaseStartOrder = 1;
 
@@ -554,7 +795,6 @@ app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, as
       }
     }
 
-    // Calculate new global orders for the reordered questions
     const bulkOps = questions.map((question, index) => {
       const newGlobalOrder = phaseStartOrder + index;
 
@@ -570,26 +810,6 @@ app.put('/api/admin/questions/reorder', authenticateToken, requireSuperAdmin, as
         }
       };
     });
-
-    // If there are later phases, we need to shift their orders if necessary
-    if (nextPhaseMinOrder !== null) {
-      const maxNewOrder = phaseStartOrder + questions.length - 1;
-      if (maxNewOrder >= nextPhaseMinOrder) {
-        // We need to shift later phase questions
-        const shiftAmount = maxNewOrder - nextPhaseMinOrder + 1;
-
-        await db.collection('global_questions').updateMany(
-          {
-            phase: { $in: laterPhases },
-            is_active: true
-          },
-          {
-            $inc: { order: shiftAmount },
-            $set: { updated_at: new Date() }
-          }
-        );
-      }
-    }
 
     // Execute the reorder operations
     const result = await db.collection('global_questions').bulkWrite(bulkOps);
@@ -628,7 +848,6 @@ app.delete('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, asy
       return res.status(400).json({ error: 'Invalid question ID' });
     }
 
-    // Check if question exists
     const question = await db.collection('global_questions')
       .findOne({ _id: new ObjectId(questionId) });
 
@@ -636,7 +855,6 @@ app.delete('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, asy
       return res.status(404).json({ error: 'Question not found' });
     }
 
-    // Check if question has associated conversations
     const conversationCount = await db.collection('user_business_conversations')
       .countDocuments({ question_id: new ObjectId(questionId) });
 
@@ -647,7 +865,6 @@ app.delete('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, asy
       });
     }
 
-    // Delete the question
     const result = await db.collection('global_questions')
       .deleteOne({ _id: new ObjectId(questionId) });
 
@@ -674,18 +891,16 @@ app.delete('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, asy
 app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
     const questionId = req.params.id;
-    const { question_text, phase, severity, order, is_active } = req.body;
+    const { question_text, phase, severity, order, is_active, used_for, objective, required_info } = req.body;
 
     if (!ObjectId.isValid(questionId)) {
       return res.status(400).json({ error: 'Invalid question ID' });
     }
 
-    // Validate required fields
     if (!question_text || !phase || !severity) {
       return res.status(400).json({ error: 'Question text, phase, and severity are required' });
     }
 
-    // Validate severity
     const validSeverities = ['mandatory', 'optional'];
     if (!validSeverities.includes(severity.toLowerCase())) {
       return res.status(400).json({
@@ -693,12 +908,10 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
       });
     }
 
-    // Validate order if provided
     if (order !== undefined && (!Number.isInteger(order) || order < 1)) {
       return res.status(400).json({ error: 'Order must be a positive integer' });
     }
 
-    // Check if question exists
     const existingQuestion = await db.collection('global_questions')
       .findOne({ _id: new ObjectId(questionId) });
 
@@ -706,11 +919,13 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
       return res.status(404).json({ error: 'Question not found' });
     }
 
-    // Prepare update data
     const updateData = {
       question_text: question_text.trim(),
       phase: phase.trim(),
       severity: severity.toLowerCase(),
+      used_for: used_for || '',
+      objective: objective || '',
+      required_info: required_info || '',
       updated_at: new Date()
     };
 
@@ -722,7 +937,6 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
       updateData.is_active = Boolean(is_active);
     }
 
-    // Update the question
     const result = await db.collection('global_questions').updateOne(
       { _id: new ObjectId(questionId) },
       { $set: updateData }
@@ -739,7 +953,6 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
       });
     }
 
-    // Fetch and return updated question
     const updatedQuestion = await db.collection('global_questions')
       .findOne({ _id: new ObjectId(questionId) });
 
@@ -751,6 +964,9 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
         phase: updatedQuestion.phase,
         severity: updatedQuestion.severity,
         order: updatedQuestion.order,
+        used_for: updatedQuestion.used_for,
+        objective: updatedQuestion.objective,
+        required_info: updatedQuestion.required_info,
         is_active: updatedQuestion.is_active,
         updated_at: updatedQuestion.updated_at
       }
@@ -762,6 +978,7 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
   }
 });
 
+// BULK UPDATE QUESTIONS API (Updates existing questions with new columns)
 app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
     const { questions } = req.body;
@@ -778,135 +995,74 @@ app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, asyn
       });
     }
 
-    // Validation results
-    const validationErrors = [];
-    const validQuestions = [];
+    // Get existing questions from database
+    const existingQuestions = await db.collection('global_questions')
+      .find({ is_active: true })
+      .sort({ order: 1 })
+      .toArray();
 
-    // Validate each question
-    questions.forEach((question, index) => {
-      const errors = [];
+    console.log(`Found ${existingQuestions.length} existing questions in database`);
 
-      // Required fields validation
-      if (!question.question_text || typeof question.question_text !== 'string' || question.question_text.trim() === '') {
-        errors.push('question_text is required and must be a non-empty string');
-      }
+    const bulkOps = [];
+    let matchedCount = 0;
+    let unmatchedQuestions = [];
 
-      if (!question.phase || typeof question.phase !== 'string' || question.phase.trim() === '') {
-        errors.push('phase is required and must be a non-empty string');
-      }
-
-      if (!question.severity || typeof question.severity !== 'string' || question.severity.trim() === '') {
-        errors.push('severity is required and must be a non-empty string');
-      }
-
-      // Optional fields validation
-      if (question.order !== undefined && (!Number.isInteger(question.order) || question.order < 1)) {
-        errors.push('order must be a positive integer');
-      }
-
-      if (question.is_active !== undefined && typeof question.is_active !== 'boolean') {
-        errors.push('is_active must be a boolean');
-      }
-
-      // Valid severity values
-      const validSeverities = ['mandatory', 'optional'];
-      if (question.severity && !validSeverities.includes(question.severity.toLowerCase())) {
-        errors.push(`severity must be one of: ${validSeverities.join(', ')}`);
-      }
-
-      if (errors.length > 0) {
-        validationErrors.push({
-          index: index,
-          question_text: question.question_text || 'N/A',
-          errors: errors
+    // Match questions by order and update with new columns
+    questions.forEach((newQuestion, index) => {
+      const existingQuestion = existingQuestions.find(eq => eq.order === newQuestion.order);
+      
+      if (existingQuestion) {
+        matchedCount++;
+        
+        // Update existing question with new columns
+        bulkOps.push({
+          updateOne: {
+            filter: { _id: existingQuestion._id },
+            update: {
+              $set: {
+                used_for: newQuestion.used_for || '',
+                objective: newQuestion.objective || '',
+                required_info: newQuestion.required_info || '',
+                updated_at: new Date()
+              }
+            }
+          }
         });
       } else {
-        // Prepare valid question for insertion
-        validQuestions.push({
-          question_text: question.question_text.trim(),
-          phase: question.phase.trim(),
-          severity: question.severity.toLowerCase(),
-          order: question.order || 1,
-          is_active: question.is_active !== undefined ? question.is_active : true,
-          created_at: new Date(),
-          created_by: req.user._id
+        unmatchedQuestions.push({
+          order: newQuestion.order,
+          question_text: newQuestion.question_text
         });
       }
     });
 
-    // If there are validation errors, return them
-    if (validationErrors.length > 0) {
-      return res.status(400).json({
-        error: 'Validation failed for some questions',
-        validation_errors: validationErrors,
-        valid_questions_count: validQuestions.length,
-        invalid_questions_count: validationErrors.length
-      });
+    // Execute bulk update operations
+    let modifiedCount = 0;
+    if (bulkOps.length > 0) {
+      const result = await db.collection('global_questions').bulkWrite(bulkOps);
+      modifiedCount = result.modifiedCount;
+      console.log(`Updated ${modifiedCount} questions with new columns`);
     }
-
-    // Check for duplicate questions (same question_text and phase)
-    const duplicateCheck = [];
-    const questionMap = new Map();
-
-    validQuestions.forEach((question, index) => {
-      const key = `${question.question_text.toLowerCase()}-${question.phase.toLowerCase()}`;
-      if (questionMap.has(key)) {
-        duplicateCheck.push({
-          index: index,
-          question_text: question.question_text,
-          phase: question.phase,
-          duplicate_of_index: questionMap.get(key)
-        });
-      } else {
-        questionMap.set(key, index);
-      }
-    });
-
-    if (duplicateCheck.length > 0) {
-      return res.status(400).json({
-        error: 'Duplicate questions found in the payload',
-        duplicates: duplicateCheck
-      });
-    }
-
-    // Check for existing questions in database
-    const existingQuestions = await db.collection('global_questions').find(
-      {
-        $or: validQuestions.map(q => ({
-          question_text: { $regex: new RegExp(`^${q.question_text}$`, 'i') },
-          phase: { $regex: new RegExp(`^${q.phase}$`, 'i') }
-        }))
-      }
-    ).toArray();
-
-    if (existingQuestions.length > 0) {
-      return res.status(400).json({
-        error: 'Some questions already exist in the database',
-        existing_questions: existingQuestions.map(q => ({
-          question_text: q.question_text,
-          phase: q.phase,
-          existing_id: q._id
-        }))
-      });
-    }
-
-    // Insert all valid questions
-    const result = await db.collection('global_questions').insertMany(validQuestions);
 
     res.json({
-      message: 'Questions uploaded successfully',
-      inserted_count: result.insertedCount,
-      inserted_ids: result.insertedIds,
-      questions_summary: {
-        total_processed: questions.length,
-        successfully_inserted: result.insertedCount,
-        failed: 0
+      message: 'Questions updated successfully with new columns',
+      operation: 'update_columns',
+      total_processed: questions.length,
+      matched_questions: matchedCount,
+      updated_questions: modifiedCount,
+      unmatched_questions: unmatchedQuestions.length,
+      unmatched_details: unmatchedQuestions,
+      summary: {
+        existing_questions_in_db: existingQuestions.length,
+        questions_in_payload: questions.length,
+        successfully_updated: modifiedCount,
+        not_found: unmatchedQuestions.length
       }
     });
 
   } catch (error) {
-    console.error('Bulk questions upload failed:', error);
-    res.status(500).json({ error: 'Failed to upload questions' });
+    console.error('Bulk questions update failed:', error);
+    res.status(500).json({ error: 'Failed to update questions' });
   }
 });
 
@@ -1686,6 +1842,9 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Question ID and answer text (or skip) required' });
     }
 
+    // Get question details for audit
+    const question = await db.collection('global_questions').findOne({ _id: new ObjectId(question_id) });
+
     // Check if this is an edit from the brief section
     const isEdit = metadata?.from_editable_brief === true;
 
@@ -1702,7 +1861,7 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
           {
             $set: {
               answer_text: answer_text.trim(),
-              is_skipped: false, // Un-skip if it was skipped
+              is_skipped: false,
               metadata: {
                 ...metadata,
                 is_complete: true,
@@ -1714,6 +1873,13 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
         );
 
       if (updateResult.modifiedCount > 0) {
+        // Log question edit
+        await logAuditEvent(req.user._id, 'question_edited', {
+          question_id,
+          question_text: question?.question_text?.substring(0, 100) + '...',
+          answer_preview: answer_text.substring(0, 200) + '...'
+        }, business_id);
+
         return res.json({
           message: 'Answer updated',
           is_complete: true,
@@ -1746,6 +1912,15 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
 
     const result = await db.collection('user_business_conversations')
       .insertOne(conversation);
+
+    // Log question answered or skipped
+    const eventType = is_skipped ? 'question_skipped' : 'question_answered';
+    await logAuditEvent(req.user._id, eventType, {
+      question_id,
+      question_text: question?.question_text?.substring(0, 100) + '...',
+      answer_preview: answer_text ? answer_text.substring(0, 200) + '...' : 'N/A',
+      is_followup
+    }, business_id);
 
     res.json({
       message: is_skipped ? 'Question skipped' : 'Answer saved',
@@ -1949,7 +2124,6 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
       return res.status(400).json({ error: 'Phase, analysis type, name, and data are required' });
     }
 
-    // For strategic analysis, ensure we can distinguish between phases
     const enhancedMetadata = {
       phase: phase,
       analysis_type: analysis_type,
@@ -1972,7 +2146,6 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
       created_at: new Date()
     };
 
-    // For strategic analysis, use upsert to replace existing analysis for the same phase
     const result = await db.collection('user_business_conversations').updateOne(
       {
         user_id: new ObjectId(req.user._id),
@@ -1987,6 +2160,30 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
       { upsert: true }
     );
 
+    // Enhanced audit logging with analysis result
+    await logAuditEvent(req.user._id, 'analysis_generated', {
+      analysis_type,
+      analysis_name,
+      phase,
+      // Store the full analysis result in audit trail
+      analysis_result: analysis_data,
+      // Additional metadata for audit purposes
+      metadata: {
+        generated_at: new Date().toISOString(),
+        was_update: result.upsertedId ? false : true,
+        database_operation: result.upsertedId ? 'insert' : 'update',
+        ...enhancedMetadata
+      },
+      // Store data size for monitoring
+      data_size: JSON.stringify(analysis_data).length,
+      // Store analysis summary for quick reference
+      analysis_summary: {
+        data_keys: Object.keys(analysis_data || {}),
+        has_data: !!analysis_data,
+        data_type: typeof analysis_data
+      }
+    }, business_id);
+
     res.json({
       message: 'Phase analysis saved',
       analysis_id: result.insertedId || 'updated',
@@ -1999,6 +2196,222 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
   }
 });
 
+
+app.get('/api/admin/audit-trail', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { user_id, event_type, start_date, end_date, limit = 100, page = 1, include_analysis_data = false } = req.query;
+    
+    let filter = {};
+    
+    // Role-based filtering
+    if (req.user.role.role_name === 'company_admin') {
+      // Company admin can only see audit trail for users in their company
+      const companyUsers = await db.collection('users')
+        .find({ company_id: req.user.company_id })
+        .project({ _id: 1 })
+        .toArray();
+      
+      const userIds = companyUsers.map(u => u._id);
+      filter.user_id = { $in: userIds };
+    }
+    
+    // Additional filters
+    if (user_id) {
+      filter.user_id = new ObjectId(user_id);
+    }
+    
+    if (event_type) {
+      filter.event_type = event_type;
+    }
+    
+    if (start_date || end_date) {
+      filter.timestamp = {};
+      if (start_date) filter.timestamp.$gte = new Date(start_date);
+      if (end_date) filter.timestamp.$lte = new Date(end_date);
+    }
+
+    const skip = (parseInt(page) - 1) * parseInt(limit);
+    
+    // Define projection based on whether to include analysis data
+    let projection = {
+      event_type: 1,
+      event_data: 1,
+      timestamp: 1,
+      additional_info: 1,
+      user_name: '$user.name',
+      user_email: '$user.email',
+      company_name: '$company.company_name'
+    };
+
+    // If include_analysis_data is false, exclude large analysis_result from event_data
+    if (include_analysis_data === 'false' || !include_analysis_data) {
+      projection.event_data_summary = {
+        $cond: {
+          if: { $eq: ['$event_type', 'analysis_generated'] },
+          then: {
+            analysis_type: '$event_data.analysis_type',
+            analysis_name: '$event_data.analysis_name',
+            phase: '$event_data.phase',
+            data_size: '$event_data.data_size',
+            analysis_summary: '$event_data.analysis_summary',
+            metadata: '$event_data.metadata',
+            // Exclude analysis_result for summary view
+            has_analysis_result: { $ne: ['$event_data.analysis_result', null] }
+          },
+          else: '$event_data'
+        }
+      };
+      // Don't include full event_data for analysis_generated events
+      projection.event_data = {
+        $cond: {
+          if: { $eq: ['$event_type', 'analysis_generated'] },
+          then: '$$REMOVE',
+          else: '$event_data'
+        }
+      };
+    }
+    
+    // Get audit entries with user details
+    const auditEntries = await db.collection('audit_trail').aggregate([
+      { $match: filter },
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user_id',
+          foreignField: '_id',
+          as: 'user'
+        }
+      },
+      {
+        $lookup: {
+          from: 'companies',
+          localField: 'user.company_id',
+          foreignField: '_id',
+          as: 'company'
+        }
+      },
+      { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: '$company', preserveNullAndEmptyArrays: true } },
+      {
+        $project: projection
+      },
+      { $sort: { timestamp: -1 } },
+      { $skip: skip },
+      { $limit: parseInt(limit) }
+    ]).toArray();
+
+    // Get total count for pagination
+    const totalCount = await db.collection('audit_trail').countDocuments(filter);
+
+    // Get analysis generation statistics
+    const analysisStats = await db.collection('audit_trail').aggregate([
+      {
+        $match: {
+          ...filter,
+          event_type: 'analysis_generated'
+        }
+      },
+      {
+        $group: {
+          _id: '$event_data.analysis_type',
+          count: { $sum: 1 },
+          latest: { $max: '$timestamp' }
+        }
+      }
+    ]).toArray();
+
+    res.json({
+      audit_entries: auditEntries,
+      pagination: {
+        total: totalCount,
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total_pages: Math.ceil(totalCount / parseInt(limit))
+      },
+      analysis_statistics: analysisStats,
+      data_inclusion: {
+        includes_full_analysis_data: include_analysis_data === 'true',
+        note: include_analysis_data === 'true' ? 
+          'Full analysis results included - may be large' : 
+          'Analysis results summarized for performance'
+      }
+    });
+
+  } catch (error) {
+    console.error('Failed to fetch audit trail:', error);
+    res.status(500).json({ error: 'Failed to fetch audit trail' });
+  }
+});
+
+app.get('/api/admin/audit-trail/:audit_id/analysis-data', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { audit_id } = req.params;
+
+    if (!ObjectId.isValid(audit_id)) {
+      return res.status(400).json({ error: 'Invalid audit ID' });
+    }
+
+    const auditEntry = await db.collection('audit_trail').findOne({
+      _id: new ObjectId(audit_id),
+      event_type: 'analysis_generated'
+    });
+
+    if (!auditEntry) {
+      return res.status(404).json({ error: 'Analysis audit entry not found' });
+    }
+
+    // Role-based access control
+    if (req.user.role.role_name === 'company_admin') {
+      const user = await db.collection('users').findOne({ _id: auditEntry.user_id });
+      if (!user || user.company_id.toString() !== req.user.company_id.toString()) {
+        return res.status(403).json({ error: 'Access denied' });
+      }
+    }
+
+    res.json({
+      audit_id: auditEntry._id,
+      timestamp: auditEntry.timestamp,
+      analysis_result: auditEntry.event_data.analysis_result,
+      analysis_metadata: {
+        type: auditEntry.event_data.analysis_type,
+        name: auditEntry.event_data.analysis_name,
+        phase: auditEntry.event_data.phase,
+        data_size: auditEntry.event_data.data_size
+      }
+    });
+
+  } catch (error) {
+    console.error('Failed to fetch analysis data from audit trail:', error);
+    res.status(500).json({ error: 'Failed to fetch analysis data' });
+  }
+});
+// Get audit event types for filtering
+app.get('/api/admin/audit-trail/event-types', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const eventTypes = await db.collection('audit_trail').distinct('event_type');
+    
+    res.json({
+      event_types: eventTypes.sort()
+    });
+  } catch (error) {
+    console.error('Failed to fetch event types:', error);
+    res.status(500).json({ error: 'Failed to fetch event types' });
+  }
+});
+
+app.post('/api/logout', authenticateToken, async (req, res) => {
+  try {
+    // Log logout event
+    await logAuditEvent(req.user._id, 'logout', {
+      email: req.user.email
+    });
+
+    res.json({ message: 'Logged out successfully' });
+  } catch (error) {
+    console.error('Logout error:', error);
+    res.status(500).json({ error: 'Logout failed' });
+  }
+});
 // Add API to mark question as complete/incomplete
 app.put('/api/conversations/:question_id/status', authenticateToken, async (req, res) => {
   try {
@@ -2395,7 +2808,7 @@ app.post('/api/admin/companies', authenticateToken, requireSuperAdmin, logoUploa
 
 app.post('/api/admin/questions', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
-    const { question_text, phase, severity, order } = req.body;
+    const { question_text, phase, severity, order, used_for, objective, required_info } = req.body;
 
     if (!question_text || !phase || !severity) {
       return res.status(400).json({ error: 'Question text, phase, and severity required' });
@@ -2406,6 +2819,9 @@ app.post('/api/admin/questions', authenticateToken, requireSuperAdmin, async (re
       phase,
       severity,
       order: order || 1,
+      used_for: used_for || '',
+      objective: objective || '',
+      required_info: required_info || '',
       is_active: true,
       created_at: new Date()
     });
@@ -2563,6 +2979,39 @@ app.put('/api/companies/:id/logo', authenticateToken, requireAdmin, async (req, 
     res.status(500).json({ error: 'Failed to update company logo' });
   }
 });
+
+const logAuditEvent = async (userId, eventType, eventData = {}, businessId = null) => {
+  try {
+    const auditEntry = {
+      user_id: new ObjectId(userId),
+      business_id: businessId ? new ObjectId(businessId) : null,
+      event_type: eventType,
+      event_data: eventData,
+      timestamp: new Date(),
+      ip_address: null, // Can be enhanced later
+      user_agent: null  // Can be enhanced later
+    };
+
+    // For analysis_generated events, add additional tracking
+    if (eventType === 'analysis_generated') {
+      auditEntry.additional_info = {
+        data_stored: true,
+        analysis_phase: eventData.phase,
+        analysis_type: eventData.analysis_type,
+        logged_at: new Date().toISOString()
+      };
+    }
+
+    await db.collection('audit_trail').insertOne(auditEntry);
+    
+    // Optional: Log successful audit entry for debugging
+    console.log(`✅ Audit event logged: ${eventType} for user ${userId}`);
+    
+  } catch (error) {
+    console.error('Failed to log audit event:', error);
+    // Don't throw error to avoid breaking main functionality
+  }
+};
 
 // ===============================
 // HEALTH CHECK
