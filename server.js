@@ -54,21 +54,21 @@ async function createAuditIndexes() {
     await db.collection('audit_trail').createIndexes([
       // Index on user_id for filtering by user
       { key: { user_id: 1 } },
-      
+
       // Index on timestamp for date range queries (descending for recent first)
       { key: { timestamp: -1 } },
-      
+
       // Index on event_type for filtering by event type
       { key: { event_type: 1 } },
-      
+
       // Compound index for common query patterns
       { key: { user_id: 1, timestamp: -1 } },
       { key: { event_type: 1, timestamp: -1 } },
-      
+
       // TTL index to automatically delete old audit entries after 1 year
       { key: { timestamp: 1 }, expireAfterSeconds: 31536000 } // 365 days
     ]);
-    
+
     console.log('Audit trail indexes created successfully');
   } catch (error) {
     console.error('Failed to create audit trail indexes:', error);
@@ -121,6 +121,31 @@ async function initializeSystem() {
         created_at: new Date()
       });
     }
+
+    async function createBusinessIndexes() {
+      try {
+        await db.collection('user_businesses').createIndexes([
+          // Index on user_id for user's businesses
+          { key: { user_id: 1 } },
+
+          // Index on location fields for location-based queries
+          { key: { city: 1 } },
+          { key: { country: 1 } },
+          { key: { city: 1, country: 1 } },
+
+          // Compound index for user + location queries
+          { key: { user_id: 1, city: 1 } },
+          { key: { user_id: 1, country: 1 } },
+
+          // Text index for business name and location search
+          { key: { business_name: 'text', city: 'text', country: 'text' } }
+        ]);
+
+        console.log('Business location indexes created successfully');
+      } catch (error) {
+        console.error('Failed to create business indexes:', error);
+      }
+    }
   } catch (error) {
     console.error('System initialization failed:', error);
   }
@@ -165,7 +190,7 @@ const authenticateToken = (req, res, next) => {
     const role = await db.collection('roles').findOne({ _id: user.role_id });
     console.log('✅ User found:', user.email);
     console.log('✅ Role found:', role?.role_name);
-    
+
     req.user = { ...user, role };
     console.log('=== END AUTH DEBUG ===');
     next();
@@ -177,13 +202,13 @@ const requireAdmin = (req, res, next) => {
   console.log('User email:', req.user?.email);
   console.log('User role:', req.user?.role?.role_name);
   console.log('Required roles: super_admin, company_admin');
-  
+
   const role = req.user?.role?.role_name;
   const isAdmin = ['super_admin', 'company_admin'].includes(role);
-  
+
   console.log('Is admin?', isAdmin);
   console.log('=== END ADMIN CHECK ===');
-  
+
   if (!isAdmin) {
     return res.status(403).json({ error: 'Admin access required' });
   }
@@ -260,10 +285,10 @@ app.post('/api/login', async (req, res) => {
     }, secretKey, { expiresIn: '24h' });
 
     // Log successful login
-    await logAuditEvent(user._id, 'login_success', { 
+    await logAuditEvent(user._id, 'login_success', {
       email,
       role: role.role_name,
-      company: company?.company_name 
+      company: company?.company_name
     });
 
     res.json({
@@ -362,7 +387,7 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
     const totalQuestions = await db.collection('global_questions')
       .countDocuments({ is_active: true });
 
-    // Enhanced businesses with question statistics
+    // Enhanced businesses with question statistics and location data
     const enhancedBusinesses = await Promise.all(
       businesses.map(async (business) => {
         // Get all conversations for this business
@@ -417,6 +442,10 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
 
         return {
           ...business,
+          // Ensure location fields are included (with defaults if not present)
+          city: business.city || '',
+          country: business.country || '',
+          location_display: [business.city, business.country].filter(Boolean).join(', '),
           question_statistics: {
             total_questions: totalQuestions,
             completed_questions: completedQuestions,
@@ -434,7 +463,8 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
       businesses: enhancedBusinesses,
       overall_stats: {
         total_businesses: businesses.length,
-        total_questions_in_system: totalQuestions
+        total_questions_in_system: totalQuestions,
+        businesses_with_location: enhancedBusinesses.filter(b => b.city || b.country).length
       }
     });
   } catch (error) {
@@ -445,12 +475,22 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
 
 app.post('/api/businesses', authenticateToken, async (req, res) => {
   try {
-    const { business_name, business_purpose, description } = req.body;
+    const { business_name, business_purpose, description, city, country } = req.body;
 
     if (!business_name || !business_purpose) {
       return res.status(400).json({ error: 'Business name and purpose required' });
     }
 
+    // Validate city and country if provided
+    if (city && city.trim().length > 0 && city.trim().length < 2) {
+      return res.status(400).json({ error: 'City must be at least 2 characters long' });
+    }
+
+    if (country && country.trim().length > 0 && country.trim().length < 2) {
+      return res.status(400).json({ error: 'Country must be at least 2 characters long' });
+    }
+
+    // Check existing business count
     const existingCount = await db.collection('user_businesses')
       .countDocuments({ user_id: new ObjectId(req.user._id) });
 
@@ -458,25 +498,45 @@ app.post('/api/businesses', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Maximum 5 businesses allowed' });
     }
 
-    const result = await db.collection('user_businesses').insertOne({
+    // Create business with new fields
+    const businessData = {
       user_id: new ObjectId(req.user._id),
-      business_name,
-      business_purpose,
-      description: description || '',
-      created_at: new Date()
-    });
+      business_name: business_name.trim(),
+      business_purpose: business_purpose.trim(),
+      description: description ? description.trim() : '',
+      city: city ? city.trim() : '',
+      country: country ? country.trim() : '',
+      created_at: new Date(),
+      updated_at: new Date()
+    };
 
-    // Log business creation
+    const result = await db.collection('user_businesses').insertOne(businessData);
+
+    // Enhanced audit logging with location data
     await logAuditEvent(req.user._id, 'business_created', {
       business_id: result.insertedId,
-      business_name,
-      business_purpose,
-      description: description || ''
+      business_name: business_name.trim(),
+      business_purpose: business_purpose.trim(),
+      description: description ? description.trim() : '',
+      location: {
+        city: city ? city.trim() : '',
+        country: country ? country.trim() : ''
+      },
+      has_location: !!(city || country)
     });
 
     res.json({
-      message: 'Business created',
-      business_id: result.insertedId
+      message: 'Business created successfully',
+      business_id: result.insertedId,
+      business: {
+        _id: result.insertedId,
+        business_name: business_name.trim(),
+        business_purpose: business_purpose.trim(),
+        description: description ? description.trim() : '',
+        city: city ? city.trim() : '',
+        country: country ? country.trim() : '',
+        created_at: new Date()
+      }
     });
   } catch (error) {
     console.error('Failed to create business:', error);
@@ -590,13 +650,13 @@ app.post('/api/questions/missing-for-analysis', authenticateToken, async (req, r
     };
 
     const searchTerms = analysisQuestionMap[analysis_type] || [analysis_type];
-    
+
     // Create regex patterns for multiple search terms
     const regexPatterns = searchTerms.map(term => new RegExp(term, 'i'));
 
     // Get required questions for this analysis using exact string matching
     let requiredQuestions = [];
-    
+
     for (const searchTerm of searchTerms) {
       const questions = await db.collection('global_questions')
         .find({
@@ -605,10 +665,10 @@ app.post('/api/questions/missing-for-analysis', authenticateToken, async (req, r
         })
         .sort({ order: 1 })
         .toArray();
-      
+
       requiredQuestions = requiredQuestions.concat(questions);
     }
-    
+
     // Remove duplicates based on _id
     const uniqueQuestions = requiredQuestions.filter((question, index, self) =>
       index === self.findIndex(q => q._id.toString() === question._id.toString())
@@ -625,7 +685,7 @@ app.post('/api/questions/missing-for-analysis', authenticateToken, async (req, r
       if (analysis_type === 'customerSegmentation') {
         // Customer segmentation typically needs essential phase questions
         questionsToCheck = await db.collection('global_questions')
-          .find({ 
+          .find({
             is_active: true,
             $or: [
               { phase: 'essential' },
@@ -634,18 +694,18 @@ app.post('/api/questions/missing-for-analysis', authenticateToken, async (req, r
           })
           .sort({ order: 1 })
           .toArray();
-        
+
         console.log(`Using essential phase questions: ${questionsToCheck.length} questions`);
       } else {
         // For other analyses, use first 7 questions as basic requirement
         questionsToCheck = await db.collection('global_questions')
-          .find({ 
+          .find({
             is_active: true,
             order: { $lte: 7 }
           })
           .sort({ order: 1 })
           .toArray();
-        
+
         console.log(`Using basic requirements: ${questionsToCheck.length} questions`);
       }
     } else {
@@ -661,12 +721,12 @@ app.post('/api/questions/missing-for-analysis', authenticateToken, async (req, r
         $or: [
           { 'metadata.is_complete': true },
           { completion_status: 'complete' },
-          { 
-            answer_text: { 
-              $exists: true, 
-              $ne: '', 
-              $ne: '[Question Skipped]' 
-            } 
+          {
+            answer_text: {
+              $exists: true,
+              $ne: '',
+              $ne: '[Question Skipped]'
+            }
           }
         ]
       })
@@ -979,6 +1039,7 @@ app.put('/api/admin/questions/:id', authenticateToken, requireSuperAdmin, async 
 });
 
 // BULK UPDATE QUESTIONS API (Updates existing questions with new columns)
+// ENHANCED BULK UPDATE/INSERT QUESTIONS API
 app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, async (req, res) => {
   try {
     const { questions } = req.body;
@@ -995,6 +1056,68 @@ app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, asyn
       });
     }
 
+    // Validate required fields for each question
+    const validationErrors = [];
+    questions.forEach((question, index) => {
+      if (!question.question_text || !question.phase || !question.severity || !question.order) {
+        validationErrors.push({
+          index: index,
+          order: question.order,
+          error: 'question_text, phase, severity, and order are required'
+        });
+      }
+
+      if (!Number.isInteger(question.order) || question.order < 1) {
+        validationErrors.push({
+          index: index,
+          order: question.order,
+          error: 'order must be a positive integer'
+        });
+      }
+
+      const validPhases = ['initial', 'essential', 'good', 'advanced', 'excellent'];
+      if (!validPhases.includes(question.phase)) {
+        validationErrors.push({
+          index: index,
+          order: question.order,
+          error: `phase must be one of: ${validPhases.join(', ')}`
+        });
+      }
+
+      const validSeverities = ['mandatory', 'optional'];
+      if (!validSeverities.includes(question.severity)) {
+        validationErrors.push({
+          index: index,
+          order: question.order,
+          error: `severity must be one of: ${validSeverities.join(', ')}`
+        });
+      }
+    });
+
+    if (validationErrors.length > 0) {
+      return res.status(400).json({
+        error: 'Validation failed',
+        validation_errors: validationErrors
+      });
+    }
+
+    // Check for duplicate orders in the payload
+    const orderCounts = {};
+    questions.forEach(q => {
+      orderCounts[q.order] = (orderCounts[q.order] || 0) + 1;
+    });
+
+    const duplicateOrders = Object.entries(orderCounts)
+      .filter(([order, count]) => count > 1)
+      .map(([order, count]) => ({ order: parseInt(order), count }));
+
+    if (duplicateOrders.length > 0) {
+      return res.status(400).json({
+        error: 'Duplicate orders found in payload',
+        duplicate_orders: duplicateOrders
+      });
+    }
+
     // Get existing questions from database
     const existingQuestions = await db.collection('global_questions')
       .find({ is_active: true })
@@ -1005,21 +1128,26 @@ app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, asyn
 
     const bulkOps = [];
     let matchedCount = 0;
+    let newQuestionsCount = 0;
     let unmatchedQuestions = [];
+    let insertedQuestions = [];
 
-    // Match questions by order and update with new columns
+    // Process each question in the payload
     questions.forEach((newQuestion, index) => {
       const existingQuestion = existingQuestions.find(eq => eq.order === newQuestion.order);
-      
+
       if (existingQuestion) {
+        // Update existing question
         matchedCount++;
-        
-        // Update existing question with new columns
+
         bulkOps.push({
           updateOne: {
             filter: { _id: existingQuestion._id },
             update: {
               $set: {
+                question_text: newQuestion.question_text.trim(),
+                phase: newQuestion.phase.trim(),
+                severity: newQuestion.severity.toLowerCase(),
                 used_for: newQuestion.used_for || '',
                 objective: newQuestion.objective || '',
                 required_info: newQuestion.required_info || '',
@@ -1029,40 +1157,115 @@ app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, asyn
           }
         });
       } else {
-        unmatchedQuestions.push({
+        // Insert new question
+        newQuestionsCount++;
+
+        const newQuestionDoc = {
+          question_text: newQuestion.question_text.trim(),
+          phase: newQuestion.phase.trim(),
+          severity: newQuestion.severity.toLowerCase(),
           order: newQuestion.order,
-          question_text: newQuestion.question_text
+          used_for: newQuestion.used_for || '',
+          objective: newQuestion.objective || '',
+          required_info: newQuestion.required_info || '',
+          is_active: true,
+          created_at: new Date()
+        };
+
+        bulkOps.push({
+          insertOne: {
+            document: newQuestionDoc
+          }
+        });
+
+        insertedQuestions.push({
+          order: newQuestion.order,
+          question_text: newQuestion.question_text,
+          phase: newQuestion.phase
         });
       }
     });
 
-    // Execute bulk update operations
+    // Execute bulk operations
     let modifiedCount = 0;
+    let insertedCount = 0;
+    let result = null;
+
     if (bulkOps.length > 0) {
-      const result = await db.collection('global_questions').bulkWrite(bulkOps);
-      modifiedCount = result.modifiedCount;
-      console.log(`Updated ${modifiedCount} questions with new columns`);
+      result = await db.collection('global_questions').bulkWrite(bulkOps, { ordered: false });
+      modifiedCount = result.modifiedCount || 0;
+      insertedCount = result.insertedCount || 0;
+
+      console.log(`Bulk operation completed: ${modifiedCount} updated, ${insertedCount} inserted`);
     }
 
-    res.json({
-      message: 'Questions updated successfully with new columns',
-      operation: 'update_columns',
+    // Get final question count and updated questions
+    const finalQuestionCount = await db.collection('global_questions')
+      .countDocuments({ is_active: true });
+
+    const updatedQuestions = await db.collection('global_questions')
+      .find({ is_active: true })
+      .sort({ order: 1 })
+      .toArray();
+
+    // Log audit event for bulk operation
+    await logAuditEvent(req.user._id, 'bulk_questions_operation', {
+      operation_type: 'bulk_update_insert',
       total_processed: questions.length,
-      matched_questions: matchedCount,
-      updated_questions: modifiedCount,
-      unmatched_questions: unmatchedQuestions.length,
-      unmatched_details: unmatchedQuestions,
+      questions_updated: modifiedCount,
+      questions_inserted: insertedCount,
+      existing_questions_before: existingQuestions.length,
+      total_questions_after: finalQuestionCount,
+      new_questions_added: insertedQuestions,
+      timestamp: new Date().toISOString()
+    });
+
+    res.json({
+      message: 'Questions processed successfully',
+      operation: 'bulk_update_insert',
       summary: {
-        existing_questions_in_db: existingQuestions.length,
-        questions_in_payload: questions.length,
+        total_processed: questions.length,
+        existing_questions_updated: modifiedCount,
+        new_questions_inserted: insertedCount,
+        questions_before_operation: existingQuestions.length,
+        questions_after_operation: finalQuestionCount,
+        questions_added: newQuestionsCount
+      },
+      details: {
+        matched_and_updated: matchedCount,
+        new_questions_added: newQuestionsCount,
         successfully_updated: modifiedCount,
-        not_found: unmatchedQuestions.length
-      }
+        successfully_inserted: insertedCount
+      },
+      new_questions_added: insertedQuestions,
+      database_stats: {
+        questions_before: existingQuestions.length,
+        questions_after: finalQuestionCount,
+        net_increase: finalQuestionCount - existingQuestions.length
+      },
+      bulk_operation_result: result ? {
+        acknowledged: result.acknowledged,
+        inserted_count: result.insertedCount,
+        matched_count: result.matchedCount,
+        modified_count: result.modifiedCount,
+        upserted_count: result.upsertedCount
+      } : null
     });
 
   } catch (error) {
-    console.error('Bulk questions update failed:', error);
-    res.status(500).json({ error: 'Failed to update questions' });
+    console.error('Bulk questions operation failed:', error);
+
+    // Log error in audit trail
+    await logAuditEvent(req.user._id, 'bulk_questions_error', {
+      error_message: error.message,
+      operation_type: 'bulk_update_insert',
+      timestamp: new Date().toISOString()
+    });
+
+    res.status(500).json({
+      error: 'Failed to process questions',
+      details: error.message
+    });
   }
 });
 
@@ -2200,9 +2403,9 @@ app.post('/api/conversations/phase-analysis', authenticateToken, async (req, res
 app.get('/api/admin/audit-trail', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const { user_id, event_type, start_date, end_date, limit = 100, page = 1, include_analysis_data = false } = req.query;
-    
+
     let filter = {};
-    
+
     // Role-based filtering
     if (req.user.role.role_name === 'company_admin') {
       // Company admin can only see audit trail for users in their company
@@ -2210,20 +2413,20 @@ app.get('/api/admin/audit-trail', authenticateToken, requireAdmin, async (req, r
         .find({ company_id: req.user.company_id })
         .project({ _id: 1 })
         .toArray();
-      
+
       const userIds = companyUsers.map(u => u._id);
       filter.user_id = { $in: userIds };
     }
-    
+
     // Additional filters
     if (user_id) {
       filter.user_id = new ObjectId(user_id);
     }
-    
+
     if (event_type) {
       filter.event_type = event_type;
     }
-    
+
     if (start_date || end_date) {
       filter.timestamp = {};
       if (start_date) filter.timestamp.$gte = new Date(start_date);
@@ -2231,7 +2434,7 @@ app.get('/api/admin/audit-trail', authenticateToken, requireAdmin, async (req, r
     }
 
     const skip = (parseInt(page) - 1) * parseInt(limit);
-    
+
     // Define projection based on whether to include analysis data
     let projection = {
       event_type: 1,
@@ -2270,7 +2473,7 @@ app.get('/api/admin/audit-trail', authenticateToken, requireAdmin, async (req, r
         }
       };
     }
-    
+
     // Get audit entries with user details
     const auditEntries = await db.collection('audit_trail').aggregate([
       { $match: filter },
@@ -2331,8 +2534,8 @@ app.get('/api/admin/audit-trail', authenticateToken, requireAdmin, async (req, r
       analysis_statistics: analysisStats,
       data_inclusion: {
         includes_full_analysis_data: include_analysis_data === 'true',
-        note: include_analysis_data === 'true' ? 
-          'Full analysis results included - may be large' : 
+        note: include_analysis_data === 'true' ?
+          'Full analysis results included - may be large' :
           'Analysis results summarized for performance'
       }
     });
@@ -2389,7 +2592,7 @@ app.get('/api/admin/audit-trail/:audit_id/analysis-data', authenticateToken, req
 app.get('/api/admin/audit-trail/event-types', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const eventTypes = await db.collection('audit_trail').distinct('event_type');
-    
+
     res.json({
       event_types: eventTypes.sort()
     });
@@ -3003,10 +3206,10 @@ const logAuditEvent = async (userId, eventType, eventData = {}, businessId = nul
     }
 
     await db.collection('audit_trail').insertOne(auditEntry);
-    
+
     // Optional: Log successful audit entry for debugging
     console.log(`✅ Audit event logged: ${eventType} for user ${userId}`);
-    
+
   } catch (error) {
     console.error('Failed to log audit event:', error);
     // Don't throw error to avoid breaking main functionality
