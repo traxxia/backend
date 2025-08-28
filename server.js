@@ -11,8 +11,8 @@ const port = process.env.PORT || 5001;
 const secretKey = process.env.SECRET_KEY || 'default_secret_key';
 const multer = require('multer');
 const path = require('path');
-const fs = require('fs');
-
+const fs = require('fs').promises;
+const financialDocsDir = path.join(__dirname, 'uploads', 'financial-documents');
 
 app.use(bodyParser.json());
 app.use(cors());
@@ -20,12 +20,58 @@ app.use(cors());
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/traxxia_simple';
 let db;
 const uploadsDir = path.join(__dirname, 'uploads', 'logos');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
+const fsSync = require('fs');
+if (!fsSync.existsSync(uploadsDir)) {
+  fsSync.mkdirSync(uploadsDir, { recursive: true });
 }
 // ===============================
 // DATABASE CONNECTION & SETUP
 // ===============================
+
+const ensureFinancialDocsDir = async () => {
+  try {
+    await fs.access(financialDocsDir);
+  } catch (error) {
+    await fs.mkdir(financialDocsDir, { recursive: true });
+    console.log('Financial documents directory created');
+  }
+};
+
+// Configure multer for financial documents
+const financialDocUpload = multer({
+  storage: multer.diskStorage({
+    destination: function (req, file, cb) {
+      cb(null, financialDocsDir);
+    },
+    filename: function (req, file, cb) {
+      const businessId = req.params.id;
+      const ext = path.extname(file.originalname);
+      const filename = `business_${businessId}_financial_doc${ext}`;
+      cb(null, filename);
+    }
+  }),
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB limit for financial documents
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      'application/pdf',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/csv',
+      'image/jpeg',
+      'image/jpg',
+      'image/png',
+      'image/webp'
+    ];
+
+    if (allowedTypes.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only PDF, Excel, CSV, and image files are allowed.'), false);
+    }
+  }
+});
 
 async function connectToMongoDB() {
   try {
@@ -42,6 +88,7 @@ async function connectToMongoDB() {
     console.log('=== END DEBUG INFO ===');
 
     await initializeSystem();
+    await ensureFinancialDocsDir();
     console.log('Connected to MongoDB');
   } catch (err) {
     console.error('MongoDB connection failed:', err);
@@ -121,31 +168,6 @@ async function initializeSystem() {
         created_at: new Date()
       });
     }
-
-    async function createBusinessIndexes() {
-      try {
-        await db.collection('user_businesses').createIndexes([
-          // Index on user_id for user's businesses
-          { key: { user_id: 1 } },
-
-          // Index on location fields for location-based queries
-          { key: { city: 1 } },
-          { key: { country: 1 } },
-          { key: { city: 1, country: 1 } },
-
-          // Compound index for user + location queries
-          { key: { user_id: 1, city: 1 } },
-          { key: { user_id: 1, country: 1 } },
-
-          // Text index for business name and location search
-          { key: { business_name: 'text', city: 'text', country: 'text' } }
-        ]);
-
-        console.log('Business location indexes created successfully');
-      } catch (error) {
-        console.error('Failed to create business indexes:', error);
-      }
-    }
   } catch (error) {
     console.error('System initialization failed:', error);
   }
@@ -158,12 +180,6 @@ async function initializeSystem() {
 const authenticateToken = (req, res, next) => {
   const authHeader = req.headers['authorization'];
   const token = authHeader && authHeader.split(' ')[1];
-
-  console.log('=== AUTH TOKEN DEBUG ===');
-  console.log('Auth header received:', authHeader ? 'Yes' : 'No');
-  console.log('Token extracted:', token ? 'Yes' : 'No');
-  console.log('Request URL:', req.url);
-  console.log('Request method:', req.method);
 
   if (!token) {
     console.log('❌ No token provided');
@@ -245,6 +261,352 @@ const logoUpload = multer({
   }
 });
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// ===============================
+// FINANCIAL DOCUMENT APIs
+// ===============================
+
+app.put('/api/businesses/:id/financial-document',
+  authenticateToken,
+  financialDocUpload.single('document'),
+  async (req, res) => {
+    try {
+      const businessId = req.params.id;
+      const uploadedFile = req.file;
+      const { template_type, template_name, validation_confidence, upload_mode } = req.body;
+
+      if (!uploadedFile) {
+        return res.status(400).json({ error: 'No file uploaded' });
+      }
+
+      // Validate template_type if provided
+      const validTemplateTypes = ['simple', 'medium'];;
+      if (template_type && !validTemplateTypes.includes(template_type)) {
+        return res.status(400).json({
+          error: `Invalid template type. Must be one of: ${validTemplateTypes.join(', ')}`
+        });
+      }
+
+      // Validate business exists and belongs to user
+      const business = await db.collection('user_businesses').findOne({
+        _id: new ObjectId(businessId),
+        user_id: new ObjectId(req.user._id)
+      });
+
+      if (!business) {
+        // Clean up uploaded file if business not found
+        await fs.unlink(uploadedFile.path).catch(console.error);
+        return res.status(404).json({ error: 'Business not found or access denied' });
+      }
+
+      let previousDocument = null;
+      let action = 'uploaded';
+
+      // Check if there's an existing document
+      if (business.financial_document && business.financial_document.file_path) {
+        previousDocument = {
+          filename: business.financial_document.filename,
+          original_name: business.financial_document.original_name,
+          upload_date: business.financial_document.upload_date,
+          template_type: business.financial_document.template_type || 'unknown'
+        };
+        action = 'replaced';
+
+        // Delete existing file
+        try {
+          await fs.unlink(business.financial_document.file_path);
+          console.log(`Deleted previous document: ${business.financial_document.file_path}`);
+        } catch (error) {
+          console.warn(`Failed to delete previous document: ${error.message}`);
+        }
+      }
+
+      // Update business with new document info including template type
+      const documentData = {
+        filename: uploadedFile.filename,
+        original_name: uploadedFile.originalname,
+        file_path: uploadedFile.path,
+        file_type: uploadedFile.mimetype,
+        file_size: uploadedFile.size,
+        upload_date: new Date(),
+        uploaded_by: new ObjectId(req.user._id),
+        is_processed: false,
+        // New fields for template tracking
+        template_type: template_type || 'unknown',
+        template_name: template_name || 'Unknown Template',
+        validation_confidence: validation_confidence || 'medium',
+        upload_mode: upload_mode || 'manual'
+      };
+
+      const updateResult = await db.collection('user_businesses').updateOne(
+        { _id: new ObjectId(businessId) },
+        {
+          $set: {
+            financial_document: documentData,
+            has_financial_document: true,
+            upload_decision_made: true,  // Add this line
+            upload_decision: 'upload',
+            updated_at: new Date()
+          }
+        }
+      );
+
+      if (updateResult.modifiedCount === 0) {
+        // Clean up uploaded file if database update failed
+        await fs.unlink(uploadedFile.path).catch(console.error);
+        return res.status(500).json({ error: 'Failed to update business document' });
+      }
+
+      // Enhanced audit logging with template information
+      await logAuditEvent(req.user._id, 'financial_document_uploaded', {
+        business_id: businessId,
+        business_name: business.business_name,
+        action: action,
+        filename: uploadedFile.originalname,
+        file_size: uploadedFile.size,
+        file_type: uploadedFile.mimetype,
+        template_type: template_type || 'unknown',
+        template_name: template_name || 'Unknown Template',
+        validation_confidence: validation_confidence || 'medium',
+        upload_mode: upload_mode || 'manual',
+        previous_document: previousDocument
+      });
+
+      res.json({
+        message: `Financial document ${action} successfully`,
+        action: action,
+        template_type: template_type || 'unknown',
+        template_name: template_name || 'Unknown Template',
+        previous_document: previousDocument,
+        current_document: {
+          filename: uploadedFile.originalname,
+          upload_date: documentData.upload_date,
+          file_size: uploadedFile.size,
+          file_type: uploadedFile.mimetype,
+          template_type: template_type || 'unknown',
+          template_name: template_name || 'Unknown Template',
+          validation_confidence: validation_confidence || 'medium'
+        }
+      });
+
+    } catch (error) {
+      console.error('Financial document upload error:', error);
+
+      // Clean up uploaded file on error
+      if (req.file && req.file.path) {
+        await fs.unlink(req.file.path).catch(console.error);
+      }
+
+      res.status(500).json({ error: 'Failed to upload financial document' });
+    }
+  }
+);
+// Add this new endpoint after the financial document endpoints
+app.post('/api/businesses/:id/upload-decision', authenticateToken, async (req, res) => {
+  try {
+    const businessId = req.params.id;
+    const { decision } = req.body;
+
+    const updateData = {
+      updated_at: new Date()
+    };
+
+    if (decision === 'pending') {
+      updateData.upload_decision_made = false;
+      updateData.upload_decision = 'pending';
+    } else {
+      updateData.upload_decision_made = true;
+      updateData.upload_decision = decision;
+    }
+
+    const updateResult = await db.collection('user_businesses').updateOne(
+      { _id: new ObjectId(businessId) },
+      { $set: updateData }
+    );
+
+    res.json({ message: 'Upload decision saved', decision });
+  } catch (error) {
+    res.status(500).json({ error: 'Failed to save decision' });
+  }
+});
+// Get financial document info for a business
+app.get('/api/businesses/:id/financial-document', authenticateToken, async (req, res) => {
+  try {
+    const businessId = req.params.id;
+
+    // Validate business exists and belongs to user
+    const business = await db.collection('user_businesses').findOne({
+      _id: new ObjectId(businessId),
+      user_id: new ObjectId(req.user._id)
+    }, {
+      projection: {
+        business_name: 1,
+        financial_document: 1,
+        has_financial_document: 1
+      }
+    });
+
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found or access denied' });
+    }
+
+    if (!business.has_financial_document || !business.financial_document) {
+      return res.json({
+        has_document: false,
+        message: 'No financial document uploaded for this business'
+      });
+    }
+
+    // Check if file still exists on filesystem
+    let fileExists = false;
+    try {
+      await fs.access(business.financial_document.file_path);
+      fileExists = true;
+    } catch (error) {
+      console.warn(`Financial document file missing: ${business.financial_document.file_path}`);
+    }
+
+    res.json({
+      has_document: true,
+      file_exists: fileExists,
+      upload_decision_made: business.upload_decision_made || false,  // Add this line
+      upload_decision: business.upload_decision || null,
+      document: {
+        filename: business.financial_document.original_name,
+        upload_date: business.financial_document.upload_date,
+        file_size: business.financial_document.file_size,
+        file_type: business.financial_document.file_type,
+        uploaded_by: business.financial_document.uploaded_by,
+        is_processed: business.financial_document.is_processed || false,
+        // Include template information
+        template_type: business.financial_document.template_type || 'unknown',
+        template_name: business.financial_document.template_name || 'Unknown Template',
+        validation_confidence: business.financial_document.validation_confidence || 'medium',
+        upload_mode: business.financial_document.upload_mode || 'manual'
+      }
+    });
+
+  } catch (error) {
+    console.error('Get financial document error:', error);
+    res.status(500).json({ error: 'Failed to get financial document info' });
+  }
+});
+
+// Delete financial document for a business
+app.delete('/api/businesses/:id/financial-document', authenticateToken, async (req, res) => {
+  try {
+    const businessId = req.params.id;
+
+    // Validate business exists and belongs to user
+    const business = await db.collection('user_businesses').findOne({
+      _id: new ObjectId(businessId),
+      user_id: new ObjectId(req.user._id)
+    });
+
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found or access denied' });
+    }
+
+    if (!business.has_financial_document || !business.financial_document) {
+      return res.status(404).json({ error: 'No financial document found for this business' });
+    }
+
+    // Delete file from filesystem
+    if (business.financial_document.file_path) {
+      try {
+        await fs.unlink(business.financial_document.file_path);
+        console.log(`Deleted financial document: ${business.financial_document.file_path}`);
+      } catch (error) {
+        console.warn(`Failed to delete financial document file: ${error.message}`);
+      }
+    }
+
+    // Update database
+    const updateResult = await db.collection('user_businesses').updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $unset: {
+          financial_document: ""
+        },
+        $set: {
+          has_financial_document: false,
+          updated_at: new Date()
+        }
+      }
+    );
+
+    if (updateResult.modifiedCount === 0) {
+      return res.status(500).json({ error: 'Failed to delete financial document record' });
+    }
+
+    // Log audit event
+    await logAuditEvent(req.user._id, 'financial_document_deleted', {
+      business_id: businessId,
+      business_name: business.business_name,
+      deleted_document: {
+        filename: business.financial_document.original_name,
+        upload_date: business.financial_document.upload_date
+      }
+    });
+
+    res.json({
+      message: 'Financial document deleted successfully',
+      deleted_document: {
+        filename: business.financial_document.original_name,
+        upload_date: business.financial_document.upload_date
+      }
+    });
+
+  } catch (error) {
+    console.error('Delete financial document error:', error);
+    res.status(500).json({ error: 'Failed to delete financial document' });
+  }
+});
+// Fixed download endpoint - replace your existing one
+app.get('/api/businesses/:id/financial-document/download', authenticateToken, async (req, res) => {
+  try {
+    const businessId = req.params.id;
+
+    // Validate business exists and belongs to user (or admin access)
+    const business = await db.collection('user_businesses').findOne({
+      _id: new ObjectId(businessId),
+      user_id: new ObjectId(req.user._id)
+    });
+
+    if (!business) {
+      return res.status(404).json({ error: 'Business not found or access denied' });
+    }
+
+    if (!business.has_financial_document || !business.financial_document) {
+      return res.status(404).json({ error: 'No financial document found for this business' });
+    }
+
+    // Check if file exists
+    try {
+      await fs.access(business.financial_document.file_path);
+    } catch (error) {
+      return res.status(404).json({ error: 'Financial document file not found' });
+    }
+
+    // FIXED: Set headers for blob consumption (not file download)
+    res.setHeader('Content-Type', business.financial_document.file_type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+    // DON'T set Content-Disposition: attachment - this makes it downloadable instead of readable
+    // res.setHeader('Content-Disposition', `attachment; filename="${business.financial_document.original_name}"`);
+
+    // Set CORS headers if needed
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET');
+
+    // Read and send file as buffer/stream (not as download)
+    const fileBuffer = await fs.readFile(business.financial_document.file_path);
+    res.send(fileBuffer);
+
+  } catch (error) {
+    console.error('Download financial document error:', error);
+    res.status(500).json({ error: 'Failed to download financial document' });
+  }
+});
 
 // ===============================
 // AUTHENTICATION APIs
@@ -378,8 +740,30 @@ app.get('/api/companies', async (req, res) => {
 
 app.get('/api/businesses', authenticateToken, async (req, res) => {
   try {
+    const { user_id } = req.query;
+    let targetUserId;
+
+    if (user_id) {
+      // Admin access validation (existing code)
+      if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: 'Admin access required to view other users businesses' });
+      }
+      const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
+      if (!targetUser) {
+        return res.status(404).json({ error: 'User not found' });
+      }
+      if (req.user.role.role_name === 'company_admin') {
+        if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
+          return res.status(403).json({ error: 'Access denied - user not in your company' });
+        }
+      }
+      targetUserId = new ObjectId(user_id);
+    } else {
+      targetUserId = new ObjectId(req.user._id);
+    }
+
     const businesses = await db.collection('user_businesses')
-      .find({ user_id: new ObjectId(req.user._id) })
+      .find({ user_id: targetUserId })
       .sort({ created_at: -1 })
       .toArray();
 
@@ -387,26 +771,22 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
     const totalQuestions = await db.collection('global_questions')
       .countDocuments({ is_active: true });
 
-    // Enhanced businesses with question statistics and location data
+    // Enhanced businesses with question statistics and document status
     const enhancedBusinesses = await Promise.all(
       businesses.map(async (business) => {
-        // Get all conversations for this business
+        // Existing question statistics code...
         const conversations = await db.collection('user_business_conversations')
           .find({
-            user_id: new ObjectId(req.user._id),
+            user_id: targetUserId,
             business_id: business._id,
             conversation_type: 'question_answer'
           })
           .toArray();
 
-        // Group conversations by question_id to find completion status
         const questionStats = {};
-
         conversations.forEach(conv => {
           if (conv.question_id) {
             const questionId = conv.question_id.toString();
-
-            // Initialize question stats if not exists
             if (!questionStats[questionId]) {
               questionStats[questionId] = {
                 hasAnswers: false,
@@ -414,38 +794,38 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
                 answerCount: 0
               };
             }
-
-            // Check if there are actual answers
             if (conv.answer_text && conv.answer_text.trim() !== '') {
               questionStats[questionId].hasAnswers = true;
               questionStats[questionId].answerCount++;
             }
-
-            // Check completion status from metadata
             if (conv.metadata && conv.metadata.is_complete === true) {
               questionStats[questionId].isComplete = true;
             }
           }
         });
 
-        // Count completed and pending questions
         const completedQuestions = Object.values(questionStats).filter(
           stat => stat.isComplete || stat.hasAnswers
         ).length;
-
         const pendingQuestions = totalQuestions - completedQuestions;
-
-        // Calculate progress percentage
         const progressPercentage = totalQuestions > 0
           ? Math.round((completedQuestions / totalQuestions) * 100)
           : 0;
 
         return {
           ...business,
-          // Ensure location fields are included (with defaults if not present)
+          // Include existing location fields
           city: business.city || '',
           country: business.country || '',
           location_display: [business.city, business.country].filter(Boolean).join(', '),
+          // Include document status
+          has_financial_document: business.has_financial_document || false,
+          financial_document_info: business.has_financial_document && business.financial_document ? {
+            filename: business.financial_document.original_name,
+            upload_date: business.financial_document.upload_date,
+            file_size: business.financial_document.file_size,
+            file_type: business.financial_document.file_type
+          } : null,
           question_statistics: {
             total_questions: totalQuestions,
             completed_questions: completedQuestions,
@@ -464,8 +844,10 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
       overall_stats: {
         total_businesses: businesses.length,
         total_questions_in_system: totalQuestions,
-        businesses_with_location: enhancedBusinesses.filter(b => b.city || b.country).length
-      }
+        businesses_with_location: enhancedBusinesses.filter(b => b.city || b.country).length,
+        businesses_with_documents: enhancedBusinesses.filter(b => b.has_financial_document).length
+      },
+      user_id: targetUserId.toString()
     });
   } catch (error) {
     console.error('Failed to fetch businesses:', error);
@@ -600,18 +982,45 @@ app.delete('/api/businesses/:id', authenticateToken, async (req, res) => {
 });
 
 // ===============================
-// QUESTIONS API
+// QUESTIONS API (UPDATED)
 // ===============================
 
 app.get('/api/questions', authenticateToken, async (req, res) => {
   try {
+    const { phase } = req.query;
+
+    // Define allowed phases - excluding 'good' phase
+    const allowedPhases = ['initial', 'essential', 'advanced'];
+
+    // Build the filter
+    let questionFilter = {
+      is_active: true,
+      phase: { $in: allowedPhases } // Only include allowed phases
+    };
+
+    // If a specific phase is requested, validate it's in allowed phases
+    if (phase) {
+      if (!allowedPhases.includes(phase)) {
+        return res.status(400).json({
+          error: `Invalid phase. Allowed phases are: ${allowedPhases.join(', ')}`
+        });
+      }
+      questionFilter.phase = phase; // Override with specific phase
+    }
+
     const questions = await db.collection('global_questions')
-      .find({ is_active: true })
-      .sort({ order: 1 })  // <-- Changed to sort only by 'order' ascending
+      .find(questionFilter)
+      .sort({ order: 1 })
       .toArray();
 
-    res.json({ questions });
+    res.json({
+      questions,
+      allowed_phases: allowedPhases,
+      current_filter: phase || 'all_allowed_phases',
+      total_questions: questions.length
+    });
   } catch (error) {
+    console.error('Failed to fetch questions:', error);
     res.status(500).json({ error: 'Failed to fetch questions' });
   }
 });
@@ -1272,7 +1681,6 @@ app.post('/api/admin/questions/bulk', authenticateToken, requireSuperAdmin, asyn
 // ===============================
 // CONVERSATIONS API
 // =============================== 
-
 app.get('/api/conversations', authenticateToken, async (req, res) => {
   try {
     const { phase, business_id, user_id } = req.query;
@@ -1321,7 +1729,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       .sort({ created_at: 1 })
       .toArray();
 
-    // Get phase analysis results - UPDATED to handle phase-specific strategic analysis
+    // Get phase analysis results
     const phaseAnalysis = await db.collection('user_business_conversations')
       .find({
         user_id: targetUserId,
@@ -1331,6 +1739,104 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       })
       .sort({ created_at: -1 })
       .toArray();
+
+    // Get business and document information
+    let businessInfo = null;
+    let documentInfo = null;
+
+    if (business_id) {
+      // Fetch business details including document information
+      const business = await db.collection('user_businesses').findOne(
+        {
+          _id: new ObjectId(business_id),
+          user_id: targetUserId
+        },
+        {
+          projection: {
+            business_name: 1,
+            business_purpose: 1,
+            city: 1,
+            country: 1,
+            has_financial_document: 1,
+            financial_document: 1,
+            upload_decision_made: 1,
+            upload_decision: 1,
+            created_at: 1
+          }
+        }
+      );
+
+      if (business) {
+        businessInfo = {
+          id: business._id,
+          name: business.business_name,
+          purpose: business.business_purpose,
+          location: {
+            city: business.city || '',
+            country: business.country || '',
+            display: [business.city, business.country].filter(Boolean).join(', ')
+          },
+          upload_decision_made: business.upload_decision_made || false,  // Add this line
+          upload_decision: business.upload_decision || null,
+          created_at: business.created_at
+        };
+
+        // Include document information if exists
+        if (business.has_financial_document && business.financial_document) {
+          // Check if file actually exists on filesystem
+          let fileExists = false;
+          let fileContent = null;
+          let fileContentBase64 = null;
+
+          if (business.financial_document.file_path) {
+            try {
+              await fs.access(business.financial_document.file_path);
+              fileExists = true;
+
+              // Read the actual file content
+              const fileBuffer = await fs.readFile(business.financial_document.file_path);
+              fileContent = fileBuffer;
+
+              // Convert to base64 for JSON response
+              fileContentBase64 = fileBuffer.toString('base64');
+
+            } catch (error) {
+              console.warn(`Financial document file missing or unreadable: ${business.financial_document.file_path}`, error.message);
+            }
+          }
+
+          documentInfo = {
+            has_document: true,
+            file_exists: fileExists,
+            filename: business.financial_document.original_name,
+            upload_date: business.financial_document.upload_date,
+            file_size: business.financial_document.file_size,
+            file_type: business.financial_document.file_type,
+            is_processed: business.financial_document.is_processed || false,
+            uploaded_by: business.financial_document.uploaded_by,
+
+            // NEW: Include actual file content
+            file_content_base64: fileContentBase64, // Base64 encoded file content
+            file_content_available: !!fileContentBase64,
+
+            // Helper information for the frontend
+            download_info: {
+              can_download: fileExists,
+              content_type: business.financial_document.file_type,
+              content_disposition: `attachment; filename="${business.financial_document.original_name}"`
+            }
+          };
+        } else {
+          documentInfo = {
+            has_document: false,
+            file_exists: false,
+            file_content_base64: null,
+            file_content_available: false,
+            message: 'No financial document uploaded for this business'
+          };
+        }
+      }
+    }
 
     // Process each question
     const result = questions.map(question => {
@@ -1384,7 +1890,6 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         question_text: question.question_text,
         phase: question.phase,
         order: question.order,
-
         conversation_flow: conversationFlow,
         total_interactions: conversationFlow.length,
         total_answers: answerCount,
@@ -1394,7 +1899,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       };
     });
 
-    // UPDATED: Organize analysis results by phase AND analysis type
+    // Organize analysis results by phase AND analysis type
     const analysisResultsByPhase = {};
 
     phaseAnalysis.forEach(analysis => {
@@ -1408,7 +1913,6 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
         };
       }
 
-      // For strategic analysis, keep both initial and essential phases separate
       const existingIndex = analysisResultsByPhase[analysisPhase].analyses
         .findIndex(a => a.analysis_type === analysisType);
 
@@ -1421,7 +1925,6 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       };
 
       if (existingIndex !== -1) {
-        // Replace if this one is newer
         if (new Date(analysis.created_at) > new Date(analysisResultsByPhase[analysisPhase].analyses[existingIndex].created_at)) {
           analysisResultsByPhase[analysisPhase].analyses[existingIndex] = analysisData;
         }
@@ -1430,6 +1933,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       }
     });
 
+    // Return response with file content included
     res.json({
       conversations: result,
       phase_analysis: analysisResultsByPhase,
@@ -1437,137 +1941,32 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       completed: result.filter(r => r.completion_status === 'complete').length,
       skipped: result.filter(r => r.completion_status === 'skipped').length,
       phase: phase || 'all',
-      user_id: targetUserId.toString()
+      user_id: targetUserId.toString(),
+
+      // Enhanced business and document information with file content
+      business_info: businessInfo,
+      document_info: documentInfo,
+
+      // Enhanced metadata
+      metadata: {
+        has_business_context: !!businessInfo,
+        has_document_uploaded: documentInfo?.has_document || false,
+        document_file_exists: documentInfo?.file_exists || false,
+        document_content_available: documentInfo?.file_content_available || false,
+        is_good_phase_ready: documentInfo?.has_document && documentInfo?.file_exists,
+        request_timestamp: new Date().toISOString(),
+
+        // File content size warning
+        file_content_size: documentInfo?.file_content_base64 ?
+          Math.round(documentInfo.file_content_base64.length * 0.75) : 0, // Approximate original file size
+        file_content_warning: documentInfo?.file_content_base64 && documentInfo.file_content_base64.length > 1000000 ?
+          'Large file content included - consider using download endpoint for better performance' : null
+      }
     });
 
   } catch (error) {
     console.error('Failed to fetch conversations:', error);
     res.status(500).json({ error: 'Failed to fetch conversations' });
-  }
-});
-
-
-// Get user businesses (for admin viewing other users' businesses)
-app.get('/api/businesses', authenticateToken, async (req, res) => {
-  try {
-    const { user_id } = req.query;
-
-    // Determine which user's businesses to fetch
-    let targetUserId;
-
-    if (user_id) {
-      // Admin is requesting another user's businesses
-      if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
-        return res.status(403).json({ error: 'Admin access required to view other users businesses' });
-      }
-
-      // Validate user exists and access permissions
-      const targetUser = await db.collection('users').findOne({ _id: new ObjectId(user_id) });
-      if (!targetUser) {
-        return res.status(404).json({ error: 'User not found' });
-      }
-
-      // Company admin can only view users from their company
-      if (req.user.role.role_name === 'company_admin') {
-        if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
-          return res.status(403).json({ error: 'Access denied - user not in your company' });
-        }
-      }
-
-      targetUserId = new ObjectId(user_id);
-    } else {
-      // Regular user requesting their own businesses
-      targetUserId = new ObjectId(req.user._id);
-    }
-
-    const businesses = await db.collection('user_businesses')
-      .find({ user_id: targetUserId })
-      .sort({ created_at: -1 })
-      .toArray();
-
-    // Get total active questions count
-    const totalQuestions = await db.collection('global_questions')
-      .countDocuments({ is_active: true });
-
-    // Enhanced businesses with question statistics
-    const enhancedBusinesses = await Promise.all(
-      businesses.map(async (business) => {
-        // Get all conversations for this business
-        const conversations = await db.collection('user_business_conversations')
-          .find({
-            user_id: targetUserId,
-            business_id: business._id,
-            conversation_type: 'question_answer'
-          })
-          .toArray();
-
-        // Group conversations by question_id to find completion status
-        const questionStats = {};
-
-        conversations.forEach(conv => {
-          if (conv.question_id) {
-            const questionId = conv.question_id.toString();
-
-            // Initialize question stats if not exists
-            if (!questionStats[questionId]) {
-              questionStats[questionId] = {
-                hasAnswers: false,
-                isComplete: false,
-                answerCount: 0
-              };
-            }
-
-            // Check if there are actual answers
-            if (conv.answer_text && conv.answer_text.trim() !== '') {
-              questionStats[questionId].hasAnswers = true;
-              questionStats[questionId].answerCount++;
-            }
-
-            // Check completion status from metadata
-            if (conv.metadata && conv.metadata.is_complete === true) {
-              questionStats[questionId].isComplete = true;
-            }
-          }
-        });
-
-        // Count completed and pending questions
-        const completedQuestions = Object.values(questionStats).filter(
-          stat => stat.isComplete || stat.hasAnswers
-        ).length;
-
-        const pendingQuestions = totalQuestions - completedQuestions;
-
-        // Calculate progress percentage
-        const progressPercentage = totalQuestions > 0
-          ? Math.round((completedQuestions / totalQuestions) * 100)
-          : 0;
-
-        return {
-          ...business,
-          question_statistics: {
-            total_questions: totalQuestions,
-            completed_questions: completedQuestions,
-            pending_questions: pendingQuestions,
-            progress_percentage: progressPercentage,
-            total_answers_given: Object.values(questionStats).reduce(
-              (sum, stat) => sum + stat.answerCount, 0
-            )
-          }
-        };
-      })
-    );
-
-    res.json({
-      businesses: enhancedBusinesses,
-      overall_stats: {
-        total_businesses: businesses.length,
-        total_questions_in_system: totalQuestions
-      },
-      user_id: targetUserId.toString() // Include the user ID in response for admin context
-    });
-  } catch (error) {
-    console.error('Failed to fetch businesses:', error);
-    res.status(500).json({ error: 'Failed to fetch businesses' });
   }
 });
 
@@ -1910,125 +2309,6 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
   }
 });
 
-app.get('/api/conversations', authenticateToken, async (req, res) => {
-  try {
-    const { phase, business_id } = req.query;
-
-    // Get questions for the phase
-    let questionFilter = { is_active: true };
-    if (phase) questionFilter.phase = phase;
-
-    const questions = await db.collection('global_questions')
-      .find(questionFilter)
-      .sort({ order: 1 })
-      .toArray();
-
-    // Get user's conversations
-    const conversations = await db.collection('user_business_conversations')
-      .find({
-        user_id: new ObjectId(req.user._id),
-        conversation_type: 'question_answer',
-        business_id: business_id ? new ObjectId(business_id) : null
-      })
-      .sort({ created_at: 1 })
-      .toArray();
-
-    // Get phase analysis results
-    const phaseAnalysis = await db.collection('user_business_conversations')
-      .find({
-        user_id: new ObjectId(req.user._id),
-        conversation_type: 'phase_analysis',
-        business_id: business_id ? new ObjectId(business_id) : null,
-        ...(phase && { 'metadata.phase': phase })
-      })
-      .sort({ created_at: -1 })
-      .toArray();
-
-    // Process each question
-    const result = questions.map(question => {
-      const questionConvs = conversations.filter(c =>
-        c.question_id && c.question_id.toString() === question._id.toString()
-      );
-
-      // Get all conversation entries for this question (ordered by creation time)
-      const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-
-      // Build conversation flow with questions and answers
-      const conversationFlow = [];
-      allEntries.forEach(entry => {
-        if (entry.message_type === 'bot' && entry.message_text) {
-          // Followup question from bot
-          conversationFlow.push({
-            type: 'question',
-            text: entry.message_text,
-            timestamp: entry.created_at,
-            is_followup: entry.is_followup || false
-          });
-        }
-        if (entry.answer_text && entry.answer_text.trim() !== '') {
-          // User answer
-          conversationFlow.push({
-            type: 'answer',
-            text: entry.answer_text,
-            timestamp: entry.created_at,
-            is_followup: entry.is_followup || false
-          });
-        }
-      });
-
-      // FIXED: Determine completion status - get the most recent status entry
-      const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
-      const latestStatusEntry = statusEntries.length > 0
-        ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
-        : null;
-      const status = latestStatusEntry?.metadata?.is_complete ? 'complete' : 'incomplete';
-
-      // Count answers only
-      const answerCount = conversationFlow.filter(item => item.type === 'answer').length;
-
-      return {
-        question_id: question._id,
-        question_text: question.question_text,
-        phase: question.phase,
-        order: question.order,
-
-        conversation_flow: conversationFlow,
-        total_interactions: conversationFlow.length,
-        total_answers: answerCount,
-        completion_status: status,
-        last_updated: allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null
-      };
-    });
-
-    const latestAnalysisMap = new Map();
-
-    phaseAnalysis.forEach(analysis => {
-      const key = `${analysis.metadata?.phase}-${analysis.metadata?.analysis_type}`;
-      if (!latestAnalysisMap.has(key)) {
-        latestAnalysisMap.set(key, {
-          analysis_type: analysis.metadata?.analysis_type || 'unknown',
-          analysis_name: analysis.message_text,
-          analysis_data: analysis.analysis_result,
-          created_at: analysis.created_at,
-          phase: analysis.metadata?.phase
-        });
-      }
-    });
-
-    const analysisResults = Array.from(latestAnalysisMap.values());
-
-    res.json({
-      conversations: result,
-      phase_analysis: analysisResults,
-      total_questions: questions.length,
-      completed: result.filter(r => r.completion_status === 'complete').length,
-      phase: phase || 'all'
-    });
-
-  } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch conversations' });
-  }
-});
 app.post('/api/conversations', authenticateToken, async (req, res) => {
   try {
     const {
@@ -2728,9 +3008,6 @@ app.get('/api/phase-analysis', authenticateToken, async (req, res) => {
 // ===============================
 // ADMIN APIs
 // ===============================
-// Add this GET endpoint to your backend after the existing admin endpoints
-// This should go in the ADMIN APIs section
-// Updated GET endpoint for /api/admin/companies
 app.get('/api/admin/companies', authenticateToken, requireAdmin, async (req, res) => {
   try {
     let matchFilter = {};
@@ -2843,108 +3120,6 @@ app.get('/api/admin/companies', authenticateToken, requireAdmin, async (req, res
       total_count: enhancedCompanies.length,
       user_role: req.user.role.role_name,
       filtered_by_company: req.user.role.role_name === 'company_admin'
-    });
-  } catch (error) {
-    console.error('Error fetching companies:', error);
-    res.status(500).json({ error: 'Failed to fetch companies' });
-  }
-});
-
-app.get('/api/admin/companies', authenticateToken, requireSuperAdmin, async (req, res) => {
-  try {
-    // Get all companies with their admin details
-    const companies = await db.collection('companies').aggregate([
-      {
-        $lookup: {
-          from: 'users',
-          let: { companyId: '$_id' },
-          pipeline: [
-            {
-              $match: {
-                $expr: { $eq: ['$company_id', '$$companyId'] },
-                role_id: { $exists: true }
-              }
-            },
-            {
-              $lookup: {
-                from: 'roles',
-                localField: 'role_id',
-                foreignField: '_id',
-                as: 'role'
-              }
-            },
-            {
-              $unwind: '$role'
-            },
-            {
-              $match: {
-                'role.role_name': 'company_admin'
-              }
-            },
-            {
-              $limit: 1
-            }
-          ],
-          as: 'admin'
-        }
-      },
-      {
-        $lookup: {
-          from: 'users',
-          localField: '_id',
-          foreignField: 'company_id',
-          as: 'users'
-        }
-      },
-      {
-        $addFields: {
-          admin_name: { $arrayElemAt: ['$admin.name', 0] },
-          admin_email: { $arrayElemAt: ['$admin.email', 0] },
-          admin_created_at: { $arrayElemAt: ['$admin.created_at', 0] },
-          total_users: { $size: '$users' },
-          active_users: {
-            $size: {
-              $filter: {
-                input: '$users',
-                cond: { $ne: ['$$this.status', 'inactive'] }
-              }
-            }
-          }
-        }
-      },
-      {
-        $project: {
-          company_name: 1,
-          industry: 1,
-          size: 1,
-          logo: 1,
-          status: 1,
-          created_at: 1,
-          logo_updated_at: 1,
-          admin_name: 1,
-          admin_email: 1,
-          admin_created_at: 1,
-          total_users: 1,
-          active_users: 1
-        }
-      },
-      {
-        $sort: { created_at: -1 }
-      }
-    ]).toArray();
-
-    // If no admin found, set default values
-    const enhancedCompanies = companies.map(company => ({
-      ...company,
-      admin_name: company.admin_name || 'No Admin Assigned',
-      admin_email: company.admin_email || 'No Email',
-      total_users: company.total_users || 0,
-      active_users: company.active_users || 0
-    }));
-
-    res.json({
-      companies: enhancedCompanies,
-      total_count: enhancedCompanies.length
     });
   } catch (error) {
     console.error('Error fetching companies:', error);
@@ -3270,9 +3445,6 @@ app.use((error, req, res, next) => {
 
   next(error);
 });
-// ===============================
-// START SERVER
-// ===============================
 
 connectToMongoDB().then(() => {
   app.listen(port, '0.0.0.0', () => {
