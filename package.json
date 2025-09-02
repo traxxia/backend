@@ -17,6 +17,8 @@
     "test:mongo": "node test-mongo-connection.js"
   },
   "dependencies": {
+    "@azure/identity": "^4.11.1",
+    "@azure/storage-blob": "^12.28.0",
     "@json2csv/plainjs": "^7.0.6",
     "axios": "^1.9.0",
     "bcryptjs": "^2.4.3",
