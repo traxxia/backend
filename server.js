@@ -2517,46 +2517,59 @@ app.post('/api/conversations', authenticateToken, async (req, res) => {
     const isEdit = metadata?.from_editable_brief === true;
 
     if (isEdit && answer_text && answer_text.trim() !== '') {
-      // For edits, update existing conversation instead of creating new one
-      const updateResult = await db.collection('user_business_conversations')
-        .updateOne(
-          {
-            user_id: new ObjectId(req.user._id),
-            business_id: business_id ? new ObjectId(business_id) : null,
-            question_id: new ObjectId(question_id),
-            conversation_type: 'question_answer'
-          },
-          {
-            $set: {
-              answer_text: answer_text.trim(),
-              is_skipped: false,
-              metadata: {
-                ...metadata,
-                is_complete: true,
-                is_edit: true
-              },
-              timestamp: new Date()
-            }
-          }
-        );
+      // For edits: Use UPSERT to ensure the answer is always saved
+      const filter = {
+        user_id: new ObjectId(req.user._id),
+        business_id: business_id ? new ObjectId(business_id) : null,
+        question_id: new ObjectId(question_id),
+        conversation_type: 'question_answer'
+      };
 
-      if (updateResult.modifiedCount > 0) {
-        // Log question edit
-        await logAuditEvent(req.user._id, 'question_edited', {
-          question_id,
-          question_text: question?.question_text?.substring(0, 100) + '...',
-          answer_preview: answer_text.substring(0, 200) + '...'
-        }, business_id);
-
-        return res.json({
-          message: 'Answer updated',
+      const updateDoc = {
+        user_id: new ObjectId(req.user._id),
+        business_id: business_id ? new ObjectId(business_id) : null,
+        question_id: new ObjectId(question_id),
+        conversation_type: 'question_answer',
+        message_type: 'user',
+        message_text: '',
+        answer_text: answer_text.trim(),
+        is_followup: false,
+        is_skipped: false,
+        analysis_result: null,
+        metadata: {
+          ...metadata,
           is_complete: true,
-          action: 'updated'
-        });
-      }
+          is_edit: true,
+          last_edited: new Date()
+        },
+        attempt_count: 1,
+        timestamp: new Date(),
+        created_at: new Date(),
+        updated_at: new Date()
+      };
+
+      // Use upsert to either update existing or create new
+      const result = await db.collection('user_business_conversations')
+        .replaceOne(filter, updateDoc, { upsert: true });
+
+      // Log question edit
+      await logAuditEvent(req.user._id, 'question_edited', {
+        question_id,
+        question_text: question?.question_text?.substring(0, 100) + '...',
+        answer_preview: answer_text.substring(0, 200) + '...',
+        operation: result.upsertedId ? 'created' : 'updated',
+        upsert_id: result.upsertedId
+      }, business_id);
+
+      return res.json({
+        message: 'Answer saved successfully',
+        conversation_id: result.upsertedId || 'updated',
+        is_complete: true,
+        action: result.upsertedId ? 'created' : 'updated'
+      });
     }
 
-    // Original logic for new conversations
+    // Original logic for new conversations (non-edit)
     const conversation = {
       user_id: new ObjectId(req.user._id),
       business_id: business_id ? new ObjectId(business_id) : null,
