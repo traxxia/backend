@@ -2495,6 +2495,16 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
 });
 
 app.post('/api/conversations', authenticateToken, async (req, res) => {
+  console.log('=== INCOMING REQUEST DEBUG ===');
+  console.log('Method:', req.method);
+  console.log('URL:', req.url);
+  console.log('Headers:', {
+    'content-type': req.headers['content-type'],
+    'authorization': req.headers['authorization'] ? 'Bearer [PRESENT]' : 'MISSING'
+  });
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+  console.log('User ID:', req.user?._id);
+  console.log('=== END REQUEST DEBUG ===');
   try {
     const {
       question_id,
