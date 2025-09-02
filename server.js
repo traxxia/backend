@@ -5,6 +5,7 @@ const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
 const { MongoClient, ObjectId } = require('mongodb');
 require('dotenv').config();
+const blobService = require('./blobService');
 
 const app = express();
 const port = process.env.PORT || 5001;
@@ -39,17 +40,7 @@ const ensureFinancialDocsDir = async () => {
 
 // Configure multer for financial documents
 const financialDocUpload = multer({
-  storage: multer.diskStorage({
-    destination: function (req, file, cb) {
-      cb(null, financialDocsDir);
-    },
-    filename: function (req, file, cb) {
-      const businessId = req.params.id;
-      const ext = path.extname(file.originalname);
-      const filename = `business_${businessId}_financial_doc${ext}`;
-      cb(null, filename);
-    }
-  }),
+  storage: multer.memoryStorage(),
   limits: {
     fileSize: 10 * 1024 * 1024, // 10MB limit for financial documents
   },
@@ -266,6 +257,142 @@ app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 // FINANCIAL DOCUMENT APIs
 // ===============================
 
+// app.put('/api/businesses/:id/financial-document',
+//   authenticateToken,
+//   financialDocUpload.single('document'),
+//   async (req, res) => {
+//     try {
+//       const businessId = req.params.id;
+//       const uploadedFile = req.file;
+//       const { template_type, template_name, validation_confidence, upload_mode } = req.body;
+
+//       if (!uploadedFile) {
+//         return res.status(400).json({ error: 'No file uploaded' });
+//       }
+
+//       // Validate template_type if provided
+//       const validTemplateTypes = ['simple', 'medium'];;
+//       if (template_type && !validTemplateTypes.includes(template_type)) {
+//         return res.status(400).json({
+//           error: `Invalid template type. Must be one of: ${validTemplateTypes.join(', ')}`
+//         });
+//       }
+
+//       // Validate business exists and belongs to user
+//       const business = await db.collection('user_businesses').findOne({
+//         _id: new ObjectId(businessId),
+//         user_id: new ObjectId(req.user._id)
+//       });
+
+//       if (!business) {
+//         // Clean up uploaded file if business not found
+//         await fs.unlink(uploadedFile.path).catch(console.error);
+//         return res.status(404).json({ error: 'Business not found or access denied' });
+//       }
+
+//       let previousDocument = null;
+//       let action = 'uploaded';
+
+//       // Check if there's an existing document
+//       if (business.financial_document && business.financial_document.file_path) {
+//         previousDocument = {
+//           filename: business.financial_document.filename,
+//           original_name: business.financial_document.original_name,
+//           upload_date: business.financial_document.upload_date,
+//           template_type: business.financial_document.template_type || 'unknown'
+//         };
+//         action = 'replaced';
+
+//         // Delete existing file
+//         try {
+//           await fs.unlink(business.financial_document.file_path);
+//           console.log(`Deleted previous document: ${business.financial_document.file_path}`);
+//         } catch (error) {
+//           console.warn(`Failed to delete previous document: ${error.message}`);
+//         }
+//       }
+
+//       // Update business with new document info including template type
+//       const documentData = {
+//         filename: uploadedFile.filename,
+//         original_name: uploadedFile.originalname,
+//         file_path: uploadedFile.path,
+//         file_type: uploadedFile.mimetype,
+//         file_size: uploadedFile.size,
+//         upload_date: new Date(),
+//         uploaded_by: new ObjectId(req.user._id),
+//         is_processed: false,
+//         // New fields for template tracking
+//         template_type: template_type || 'unknown',
+//         template_name: template_name || 'Unknown Template',
+//         validation_confidence: validation_confidence || 'medium',
+//         upload_mode: upload_mode || 'manual'
+//       };
+
+//       const updateResult = await db.collection('user_businesses').updateOne(
+//         { _id: new ObjectId(businessId) },
+//         {
+//           $set: {
+//             financial_document: documentData,
+//             has_financial_document: true,
+//             upload_decision_made: true,  // Add this line
+//             upload_decision: 'upload',
+//             updated_at: new Date()
+//           }
+//         }
+//       );
+
+//       if (updateResult.modifiedCount === 0) {
+//         // Clean up uploaded file if database update failed
+//         await fs.unlink(uploadedFile.path).catch(console.error);
+//         return res.status(500).json({ error: 'Failed to update business document' });
+//       }
+
+//       // Enhanced audit logging with template information
+//       await logAuditEvent(req.user._id, 'financial_document_uploaded', {
+//         business_id: businessId,
+//         business_name: business.business_name,
+//         action: action,
+//         filename: uploadedFile.originalname,
+//         file_size: uploadedFile.size,
+//         file_type: uploadedFile.mimetype,
+//         template_type: template_type || 'unknown',
+//         template_name: template_name || 'Unknown Template',
+//         validation_confidence: validation_confidence || 'medium',
+//         upload_mode: upload_mode || 'manual',
+//         previous_document: previousDocument
+//       });
+
+//       res.json({
+//         message: `Financial document ${action} successfully`,
+//         action: action,
+//         template_type: template_type || 'unknown',
+//         template_name: template_name || 'Unknown Template',
+//         previous_document: previousDocument,
+//         current_document: {
+//           filename: uploadedFile.originalname,
+//           upload_date: documentData.upload_date,
+//           file_size: uploadedFile.size,
+//           file_type: uploadedFile.mimetype,
+//           template_type: template_type || 'unknown',
+//           template_name: template_name || 'Unknown Template',
+//           validation_confidence: validation_confidence || 'medium'
+//         }
+//       });
+
+//     } catch (error) {
+//       console.error('Financial document upload error:', error);
+
+//       // Clean up uploaded file on error
+//       if (req.file && req.file.path) {
+//         await fs.unlink(req.file.path).catch(console.error);
+//       }
+
+//       res.status(500).json({ error: 'Failed to upload financial document' });
+//     }
+//   }
+// );
+
 app.put('/api/businesses/:id/financial-document',
   authenticateToken,
   financialDocUpload.single('document'),
@@ -294,8 +421,6 @@ app.put('/api/businesses/:id/financial-document',
       });
 
       if (!business) {
-        // Clean up uploaded file if business not found
-        await fs.unlink(uploadedFile.path).catch(console.error);
         return res.status(404).json({ error: 'Business not found or access denied' });
       }
 
@@ -303,7 +428,7 @@ app.put('/api/businesses/:id/financial-document',
       let action = 'uploaded';
 
       // Check if there's an existing document
-      if (business.financial_document && business.financial_document.file_path) {
+      if (business.financial_document && business.financial_document.blob_url) {
         previousDocument = {
           filename: business.financial_document.filename,
           original_name: business.financial_document.original_name,
@@ -313,30 +438,31 @@ app.put('/api/businesses/:id/financial-document',
         action = 'replaced';
 
         // Delete existing file
-        try {
-          await fs.unlink(business.financial_document.file_path);
-          console.log(`Deleted previous document: ${business.financial_document.file_path}`);
-        } catch (error) {
-          console.warn(`Failed to delete previous document: ${error.message}`);
-        }
+        // try {
+        //   await fs.unlink(business.financial_document.file_path);
+        //   console.log(`Deleted previous document: ${business.financial_document.file_path}`);
+        // } catch (error) {
+        //   console.warn(`Failed to delete previous document: ${error.message}`);
+        // }
       }
+         const blobName = `${businessId}_${Date.now()}_${uploadedFile.originalname}`;
+         const blobUrl = await blobService.uploadBuffer(blobName, uploadedFile.buffer, uploadedFile.mimetype);
 
-      // Update business with new document info including template type
-      const documentData = {
-        filename: uploadedFile.filename,
+        const documentData = {
+        filename: blobName,
         original_name: uploadedFile.originalname,
-        file_path: uploadedFile.path,
+        blob_url: blobUrl, // 👈 replaces file_path
         file_type: uploadedFile.mimetype,
         file_size: uploadedFile.size,
         upload_date: new Date(),
         uploaded_by: new ObjectId(req.user._id),
         is_processed: false,
-        // New fields for template tracking
         template_type: template_type || 'unknown',
         template_name: template_name || 'Unknown Template',
         validation_confidence: validation_confidence || 'medium',
         upload_mode: upload_mode || 'manual'
       };
+    
 
       const updateResult = await db.collection('user_businesses').updateOne(
         { _id: new ObjectId(businessId) },
@@ -563,6 +689,50 @@ app.delete('/api/businesses/:id/financial-document', authenticateToken, async (r
   }
 });
 // Fixed download endpoint - replace your existing one
+// app.get('/api/businesses/:id/financial-document/download', authenticateToken, async (req, res) => {
+//   try {
+//     const businessId = req.params.id;
+
+//     // Validate business exists and belongs to user (or admin access)
+//     const business = await db.collection('user_businesses').findOne({
+//       _id: new ObjectId(businessId),
+//       user_id: new ObjectId(req.user._id)
+//     });
+
+//     if (!business) {
+//       return res.status(404).json({ error: 'Business not found or access denied' });
+//     }
+
+//     if (!business.has_financial_document || !business.financial_document) {
+//       return res.status(404).json({ error: 'No financial document found for this business' });
+//     }
+
+//     // Check if file exists
+//     try {
+//       await fs.access(business.financial_document.file_path);
+//     } catch (error) {
+//       return res.status(404).json({ error: 'Financial document file not found' });
+//     }
+
+//     // FIXED: Set headers for blob consumption (not file download)
+//     res.setHeader('Content-Type', business.financial_document.file_type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+
+//     // DON'T set Content-Disposition: attachment - this makes it downloadable instead of readable
+//     // res.setHeader('Content-Disposition', `attachment; filename="${business.financial_document.original_name}"`);
+
+//     // Set CORS headers if needed
+//     res.setHeader('Access-Control-Allow-Origin', '*');
+//     res.setHeader('Access-Control-Allow-Methods', 'GET');
+
+//     // Read and send file as buffer/stream (not as download)
+//     const fileBuffer = await fs.readFile(business.financial_document.file_path);
+//     res.send(fileBuffer);
+
+//   } catch (error) {
+//     console.error('Download financial document error:', error);
+//     res.status(500).json({ error: 'Failed to download financial document' });
+//   }
+// });
 app.get('/api/businesses/:id/financial-document/download', authenticateToken, async (req, res) => {
   try {
     const businessId = req.params.id;
@@ -581,26 +751,12 @@ app.get('/api/businesses/:id/financial-document/download', authenticateToken, as
       return res.status(404).json({ error: 'No financial document found for this business' });
     }
 
-    // Check if file exists
-    try {
-      await fs.access(business.financial_document.file_path);
-    } catch (error) {
-      return res.status(404).json({ error: 'Financial document file not found' });
-    }
-
-    // FIXED: Set headers for blob consumption (not file download)
-    res.setHeader('Content-Type', business.financial_document.file_type || 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-
-    // DON'T set Content-Disposition: attachment - this makes it downloadable instead of readable
-    // res.setHeader('Content-Disposition', `attachment; filename="${business.financial_document.original_name}"`);
-
-    // Set CORS headers if needed
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    res.setHeader('Access-Control-Allow-Methods', 'GET');
-
-    // Read and send file as buffer/stream (not as download)
-    const fileBuffer = await fs.readFile(business.financial_document.file_path);
-    res.send(fileBuffer);
+     await blobService.downloadToStream(
+      business.financial_document.filename,   // blobName
+      res,
+      business.financial_document.file_type,  // Content-Type
+      business.financial_document.original_name // download filename
+    );
 
   } catch (error) {
     console.error('Download financial document error:', error);
@@ -738,6 +894,7 @@ app.get('/api/companies', async (req, res) => {
 // BUSINESSES API
 // ===============================
 
+
 app.get('/api/businesses', authenticateToken, async (req, res) => {
   try {
     const { user_id } = req.query;
@@ -767,14 +924,17 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
       .sort({ created_at: -1 })
       .toArray();
 
-    // Get total active questions count
+    // UPDATED: Get total active questions count EXCLUDING 'good' phase
+    const allowedPhases = ['initial', 'essential', 'advanced'];
     const totalQuestions = await db.collection('global_questions')
-      .countDocuments({ is_active: true });
+      .countDocuments({ 
+        is_active: true,
+        phase: { $in: allowedPhases } // Only count allowed phases
+      });
 
     // Enhanced businesses with question statistics and document status
     const enhancedBusinesses = await Promise.all(
       businesses.map(async (business) => {
-        // Existing question statistics code...
         const conversations = await db.collection('user_business_conversations')
           .find({
             user_id: targetUserId,
@@ -804,9 +964,27 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
           }
         });
 
-        const completedQuestions = Object.values(questionStats).filter(
-          stat => stat.isComplete || stat.hasAnswers
+        // UPDATED: Only count completed questions that are in allowed phases
+        const allowedQuestions = await db.collection('global_questions')
+          .find({ 
+            is_active: true,
+            phase: { $in: allowedPhases }
+          })
+          .toArray();
+
+        const allowedQuestionIds = new Set(
+          allowedQuestions.map(q => q._id.toString())
+        );
+
+        // Filter question stats to only include allowed phases
+        const filteredQuestionStats = Object.entries(questionStats).filter(
+          ([questionId, stats]) => allowedQuestionIds.has(questionId)
+        );
+
+        const completedQuestions = filteredQuestionStats.filter(
+          ([questionId, stat]) => stat.isComplete || stat.hasAnswers
         ).length;
+
         const pendingQuestions = totalQuestions - completedQuestions;
         const progressPercentage = totalQuestions > 0
           ? Math.round((completedQuestions / totalQuestions) * 100)
@@ -827,13 +1005,16 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
             file_type: business.financial_document.file_type
           } : null,
           question_statistics: {
-            total_questions: totalQuestions,
-            completed_questions: completedQuestions,
+            total_questions: totalQuestions, // Only allowed phases count
+            completed_questions: completedQuestions, // Only from allowed phases
             pending_questions: pendingQuestions,
-            progress_percentage: progressPercentage,
-            total_answers_given: Object.values(questionStats).reduce(
-              (sum, stat) => sum + stat.answerCount, 0
-            )
+            progress_percentage: progressPercentage, // Based on allowed phases only
+            total_answers_given: filteredQuestionStats.reduce(
+              (sum, [questionId, stat]) => sum + stat.answerCount, 0
+            ),
+            // Add metadata about excluded phases for debugging
+            excluded_phases: ['good'], // For debugging - shows what was excluded
+            included_phases: allowedPhases // For debugging - shows what was included
           }
         };
       })
@@ -843,9 +1024,13 @@ app.get('/api/businesses', authenticateToken, async (req, res) => {
       businesses: enhancedBusinesses,
       overall_stats: {
         total_businesses: businesses.length,
-        total_questions_in_system: totalQuestions,
+        total_questions_in_system: totalQuestions, // Only allowed phases
         businesses_with_location: enhancedBusinesses.filter(b => b.city || b.country).length,
-        businesses_with_documents: enhancedBusinesses.filter(b => b.has_financial_document).length
+        businesses_with_documents: enhancedBusinesses.filter(b => b.has_financial_document).length,
+        // Add info about phase filtering
+        calculation_method: 'excluding_good_phase',
+        phases_included: allowedPhases,
+        phases_excluded: ['good']
       },
       user_id: targetUserId.toString()
     });
