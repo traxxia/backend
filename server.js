@@ -2315,6 +2315,102 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
       .sort({ order: 1 })
       .toArray();
 
+    // Get business and document information (same logic as conversations endpoint)
+    let businessInfo = null;
+    let documentInfo = null;
+
+    if (business_id) {
+      // Fetch business details including document information
+      const business = await db.collection('user_businesses').findOne(
+        {
+          _id: new ObjectId(business_id),
+          user_id: targetUserId
+        },
+        {
+          projection: {
+            business_name: 1,
+            business_purpose: 1,
+            city: 1,
+            country: 1,
+            has_financial_document: 1,
+            financial_document: 1,
+            upload_decision_made: 1,
+            upload_decision: 1,
+            created_at: 1
+          }
+        }
+      );
+
+      if (business) {
+        businessInfo = {
+          id: business._id,
+          name: business.business_name,
+          purpose: business.business_purpose,
+          location: {
+            city: business.city || '',
+            country: business.country || '',
+            display: [business.city, business.country].filter(Boolean).join(', ')
+          },
+          upload_decision_made: business.upload_decision_made || false,
+          upload_decision: business.upload_decision || null,
+          created_at: business.created_at
+        };
+
+        // Include document information if exists (same as conversations endpoint)
+        if (business.has_financial_document && business.financial_document) {
+          // Check if file exists 
+          let fileExists = false;
+          let fileContentBase64 = null;
+
+          if (business.financial_document.blob_url) {
+            try {
+              // For blob storage, assume it exists if blob_url is present
+              fileExists = true;
+            } catch (error) {
+              console.warn(`Financial document blob access error: ${error.message}`);
+            }
+          }
+
+          documentInfo = {
+            has_document: true,
+            file_exists: fileExists,
+            filename: business.financial_document.original_name,
+            upload_date: business.financial_document.upload_date,
+            file_size: business.financial_document.file_size,
+            file_type: business.financial_document.file_type,
+            is_processed: business.financial_document.is_processed || false,
+            uploaded_by: business.financial_document.uploaded_by,
+
+            // Include blob URL info
+            blob_url: business.financial_document.blob_url,
+            file_content_base64: fileContentBase64,
+            file_content_available: fileExists,
+
+            // Template information
+            template_type: business.financial_document.template_type || 'unknown',
+            template_name: business.financial_document.template_name || 'Unknown Template',
+            validation_confidence: business.financial_document.validation_confidence || 'medium',
+            upload_mode: business.financial_document.upload_mode || 'manual',
+
+            // Helper information for the frontend
+            download_info: {
+              can_download: fileExists,
+              content_type: business.financial_document.file_type,
+              content_disposition: `attachment; filename="${business.financial_document.original_name}"`
+            }
+          };
+        } else {
+          documentInfo = {
+            has_document: false,
+            file_exists: false,
+            file_content_base64: null,
+            file_content_available: false,
+            message: 'No financial document uploaded for this business'
+          };
+        }
+      }
+    }
+
     // Transform conversations into phases structure
     const phaseMap = new Map();
 
@@ -2388,20 +2484,101 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
     // Convert phase map to array and filter out empty phases
     const conversationPhases = Array.from(phaseMap.values()).filter(phase => phase.questions.length > 0);
 
-    // Transform phase analysis into system format
-    const systemAnalysis = phaseAnalysis.map(analysis => ({
-      name: analysis.metadata?.analysis_type || 'unknown_analysis',
-      analysis_result: analysis.analysis_result,
-      created_at: analysis.created_at,
-      phase: analysis.metadata?.phase,
-      message_text: analysis.message_text
-    }));
+    // Transform phase analysis into system format (SAME AS CONVERSATIONS ENDPOINT)
+    // Organize analysis results by phase AND analysis type (matching conversations endpoint logic)
+    const analysisResultsByPhase = {};
+
+    phaseAnalysis.forEach(analysis => {
+      const analysisPhase = analysis.metadata?.phase || 'initial';
+      const analysisType = analysis.metadata?.analysis_type || 'unknown';
+
+      if (!analysisResultsByPhase[analysisPhase]) {
+        analysisResultsByPhase[analysisPhase] = {
+          phase: analysisPhase,
+          analyses: []
+        };
+      }
+
+      const existingIndex = analysisResultsByPhase[analysisPhase].analyses
+        .findIndex(a => a.analysis_type === analysisType);
+
+      const analysisData = {
+        analysis_type: analysisType,
+        analysis_name: analysis.message_text || `${analysisType.toUpperCase()} Analysis`,
+        analysis_data: analysis.analysis_result,
+        created_at: analysis.created_at,
+        phase: analysisPhase
+      };
+
+      if (existingIndex !== -1) {
+        if (new Date(analysis.created_at) > new Date(analysisResultsByPhase[analysisPhase].analyses[existingIndex].created_at)) {
+          analysisResultsByPhase[analysisPhase].analyses[existingIndex] = analysisData;
+        }
+      } else {
+        analysisResultsByPhase[analysisPhase].analyses.push(analysisData);
+      }
+    });
+
+    // Transform system analysis to match conversations endpoint format
+    const systemAnalysis = [];
+    Object.values(analysisResultsByPhase).forEach(phaseResult => {
+      phaseResult.analyses.forEach(analysis => {
+        systemAnalysis.push({
+          name: analysis.analysis_type,
+          analysis_result: analysis.analysis_data,
+          created_at: analysis.created_at,
+          phase: analysis.phase,
+          message_text: analysis.analysis_name,
+          // Additional fields to match conversations endpoint
+          analysis_type: analysis.analysis_type,
+          analysis_name: analysis.analysis_name
+        });
+      });
+    });
+
+    // Enhanced system analysis - ensure ALL analysis types are included
+    // This creates a comprehensive analysis array that includes financial analyses
+    const enhancedSystemAnalysis = systemAnalysis.map(analysis => {
+      // Ensure financial analysis data is properly structured
+      const analysisType = analysis.analysis_type?.toLowerCase() || analysis.name?.toLowerCase() || '';
+      
+      // Enhanced analysis object with additional metadata for frontend consumption
+      return {
+        ...analysis,
+        // Normalized analysis type for consistent frontend processing
+        normalized_type: analysisType,
+        
+        // Add metadata about analysis availability
+        is_financial_analysis: [
+          'profitabilityanalysis', 'profitability_analysis',
+          'growthtracker', 'growth_tracker', 
+          'liquidityefficiency', 'liquidity_efficiency',
+          'investmentperformance', 'investment_performance',
+          'leveragerisk', 'leverage_risk',
+          'costefficiency', 'cost_efficiency',
+          'financialperformance', 'financial_performance',
+          'financialbalance', 'financial_balance',
+          'operationalefficiency', 'operational_efficiency'
+        ].includes(analysisType),
+        
+        // Add business context for filtering
+        business_context: business_id ? {
+          business_id: business_id,
+          has_document: documentInfo?.has_document || false,
+          document_exists: documentInfo?.file_exists || false
+        } : null,
+        
+        // Preserve original structure while adding enhancements
+        original_phase: analysis.phase,
+        generated_timestamp: analysis.created_at
+      };
+    });
 
     // Calculate statistics
     const totalQuestions = questions.length;
     const completedQuestions = conversationPhases.reduce((sum, phase) => sum + phase.questions.length, 0);
 
-    // Add question statistics to businesses
+    // Add question statistics to businesses with document info
     const enhancedBusinesses = await Promise.all(
       businesses.map(async (business) => {
         // Get conversations for this specific business
@@ -2447,8 +2624,18 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
           ? Math.round((completedQuestionsForBusiness / totalQuestions) * 100)
           : 0;
 
-        return {
+        // Enhanced business object with document information
+        const enhancedBusiness = {
           ...business,
+          // Include existing location fields
+          city: business.city || '',
+          country: business.country || '',
+          location_display: [business.city, business.country].filter(Boolean).join(', '),
+          
+          // Document status information
+          has_financial_document: business.has_financial_document || false,
+          
+          // Question statistics
           question_statistics: {
             total_questions: totalQuestions,
             completed_questions: completedQuestionsForBusiness,
@@ -2459,6 +2646,28 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
             )
           }
         };
+
+        // Add detailed document information if it exists
+        if (business.has_financial_document && business.financial_document) {
+          enhancedBusiness.financial_document_info = {
+            filename: business.financial_document.original_name,
+            upload_date: business.financial_document.upload_date,
+            file_size: business.financial_document.file_size,
+            file_type: business.financial_document.file_type,
+            template_type: business.financial_document.template_type || 'unknown',
+            template_name: business.financial_document.template_name || 'Unknown Template',
+            validation_confidence: business.financial_document.validation_confidence || 'medium',
+            upload_mode: business.financial_document.upload_mode || 'manual',
+            is_processed: business.financial_document.is_processed || false,
+            blob_url: business.financial_document.blob_url
+          };
+          
+          // Upload decision information
+          enhancedBusiness.upload_decision_made = business.upload_decision_made || false;
+          enhancedBusiness.upload_decision = business.upload_decision || null;
+        }
+
+        return enhancedBusiness;
       })
     );
 
@@ -2470,19 +2679,60 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
         created_at: targetUser.created_at
       },
       conversation: conversationPhases,
-      system: systemAnalysis,
+      system: enhancedSystemAnalysis, // NOW INCLUDES ALL ANALYSIS DATA INCLUDING FINANCIAL ANALYSES
       businesses: enhancedBusinesses,
+
+      // Include business and document info like conversations endpoint
+      business_info: businessInfo,
+      document_info: documentInfo,
+      
+      // Include phase_analysis in the same format as conversations endpoint
+      phase_analysis: analysisResultsByPhase,
+
       stats: {
         total_questions: totalQuestions,
         completed_questions: completedQuestions,
         completion_percentage: totalQuestions > 0 ? Math.round((completedQuestions / totalQuestions) * 100) : 0,
         total_businesses: enhancedBusinesses.length,
-        total_analyses: systemAnalysis.length
+        total_analyses: enhancedSystemAnalysis.length,
+        
+        // Enhanced analysis breakdown
+        analysis_breakdown: {
+          initial_phase: enhancedSystemAnalysis.filter(a => a.phase === 'initial').length,
+          essential_phase: enhancedSystemAnalysis.filter(a => a.phase === 'essential').length,
+          good_phase: enhancedSystemAnalysis.filter(a => a.phase === 'good').length,
+          financial_analyses: enhancedSystemAnalysis.filter(a => a.is_financial_analysis).length,
+          non_financial_analyses: enhancedSystemAnalysis.filter(a => !a.is_financial_analysis).length
+        },
+        
+        // Document status across all businesses
+        document_stats: {
+          businesses_with_documents: enhancedBusinesses.filter(b => b.has_financial_document).length,
+          businesses_without_documents: enhancedBusinesses.filter(b => !b.has_financial_document).length,
+          document_upload_rate: enhancedBusinesses.length > 0 ? 
+            Math.round((enhancedBusinesses.filter(b => b.has_financial_document).length / enhancedBusinesses.length) * 100) : 0
+        }
       },
       filter_info: {
         filtered_by_business: business_id ? true : false,
         business_id: business_id || null,
         showing_all_businesses: !business_id
+      },
+
+      // Enhanced metadata matching conversations endpoint
+      metadata: {
+        has_business_context: !!businessInfo,
+        has_document_uploaded: documentInfo?.has_document || false,
+        document_file_exists: documentInfo?.file_exists || false,
+        document_content_available: documentInfo?.file_content_available || false,
+        is_good_phase_ready: documentInfo?.has_document && documentInfo?.file_exists,
+        request_timestamp: new Date().toISOString(),
+
+        // File content size warning
+        file_content_size: documentInfo?.file_content_base64 ?
+          Math.round(documentInfo.file_content_base64.length * 0.75) : 0,
+        file_content_warning: documentInfo?.file_content_base64 && documentInfo.file_content_base64.length > 1000000 ?
+          'Large file content included - consider using download endpoint for better performance' : null
       }
     };
 
@@ -2495,16 +2745,6 @@ app.get('/api/admin/user-data/:user_id', authenticateToken, requireAdmin, async 
 });
 
 app.post('/api/conversations', authenticateToken, async (req, res) => {
-  console.log('=== INCOMING REQUEST DEBUG ===');
-  console.log('Method:', req.method);
-  console.log('URL:', req.url);
-  console.log('Headers:', {
-    'content-type': req.headers['content-type'],
-    'authorization': req.headers['authorization'] ? 'Bearer [PRESENT]' : 'MISSING'
-  });
-  console.log('Body:', JSON.stringify(req.body, null, 2));
-  console.log('User ID:', req.user?._id);
-  console.log('=== END REQUEST DEBUG ===');
   try {
     const {
       question_id,
