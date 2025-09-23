@@ -1961,19 +1961,28 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
             country: business.country || '',
             display: [business.city, business.country].filter(Boolean).join(', ')
           },
-          upload_decision_made: business.upload_decision_made || false,  // Add this line
+          upload_decision_made: business.upload_decision_made || false,
           upload_decision: business.upload_decision || null,
           created_at: business.created_at
         };
 
         // Include document information if exists
         if (business.has_financial_document && business.financial_document) {
-          // Check if file actually exists on filesystem
+          // Check if file actually exists (for blob storage, assume it exists if blob_url is present)
           let fileExists = false;
           let fileContent = null;
           let fileContentBase64 = null;
 
-          if (business.financial_document.file_path) {
+          if (business.financial_document.blob_url) {
+            try {
+              fileExists = true;
+              // For blob storage, we don't pre-load the content
+              // Content should be fetched via the download endpoint when needed
+            } catch (error) {
+              console.warn(`Financial document blob access error: ${error.message}`);
+            }
+          } else if (business.financial_document.file_path) {
+            // Legacy file system support
             try {
               await fs.access(business.financial_document.file_path);
               fileExists = true;
@@ -2000,7 +2009,17 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
             is_processed: business.financial_document.is_processed || false,
             uploaded_by: business.financial_document.uploaded_by,
 
-            // NEW: Include actual file content
+            // Template information - NOW EXPLICITLY INCLUDED
+            template_type: business.financial_document.template_type || 'unknown',
+            template_name: business.financial_document.template_name || 'Unknown Template',
+            validation_confidence: business.financial_document.validation_confidence || 'medium',
+            upload_mode: business.financial_document.upload_mode || 'manual',
+
+            // Blob storage information
+            blob_url: business.financial_document.blob_url || null,
+            storage_type: business.financial_document.blob_url ? 'blob' : 'filesystem',
+
+            // File content (if available)
             file_content_base64: fileContentBase64, // Base64 encoded file content
             file_content_available: !!fileContentBase64,
 
@@ -2015,8 +2034,14 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
           documentInfo = {
             has_document: false,
             file_exists: false,
+            template_type: null,
+            template_name: null,
+            validation_confidence: null,
+            upload_mode: null,
             file_content_base64: null,
             file_content_available: false,
+            storage_type: null,
+            blob_url: null,
             message: 'No financial document uploaded for this business'
           };
         }
@@ -2118,7 +2143,7 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       }
     });
 
-    // Return response with file content included
+    // Return response with template_type explicitly included
     res.json({
       conversations: result,
       phase_analysis: analysisResultsByPhase,
@@ -2128,16 +2153,24 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
       phase: phase || 'all',
       user_id: targetUserId.toString(),
 
-      // Enhanced business and document information with file content
+      // Enhanced business and document information with template_type
       business_info: businessInfo,
       document_info: documentInfo,
 
-      // Enhanced metadata
+      // Enhanced metadata with template information
       metadata: {
         has_business_context: !!businessInfo,
         has_document_uploaded: documentInfo?.has_document || false,
         document_file_exists: documentInfo?.file_exists || false,
         document_content_available: documentInfo?.file_content_available || false,
+        
+        // Template-specific metadata
+        document_template_type: documentInfo?.template_type || null,
+        document_template_name: documentInfo?.template_name || null,
+        document_validation_confidence: documentInfo?.validation_confidence || null,
+        document_upload_mode: documentInfo?.upload_mode || null,
+        document_storage_type: documentInfo?.storage_type || null,
+        
         is_good_phase_ready: documentInfo?.has_document && documentInfo?.file_exists,
         request_timestamp: new Date().toISOString(),
 
@@ -2154,7 +2187,6 @@ app.get('/api/conversations', authenticateToken, async (req, res) => {
     res.status(500).json({ error: 'Failed to fetch conversations' });
   }
 });
-
 // Get phase analysis results (updated for admin access)
 app.get('/api/phase-analysis', authenticateToken, async (req, res) => {
   try {
