@@ -7,4 +7,4 @@ router.post('/login', AuthController.login);
 router.post('/register', AuthController.register);
 router.post('/logout', authenticateToken, AuthController.logout);
 
-module.exports = router; // Make sure this line exists
+module.exports = router;  
