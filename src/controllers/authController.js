@@ -1,0 +1,125 @@
+const jwt = require('jsonwebtoken');
+const { ObjectId } = require('mongodb');
+const { getDB } = require('../config/database');
+const { SECRET_KEY } = require('../config/constants');
+const UserModel = require('../models/userModel');
+const { logAuditEvent } = require('../services/auditService');
+
+class AuthController {
+  static async login(req, res) {
+    try {
+      const { email, password } = req.body;
+
+      if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password required' });
+      }
+
+      const user = await UserModel.findByEmail(email);
+      if (!user || !await UserModel.comparePassword(password, user.password)) {
+        if (user) {
+          await logAuditEvent(user._id, 'login_failed', { email });
+        }
+        return res.status(400).json({ error: 'Invalid credentials' });
+      }
+
+      const db = getDB();
+      const role = await db.collection('roles').findOne({ _id: user.role_id });
+
+      let company = null;
+      if (user.company_id) {
+        company = await db.collection('companies').findOne(
+          { _id: user.company_id },
+          { projection: { company_name: 1, logo: 1, industry: 1 } }
+        );
+      }
+
+      const token = jwt.sign({
+        id: user._id,
+        email: user.email,
+        role: role.role_name
+      }, SECRET_KEY, { expiresIn: '24h' });
+
+      await logAuditEvent(user._id, 'login_success', {
+        email,
+        role: role.role_name,
+        company: company?.company_name
+      });
+
+      res.json({
+        token,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          role: role.role_name,
+          company: company ? {
+            name: company.company_name,
+            logo: company.logo,
+            industry: company.industry
+          } : null
+        }
+      });
+    } catch (error) {
+      console.error('Login error:', error);
+      res.status(500).json({ error: 'Login failed' });
+    }
+  }
+
+  static async register(req, res) {
+    try {
+      const { name, email, password, company_id, terms_accepted } = req.body;
+
+      if (!name || !email || !password || !company_id || !terms_accepted) {
+        return res.status(400).json({ error: 'All fields required including terms acceptance' });
+      }
+
+      const existingUser = await UserModel.findByEmail(email);
+      if (existingUser) {
+        return res.status(400).json({ error: 'Email already exists' });
+      }
+
+      const db = getDB();
+      const company = await db.collection('companies').findOne({
+        _id: new ObjectId(company_id),
+        status: 'active'
+      });
+      if (!company) {
+        return res.status(400).json({ error: 'Invalid company' });
+      }
+
+      const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+      
+      const userId = await UserModel.create({
+        name,
+        email,
+        password,
+        role_id: userRole._id,
+        company_id: new ObjectId(company_id),
+        terms_accepted
+      });
+
+      res.json({
+        message: 'Registration successful',
+        user_id: userId
+      });
+    } catch (error) {
+      console.error('Registration error:', error);
+      res.status(500).json({ error: 'Registration failed' });
+    }
+  }
+
+  static async logout(req, res) {
+    try {
+      await logAuditEvent(req.user._id, 'logout', {
+        email: req.user.email
+      });
+
+      res.json({ message: 'Logged out successfully' });
+    } catch (error) {
+      console.error('Logout error:', error);
+      res.status(500).json({ error: 'Logout failed' });
+    }
+  }
+}
+
+module.exports = AuthController;
