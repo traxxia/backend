@@ -5,8 +5,8 @@ FROM node:18-alpine AS builder
 WORKDIR /app
 
 # Copy package files and install dependencies (omit dev dependencies)
-COPY package*.json ./
-RUN npm ci --omit=dev
+COPY ../package*.json ./
+RUN npm install --omit=dev
 
 # Copy app source code
 COPY . .
