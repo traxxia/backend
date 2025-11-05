@@ -154,6 +154,15 @@ class BusinessController {
         return res.status(400).json({ error: 'Maximum 5 businesses allowed' });
       }
 
+      const existingBusinesses = await BusinessModel.findByUserId(req.user._id);
+      const duplicateName = existingBusinesses.some(
+        business => business.business_name.toLowerCase() === business_name.trim().toLowerCase()
+      );
+      
+      if (duplicateName) {
+        return res.status(400).json({ error: 'A business with this name already exists' });
+      }
+
       const businessData = {
         user_id: new ObjectId(req.user._id),
         business_name: business_name.trim(),
