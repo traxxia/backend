@@ -135,7 +135,26 @@ class ConversationController {
 
         const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
 
-        const isSkipped = allEntries.some(entry => entry.is_skipped === true);
+        const userAnswers = allEntries.filter(entry =>
+          entry.message_type === 'user' &&
+          entry.answer_text &&
+          entry.answer_text.trim() !== ''
+        );
+
+        const realAnswers = userAnswers.filter(entry =>
+          entry.answer_text !== '[Question Skipped]'
+        );
+
+        const skippedAnswers = userAnswers.filter(entry =>
+          entry.answer_text === '[Question Skipped]'
+        );
+
+        const hasRealAnswer = realAnswers.length > 0;
+        const latestUserAnswer = hasRealAnswer
+          ? realAnswers[realAnswers.length - 1]  
+          : (skippedAnswers.length > 0 ? skippedAnswers[skippedAnswers.length - 1] : null);
+
+        const isSkipped = !hasRealAnswer && skippedAnswers.length > 0;
 
         const conversationFlow = [];
         allEntries.forEach(entry => {
@@ -147,25 +166,25 @@ class ConversationController {
               is_followup: entry.is_followup || false
             });
           }
-          if (entry.answer_text && entry.answer_text.trim() !== '') {
-            conversationFlow.push({
-              type: 'answer',
-              text: entry.answer_text,
-              timestamp: entry.created_at,
-              is_followup: entry.is_followup || false
-            });
-          }
         });
 
-        const statusEntries = questionConvs.filter(c => c.metadata && c.metadata.is_complete !== undefined);
-        const latestStatusEntry = statusEntries.length > 0
-          ? statusEntries.sort((a, b) => new Date(b.created_at) - new Date(a.created_at))[0]
-          : null;
+        if (latestUserAnswer) {
+          conversationFlow.push({
+            type: 'answer',
+            text: latestUserAnswer.answer_text,
+            timestamp: latestUserAnswer.created_at,
+            is_followup: false,
+            is_latest: true,
+            is_edited: latestUserAnswer.metadata?.is_edit === true
+          });
+        }
+
+        conversationFlow.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
 
         let status = 'incomplete';
         if (isSkipped) {
           status = 'skipped';
-        } else if (latestStatusEntry?.metadata?.is_complete) {
+        } else if (latestUserAnswer?.metadata?.is_complete) {
           status = 'complete';
         }
 
@@ -181,7 +200,10 @@ class ConversationController {
           total_answers: answerCount,
           completion_status: status,
           is_skipped: isSkipped,
-          last_updated: allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null
+          last_updated: latestUserAnswer ? latestUserAnswer.created_at :
+            (allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null),
+          latest_answer: latestUserAnswer?.answer_text || null,
+          is_edited: latestUserAnswer?.metadata?.is_edit === true
         };
       });
 
