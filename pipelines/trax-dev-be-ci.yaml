@@ -37,7 +37,7 @@ stages:
               repository: $(IMAGE_NAME)
               command: buildAndPush
               Dockerfile: 'docker/Dockerfile'
-              buildContext: '.'
+              buildContext: '$(Build.SourcesDirectory)'
               tags: |
                 latest
                 $(IMAGE_VERSION)
