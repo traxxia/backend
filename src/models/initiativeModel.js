@@ -1,5 +1,6 @@
 const { ObjectId } = require("mongodb");
 const { getDB } = require("../config/database");
+const UserModel = require("./userModel");
 
 class InitiativeModel {
   static collection() {
@@ -7,13 +8,14 @@ class InitiativeModel {
   }
 
   static async findAll(filter = {}) {
-    const coll = this.collection();
-    return await coll.find(filter).sort({ created_at: -1 }).toArray();
+    return await this.collection()
+      .find(filter)
+      .sort({ created_at: -1 })
+      .toArray();
   }
 
   static async findById(id) {
-    const coll = this.collection();
-    return await coll.findOne({ _id: new ObjectId(id) });
+    return await this.collection().findOne({ _id: new ObjectId(id) });
   }
 
   static async create(data) {
@@ -28,21 +30,46 @@ class InitiativeModel {
   }
 
   static async update(id, updateData) {
-    const coll = this.collection();
-    return await coll.updateOne(
+    return await this.collection().updateOne(
       { _id: new ObjectId(id) },
       { $set: { ...updateData, updated_at: new Date() } }
     );
   }
 
   static async delete(id) {
-    const coll = this.collection();
-    return await coll.deleteOne({ _id: new ObjectId(id) });
+    return await this.collection().deleteOne({ _id: new ObjectId(id) });
   }
 
   static async count(filter = {}) {
-    const coll = this.collection();
-    return await coll.countDocuments(filter);
+    return await this.collection().countDocuments(filter);
+  }
+
+  // populate created_by field based on user_id
+  static async populateCreatedBy(initiatives) {
+    if (!Array.isArray(initiatives)) initiatives = [initiatives];
+    if (initiatives.length === 0) return initiatives;
+
+    const userIds = [
+      ...new Set(initiatives.map((i) => i.user_id).filter(Boolean)),
+    ];
+    if (userIds.length === 0) return initiatives;
+
+    const users = await Promise.all(
+      userIds.map((id) => UserModel.findById(id))
+    );
+
+    const userMap = {};
+    users.forEach((user) => {
+      if (user) {
+        const name = user.name?.trim() || user.email || "Unknown User";
+        userMap[user._id.toString()] = name;
+      }
+    });
+
+    return initiatives.map((initiative) => ({
+      ...initiative,
+      created_by: userMap[initiative.user_id?.toString()] || "Unknown User",
+    }));
   }
 }
 
