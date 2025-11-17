@@ -1,11 +1,7 @@
 const { ObjectId } = require("mongodb");
 const InitiativeModel = require("../models/initiativeModel");
 
-const VALID_TYPES = [
-  "Immediate Actions",
-  "Short-term Initiatives",
-  "Long-term Strategic Shifts",
-];
+const VALID_TYPES = ["Immediate", "Short-term", "Long-term"];
 const VALID_STATUSES = ["Draft", "Approved", "Rejected"];
 
 class InitiativeController {
@@ -63,50 +59,55 @@ class InitiativeController {
         business_id,
         user_id,
         type,
+        initiative,
+        tags = [],
         phase = "initial",
         status = "Draft",
-        action,
         rationale,
         timeline,
         resources_required,
         success_metrics,
-        initiative,
         strategic_pillar,
         expected_outcome,
         risk_mitigation,
-        shift,
         transformation_required,
         competitive_advantage,
         sustainability,
       } = req.body;
 
-      if (!business_id || !user_id || !type)
-        return res
-          .status(400)
-          .json({ error: "business_id, user_id, and type are required" });
+      // Required fields
+      if (!business_id || !user_id || !type || !initiative) {
+        return res.status(400).json({
+          error: "business_id, user_id, type, and initiative are required",
+        });
+      }
 
-      if (!ObjectId.isValid(business_id) || !ObjectId.isValid(user_id))
+      if (!ObjectId.isValid(business_id) || !ObjectId.isValid(user_id)) {
         return res
           .status(400)
           .json({ error: "Invalid business_id or user_id" });
+      }
 
-      if (!VALID_TYPES.includes(type))
+      if (!VALID_TYPES.includes(type)) {
         return res.status(400).json({
           error: `Invalid type. Must be one of: ${VALID_TYPES.join(", ")}`,
         });
+      }
 
-      if (status && !VALID_STATUSES.includes(status))
-        return res.status(400).json({
-          error: `Invalid status. Must be one of: ${VALID_STATUSES.join(", ")}`,
-        });
+      if (!Array.isArray(tags)) {
+        return res
+          .status(400)
+          .json({ error: "tags must be an array of strings" });
+      }
 
       const data = {
         business_id: new ObjectId(business_id),
         user_id: new ObjectId(user_id),
         type,
+        initiative: initiative.trim(),
+        tags,
         phase,
         status,
-        action: action || null,
         rationale: rationale || null,
         timeline: timeline || null,
         resources_required: Array.isArray(resources_required)
@@ -115,21 +116,21 @@ class InitiativeController {
         success_metrics: Array.isArray(success_metrics)
           ? success_metrics
           : null,
-        initiative: initiative || null,
         strategic_pillar: strategic_pillar || null,
         expected_outcome: expected_outcome || null,
         risk_mitigation: risk_mitigation || null,
-        shift: shift || null,
         transformation_required: transformation_required || null,
         competitive_advantage: competitive_advantage || null,
         sustainability: sustainability || null,
       };
 
       const insertedId = await InitiativeModel.create(data);
+      const raw = await InitiativeModel.findById(insertedId);
+      const [initiativeObj] = await InitiativeModel.populateCreatedBy(raw);
 
       res.status(201).json({
         message: "Initiative created successfully",
-        initiative_id: insertedId.toString(),
+        initiative: initiativeObj,
       });
     } catch (err) {
       console.error("CREATE error:", err);
