@@ -158,13 +158,17 @@ class ConversationController {
 
         const conversationFlow = [];
         allEntries.forEach(entry => {
-          if (entry.message_type === 'bot' && entry.message_text) {
-            conversationFlow.push({
-              type: 'question',
-              text: entry.message_text,
-              timestamp: entry.created_at,
-              is_followup: entry.is_followup || false
-            });
+          if (entry.message_type === 'bot' && entry.message_text) { 
+            if (entry.message_text.trim() === question.question_text.trim()) {
+              console.log(`⏭️ Skipping duplicate main question entry for ${question._id}`);
+            } else {
+              conversationFlow.push({
+                type: 'question',
+                text: entry.message_text,
+                timestamp: entry.created_at,
+                is_followup: entry.is_followup || false
+              });
+            }
           }
         });
 
@@ -292,58 +296,74 @@ class ConversationController {
       }
 
       const question = await QuestionModel.findById(question_id);
+      if (!question) {
+        return res.status(404).json({ error: 'Question not found' });
+      }
 
-      const isEdit = metadata?.from_editable_brief === true;
+      const isEdit = metadata?.from_editable_brief === true || metadata?.is_edit === true;
 
-      if (isEdit && answer_text && answer_text.trim() !== '') {
-        const filter = {
+      // 🧹 If editing from brief: clear all follow-up + previous records, keep only final edited answer
+      if (isEdit) {
+        const cleanupFilter = {
           user_id: new ObjectId(req.user._id),
-          business_id: business_id ? new ObjectId(business_id) : null,
           question_id: new ObjectId(question_id),
           conversation_type: 'question_answer'
         };
+        if (business_id) cleanupFilter.business_id = new ObjectId(business_id);
 
-        const updateDoc = {
+        const deleted = await ConversationModel.deleteMany(cleanupFilter);
+        console.log(`🧽 Cleared ${deleted.deletedCount} conversation entries for edited question ${question_id}`);
+
+        const editedConversation = {
           user_id: new ObjectId(req.user._id),
           business_id: business_id ? new ObjectId(business_id) : null,
           question_id: new ObjectId(question_id),
           conversation_type: 'question_answer',
           message_type: 'user',
           message_text: '',
-          answer_text: answer_text.trim(),
+          answer_text: answer_text?.trim() || '',
           is_followup: false,
           is_skipped: false,
           analysis_result: null,
           metadata: {
             ...metadata,
             is_complete: true,
+            is_skipped: false,
             is_edit: true,
+            from_editable_brief: true,
             last_edited: new Date()
           },
           attempt_count: 1,
-          timestamp: new Date(),
           created_at: new Date(),
           updated_at: new Date()
         };
 
-        const result = await ConversationModel.replaceOne(filter, updateDoc, { upsert: true });
+        const inserted = await ConversationModel.create(editedConversation);
 
-        await logAuditEvent(req.user._id, 'question_edited', {
-          question_id,
-          question_text: question?.question_text?.substring(0, 100) + '...',
-          answer_preview: answer_text.substring(0, 200) + '...',
-          operation: result.upsertedId ? 'created' : 'updated',
-          upsert_id: result.upsertedId
-        }, business_id);
+        await logAuditEvent(
+          req.user._id,
+          'question_edited',
+          {
+            question_id,
+            question_text: question?.question_text?.substring(0, 100) + '...',
+            answer_preview: answer_text?.substring(0, 200) + '...',
+            deleted_count: deleted.deletedCount,
+            new_record_id: inserted,
+            business_id
+          },
+          business_id
+        );
 
         return res.json({
-          message: 'Answer saved successfully',
-          conversation_id: result.upsertedId || 'updated',
+          message: 'Edited answer saved successfully (previous follow-ups removed)',
+          conversation_id: inserted,
           is_complete: true,
-          action: result.upsertedId ? 'created' : 'updated'
+          is_edit: true,
+          action: 'replaced'
         });
       }
 
+      // 🧩 Normal answer save (non-edit mode)
       const conversation = {
         user_id: new ObjectId(req.user._id),
         business_id: business_id ? new ObjectId(business_id) : null,
@@ -385,6 +405,7 @@ class ConversationController {
       res.status(500).json({ error: 'Failed to save conversation' });
     }
   }
+
 
   static async skip(req, res) {
     try {
