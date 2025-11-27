@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const AdminController = require('../controllers/adminController');
+const QuestionController = require('../controllers/questionController');
 const { authenticateToken, requireAdmin, requireSuperAdmin } = require('../middleware/auth');
 const { logoUpload } = require('../middleware/upload');
 
@@ -19,5 +20,11 @@ router.get('/audit-trail/event-types', authenticateToken, requireAdmin, AdminCon
 
 // User data route
 router.get('/user-data/:user_id', authenticateToken, requireAdmin, AdminController.getUserData);
+
+// Question routes
+router.post('/questions', authenticateToken, requireSuperAdmin, QuestionController.create);
+router.get('/questions', authenticateToken, requireAdmin, QuestionController.getAll);
+router.put('/questions/:id', authenticateToken, requireSuperAdmin, QuestionController.update);
+router.delete('/questions/:id', authenticateToken, requireSuperAdmin, QuestionController.delete);
 
 module.exports = router;

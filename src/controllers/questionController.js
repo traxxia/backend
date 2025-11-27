@@ -5,6 +5,52 @@ const { ALLOWED_PHASES, VALID_PHASES, VALID_SEVERITIES } = require('../config/co
 const { logAuditEvent } = require('../services/auditService');
 
 class QuestionController {
+  static async create(req, res) {
+    try {
+      const { question_text, phase, severity, order, used_for, objective, required_info } = req.body;
+
+      if (!question_text || !phase || !severity) {
+        return res.status(400).json({ error: 'Question text, phase, and severity are required' });
+      }
+
+      if (!VALID_SEVERITIES.includes(severity.toLowerCase())) {
+        return res.status(400).json({
+          error: `Severity must be one of: ${VALID_SEVERITIES.join(', ')}`
+        });
+      }
+
+      if (order !== undefined && (!Number.isInteger(order) || order < 1)) {
+        return res.status(400).json({ error: 'Order must be a positive integer' });
+      }
+
+      const questionData = {
+        question_text: question_text.trim(),
+        phase: phase.trim(),
+        severity: severity.toLowerCase(),
+        order: order || 1,
+        used_for: used_for || '',
+        objective: objective || '',
+        required_info: required_info || '',
+        is_active: true,
+        created_at: new Date()
+      };
+
+      const insertedId = await QuestionModel.create(questionData);
+
+      res.status(201).json({
+        message: 'Question created successfully',
+        question: {
+          id: insertedId,
+          ...questionData
+        }
+      });
+
+    } catch (error) {
+      console.error('Failed to create question:', error);
+      res.status(500).json({ error: 'Failed to create question' });
+    }
+  }
+
   static async getAll(req, res) {
     try {
       const { phase } = req.query;
