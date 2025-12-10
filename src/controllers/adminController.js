@@ -168,6 +168,16 @@ class AdminController {
 
       const allowedRoles = ["user", "viewer", "collaborator"];
 
+      if (
+        req.user.role.role_name === "company_admin" &&
+        role &&
+        !allowedRoles.includes(role.toLowerCase())
+      ) {
+        return res
+          .status(403)
+          .json({ error: "company_admin cannot assign this role" });
+      }
+
       // If role not provided: default "user"
       const finalRoleName =
         role && allowedRoles.includes(role.toLowerCase())
