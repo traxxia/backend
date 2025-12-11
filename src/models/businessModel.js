@@ -1,79 +1,111 @@
-const { ObjectId } = require('mongodb');
-const { getDB } = require('../config/database');
-const { MAX_BUSINESSES_PER_USER } = require('../config/constants');
+const { ObjectId } = require("mongodb");
+const { getDB } = require("../config/database");
+const { MAX_BUSINESSES_PER_USER } = require("../config/constants");
 
 class BusinessModel {
+  static collection() {
+    return getDB().collection("user_businesses");
+  }
+
   static async create(businessData) {
     const db = getDB();
-    const result = await db.collection('user_businesses').insertOne({
+    const result = await db.collection("user_businesses").insertOne({
       ...businessData,
       created_at: new Date(),
-      updated_at: new Date()
+      updated_at: new Date(),
+      collaborators: businessData.collaborators || [],
     });
     return result.insertedId;
   }
 
   static async findByUserId(userId) {
-    const db = getDB();
-    return await db.collection('user_businesses')
+    return await this.collection()
       .find({ user_id: new ObjectId(userId) })
       .sort({ created_at: -1 })
       .toArray();
   }
 
-  static async findById(businessId, userId) {
-    const db = getDB();
-    return await db.collection('user_businesses').findOne({
+  // owner-scoped lookup used in some existing flows (delete/update by owner)
+  static async findByIdOwnerScoped(businessId, userId) {
+    return await this.collection().findOne({
       _id: new ObjectId(businessId),
-      user_id: new ObjectId(userId)
+      user_id: new ObjectId(userId),
     });
   }
 
+  // public lookup by id (no owner constraint)
+  static async findById(businessId) {
+    return await this.collection().findOne({ _id: new ObjectId(businessId) });
+  }
+
+  static async findByCollaborator(userId) {
+    return await this.collection()
+      .find({ collaborators: new ObjectId(userId) })
+      .sort({ created_at: -1 })
+      .toArray();
+  }
+
   static async countByUserId(userId) {
-    const db = getDB();
-    return await db.collection('user_businesses')
-      .countDocuments({ user_id: new ObjectId(userId) });
+    return await this.collection().countDocuments({
+      user_id: new ObjectId(userId),
+    });
   }
 
   static async delete(businessId, userId) {
-    const db = getDB();
-    return await db.collection('user_businesses').deleteOne({
+    return await this.collection().deleteOne({
       _id: new ObjectId(businessId),
-      user_id: new ObjectId(userId)
+      user_id: new ObjectId(userId),
     });
   }
 
   static async updateDocument(businessId, documentData) {
-    const db = getDB();
-    return await db.collection('user_businesses').updateOne(
+    return await this.collection().updateOne(
       { _id: new ObjectId(businessId) },
       {
         $set: {
           financial_document: documentData,
           has_financial_document: true,
-          updated_at: new Date()
-        }
+          updated_at: new Date(),
+        },
       }
     );
   }
 
   static async updateUploadDecision(businessId, decision) {
-    const db = getDB();
-    const updateData = {
-      updated_at: new Date()
-    };
+    const updateData = { updated_at: new Date() };
 
-    if (decision === 'pending') {
+    if (decision === "pending") {
       updateData.upload_decision_made = false;
-      updateData.upload_decision = 'pending';
+      updateData.upload_decision = "pending";
     } else {
       updateData.upload_decision_made = true;
       updateData.upload_decision = decision;
     }
 
-    return await db.collection('user_businesses').updateOne(
+    return await this.collection().updateOne(
       { _id: new ObjectId(businessId) },
       { $set: updateData }
+    );
+  }
+
+  // collaborator helpers
+  static async addCollaborator(businessId, collaboratorUserId) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $addToSet: { collaborators: new ObjectId(collaboratorUserId) },
+        $set: { updated_at: new Date() },
+      }
+    );
+  }
+
+  static async removeCollaborator(businessId, collaboratorUserId) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $pull: { collaborators: new ObjectId(collaboratorUserId) },
+        $set: { updated_at: new Date() },
+      }
     );
   }
 }
