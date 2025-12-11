@@ -195,6 +195,126 @@ class BusinessController {
     }
   }
 
+  static async create(req, res) {
+    try {
+      const { business_name, business_purpose, description, city, country } =
+        req.body;
+
+      if (!business_name || !business_purpose) {
+        return res
+          .status(400)
+          .json({ error: "Business name and purpose required" });
+      }
+
+      if (city && city.trim().length > 0 && city.trim().length < 2) {
+        return res
+          .status(400)
+          .json({ error: "City must be at least 2 characters long" });
+      }
+
+      if (country && country.trim().length > 0 && country.trim().length < 2) {
+        return res
+          .status(400)
+          .json({ error: "Country must be at least 2 characters long" });
+      }
+
+      const existingCount = await BusinessModel.countByUserId(req.user._id);
+      if (existingCount >= MAX_BUSINESSES_PER_USER) {
+        return res.status(400).json({ error: "Maximum 5 businesses allowed" });
+      }
+
+      const existingBusinesses = await BusinessModel.findByUserId(req.user._id);
+      const duplicateName = existingBusinesses.some(
+        (business) =>
+          business.business_name.toLowerCase() ===
+          business_name.trim().toLowerCase()
+      );
+
+      if (duplicateName) {
+        return res
+          .status(400)
+          .json({ error: "A business with this name already exists" });
+      }
+
+      const businessData = {
+        user_id: new ObjectId(req.user._id),
+        business_name: business_name.trim(),
+        business_purpose: business_purpose.trim(),
+        description: description ? description.trim() : "",
+        city: city ? city.trim() : "",
+        country: country ? country.trim() : "",
+        collaborators: [],
+      };
+
+      const businessId = await BusinessModel.create(businessData);
+
+      await logAuditEvent(req.user._id, "business_created", {
+        business_id: businessId,
+        business_name: business_name.trim(),
+        business_purpose: business_purpose.trim(),
+        description: description ? description.trim() : "",
+        location: {
+          city: city ? city.trim() : "",
+          country: country ? country.trim() : "",
+        },
+        has_location: !!(city || country),
+      });
+
+      res.json({
+        message: "Business created successfully",
+        business_id: businessId,
+        business: {
+          _id: businessId,
+          ...businessData,
+          created_at: new Date(),
+        },
+      });
+    } catch (error) {
+      console.error("Failed to create business:", error);
+      res.status(500).json({ error: "Failed to create business" });
+    }
+  }
+
+  static async delete(req, res) {
+    try {
+      const businessId = new ObjectId(req.params.id);
+      const userId = new ObjectId(req.user._id);
+
+      const business = await BusinessModel.findById(businessId, userId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const conversationCount = await ConversationModel.countDocuments({
+        user_id: userId,
+        business_id: businessId,
+      });
+
+      const deleteResult = await BusinessModel.delete(businessId, userId);
+      if (deleteResult.deletedCount === 0) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      await ConversationModel.deleteMany({
+        user_id: userId,
+        business_id: businessId,
+      });
+
+      await logAuditEvent(req.user._id, "business_deleted", {
+        business_id: businessId,
+        business_name: business.business_name,
+        business_purpose: business.business_purpose,
+        conversations_deleted: conversationCount,
+        deleted_at: new Date(),
+      });
+
+      res.json({ message: "Business and conversations deleted successfully" });
+    } catch (error) {
+      console.error("Delete business error:", error);
+      res.status(500).json({ error: "Failed to delete business" });
+    }
+  }
+
   static async assignCollaborator(req, res) {
     try {
       const businessId = req.params.id;
