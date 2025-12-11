@@ -107,7 +107,7 @@ class ProjectController {
 
       const data = {
         business_id: new ObjectId(business_id),
-        user_id: new ObjectId(user_id),
+        user_id: new ObjectId(req.user._id),
         project_name: project_name.trim(),
         description: description || null,
         why_this_matters: why_this_matters || null,
