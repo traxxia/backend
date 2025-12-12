@@ -81,9 +81,9 @@ class ProjectController {
         status,
       } = req.body;
 
-      if (!business_id || !user_id || !project_name || !status) {
+      if (!business_id || !project_name || !status) {
         return res.status(400).json({
-          error: "business_id, user_id, project_name and status are required",
+          error: "business_id, project_name and status are required",
         });
       }
       if (!VALID_STATUS.includes(status)) {
