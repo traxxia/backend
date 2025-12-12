@@ -1,39 +1,61 @@
-const { ObjectId } = require('mongodb');
-const { getDB } = require('../config/database');
-const ConversationModel = require('../models/conversationModel');
-const QuestionModel = require('../models/questionModel');
-const BusinessModel = require('../models/businessModel');
-const UserModel = require('../models/userModel');
-const { logAuditEvent } = require('../services/auditService');
-const blobService = require('../services/blobService');
-const fs = require('fs').promises;
+const { ObjectId } = require("mongodb");
+const ConversationModel = require("../models/conversationModel");
+const BusinessModel = require("../models/businessModel");
+const QuestionModel = require("../models/questionModel");
+const UserModel = require("../models/userModel");
+
+/**
+ * Helper: Validate business + determine owner + access rights
+ */
+async function getBusinessAndValidateAccess(business_id, currentUserId) {
+  const business = await BusinessModel.findById(new ObjectId(business_id));
+  if (!business) return { error: "Business not found" };
+
+  const isOwner = business.user_id.toString() === currentUserId.toString();
+  const isCollaborator = (business.collaborators || []).some(
+    (id) => id.toString() === currentUserId.toString()
+  );
+
+  if (!isOwner && !isCollaborator) {
+    return { error: "Not allowed to access conversations for this business" };
+  }
+
+  return { business, ownerId: business.user_id };
+}
 
 class ConversationController {
   static async getAll(req, res) {
     try {
       const { phase, business_id, user_id } = req.query;
 
-      let targetUserId;
+      let requestedUserId;
 
       if (user_id) {
-        if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
-          return res.status(403).json({ error: 'Admin access required to view other users conversations' });
+        if (
+          !["super_admin", "company_admin"].includes(req.user.role.role_name)
+        ) {
+          return res
+            .status(403)
+            .json({ error: "Admin access required to view other users data" });
         }
 
         const targetUser = await UserModel.findById(user_id);
-        if (!targetUser) {
-          return res.status(404).json({ error: 'User not found' });
+        if (!targetUser)
+          return res.status(404).json({ error: "User not found" });
+
+        if (
+          req.user.role.role_name === "company_admin" &&
+          (!targetUser.company_id ||
+            targetUser.company_id.toString() !== req.user.company_id.toString())
+        ) {
+          return res
+            .status(403)
+            .json({ error: "User not part of your company" });
         }
 
-        if (req.user.role.role_name === 'company_admin') {
-          if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
-            return res.status(403).json({ error: 'Access denied - user not in your company' });
-          }
-        }
-
-        targetUserId = new ObjectId(user_id);
+        requestedUserId = new ObjectId(user_id);
       } else {
-        targetUserId = new ObjectId(req.user._id);
+        requestedUserId = new ObjectId(req.user._id);
       }
 
       let questionFilter = { is_active: true };
@@ -41,132 +63,142 @@ class ConversationController {
 
       const questions = await QuestionModel.findAll(questionFilter);
 
-      const conversations = await ConversationModel.findByFilter({
-        user_id: targetUserId,
-        conversation_type: 'question_answer',
-        business_id: business_id ? new ObjectId(business_id) : null
-      });
-
-      const phaseAnalysis = await ConversationModel.findByFilter({
-        user_id: targetUserId,
-        conversation_type: 'phase_analysis',
-        business_id: business_id ? new ObjectId(business_id) : null,
-        ...(phase && { 'metadata.phase': phase })
-      });
-
       let businessInfo = null;
       let documentInfo = null;
+      let ownerIdToUse = requestedUserId;
 
+      //BUSINESS VALIDATION
       if (business_id) {
-        const business = await BusinessModel.findById(business_id, targetUserId);
+        const access = await getBusinessAndValidateAccess(
+          business_id,
+          req.user._id
+        );
 
-        if (business) {
-          businessInfo = {
-            id: business._id,
-            name: business.business_name,
-            purpose: business.business_purpose,
-            location: {
-              city: business.city || '',
-              country: business.country || '',
-              display: [business.city, business.country].filter(Boolean).join(', ')
-            },
-            upload_decision_made: business.upload_decision_made || false,
-            upload_decision: business.upload_decision || null,
-            created_at: business.created_at
+        if (access.error) return res.status(403).json({ error: access.error });
+
+        const business = access.business;
+        ownerIdToUse = new ObjectId(access.ownerId);
+
+        // business info
+        businessInfo = {
+          id: business._id,
+          name: business.business_name,
+          purpose: business.business_purpose,
+          location: {
+            city: business.city || "",
+            country: business.country || "",
+            display: [business.city, business.country]
+              .filter(Boolean)
+              .join(", "),
+          },
+          upload_decision_made: business.upload_decision_made || false,
+          upload_decision: business.upload_decision || null,
+          created_at: business.created_at,
+        };
+
+        // document info
+        if (business.has_financial_document && business.financial_document) {
+          documentInfo = {
+            has_document: true,
+            file_exists: !!business.financial_document.blob_url,
+            filename: business.financial_document.original_name,
+            upload_date: business.financial_document.upload_date,
+            file_size: business.financial_document.file_size,
+            file_type: business.financial_document.file_type,
+            is_processed: business.financial_document.is_processed || false,
+            uploaded_by: business.financial_document.uploaded_by,
+            template_type:
+              business.financial_document.template_type || "unknown",
+            template_name:
+              business.financial_document.template_name || "Unknown",
+            validation_confidence:
+              business.financial_document.validation_confidence || "medium",
+            upload_mode: business.financial_document.upload_mode || "manual",
+            blob_url: business.financial_document.blob_url || null,
+            storage_type: business.financial_document.blob_url
+              ? "blob"
+              : "filesystem",
+            file_content_base64: null,
+            file_content_available: false,
           };
-
-          if (business.has_financial_document && business.financial_document) {
-            let fileExists = false;
-            let fileContentBase64 = null;
-
-            if (business.financial_document.blob_url) {
-              try {
-                fileExists = true;
-              } catch (error) {
-                console.warn(`Financial document blob access error: ${error.message}`);
-              }
-            }
-
-            documentInfo = {
-              has_document: true,
-              file_exists: fileExists,
-              filename: business.financial_document.original_name,
-              upload_date: business.financial_document.upload_date,
-              file_size: business.financial_document.file_size,
-              file_type: business.financial_document.file_type,
-              is_processed: business.financial_document.is_processed || false,
-              uploaded_by: business.financial_document.uploaded_by,
-              template_type: business.financial_document.template_type || 'unknown',
-              template_name: business.financial_document.template_name || 'Unknown Template',
-              validation_confidence: business.financial_document.validation_confidence || 'medium',
-              upload_mode: business.financial_document.upload_mode || 'manual',
-              blob_url: business.financial_document.blob_url || null,
-              storage_type: business.financial_document.blob_url ? 'blob' : 'filesystem',
-              file_content_base64: fileContentBase64,
-              file_content_available: !!fileContentBase64,
-              download_info: {
-                can_download: fileExists,
-                content_type: business.financial_document.file_type,
-                content_disposition: `attachment; filename="${business.financial_document.original_name}"`
-              }
-            };
-          } else {
-            documentInfo = {
-              has_document: false,
-              file_exists: false,
-              template_type: null,
-              template_name: null,
-              validation_confidence: null,
-              upload_mode: null,
-              file_content_base64: null,
-              file_content_available: false,
-              storage_type: null,
-              blob_url: null,
-              message: 'No financial document uploaded for this business'
-            };
-          }
+        } else {
+          documentInfo = {
+            has_document: false,
+            file_exists: false,
+            template_type: null,
+            template_name: null,
+            validation_confidence: null,
+            upload_mode: null,
+            file_content_base64: null,
+            file_content_available: false,
+            storage_type: null,
+            blob_url: null,
+          };
         }
       }
 
-      const result = questions.map(question => {
-        const questionConvs = conversations.filter(c =>
-          c.question_id && c.question_id.toString() === question._id.toString()
+      // FETCH OWNER CONVERSATIONS
+      const conversations = await ConversationModel.findByFilter({
+        user_id: ownerIdToUse,
+        business_id: business_id ? new ObjectId(business_id) : null,
+        conversation_type: "question_answer",
+      });
+
+      //PHASE ANALYSIS
+      const phaseAnalysis = await ConversationModel.findByFilter({
+        user_id: ownerIdToUse,
+        business_id: business_id ? new ObjectId(business_id) : null,
+        conversation_type: "phase_analysis",
+        ...(phase && { "metadata.phase": phase }),
+      });
+
+      //BUILD QUESTION RESPONSE
+      const result = questions.map((question) => {
+        const questionConvs = conversations.filter(
+          (c) =>
+            c.question_id &&
+            c.question_id.toString() === question._id.toString()
         );
 
-        const allEntries = questionConvs.sort((a, b) => new Date(a.created_at) - new Date(b.created_at));
-
-        const userAnswers = allEntries.filter(entry =>
-          entry.message_type === 'user' &&
-          entry.answer_text &&
-          entry.answer_text.trim() !== ''
+        const allEntries = questionCorvs.sort(
+          (a, b) => new Date(a.created_at) - new Date(b.created_at)
         );
 
-        const realAnswers = userAnswers.filter(entry =>
-          entry.answer_text !== '[Question Skipped]'
+        const userAnswers = allEntries.filter(
+          (entry) =>
+            entry.message_type === "user" &&
+            entry.answer_text &&
+            entry.answer_text.trim() !== ""
         );
 
-        const skippedAnswers = userAnswers.filter(entry =>
-          entry.answer_text === '[Question Skipped]'
+        const realAnswers = userAnswers.filter(
+          (e) => e.answer_text !== "[Question Skipped]"
+        );
+
+        const skippedAnswers = userAnswers.filter(
+          (e) => e.answer_text === "[Question Skipped]"
         );
 
         const hasRealAnswer = realAnswers.length > 0;
+
         const latestUserAnswer = hasRealAnswer
-          ? realAnswers[realAnswers.length - 1]  
-          : (skippedAnswers.length > 0 ? skippedAnswers[skippedAnswers.length - 1] : null);
+          ? realAnswers[realAnswers.length - 1]
+          : skippedAnswers.length > 0
+            ? skippedAnswers[skippedAnswers.length - 1]
+            : null;
 
         const isSkipped = !hasRealAnswer && skippedAnswers.length > 0;
 
         const conversationFlow = [];
-        allEntries.forEach(entry => {
-          if (entry.message_type === 'bot' && entry.message_text) { 
-            if (entry.message_text.trim() === question.question_text.trim()) {
-              console.log(`⏭️ Skipping duplicate main question entry for ${question._id}`);
-            } else {
+
+        allEntries.forEach((entry) => {
+          if (entry.message_type === "bot" && entry.message_text) {
+            if (entry.message_text.trim() !== question.question_text.trim()) {
               conversationFlow.push({
-                type: 'question',
+                type: "question",
                 text: entry.message_text,
                 timestamp: entry.created_at,
-                is_followup: entry.is_followup || false
+                is_followup: entry.is_followup || false,
               });
             }
           }
@@ -174,25 +206,22 @@ class ConversationController {
 
         if (latestUserAnswer) {
           conversationFlow.push({
-            type: 'answer',
+            type: "answer",
             text: latestUserAnswer.answer_text,
             timestamp: latestUserAnswer.created_at,
-            is_followup: false,
             is_latest: true,
-            is_edited: latestUserAnswer.metadata?.is_edit === true
+            is_followup: false,
+            is_edited: latestUserAnswer.metadata?.is_edit === true,
           });
         }
 
-        conversationFlow.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+        conversationFlow.sort(
+          (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
+        );
 
-        let status = 'incomplete';
-        if (isSkipped) {
-          status = 'skipped';
-        } else if (latestUserAnswer?.metadata?.is_complete) {
-          status = 'complete';
-        }
-
-        const answerCount = conversationFlow.filter(item => item.type === 'answer').length;
+        let status = "incomplete";
+        if (isSkipped) status = "skipped";
+        else if (latestUserAnswer?.metadata?.is_complete) status = "complete";
 
         return {
           question_id: question._id,
@@ -201,46 +230,51 @@ class ConversationController {
           order: question.order,
           conversation_flow: conversationFlow,
           total_interactions: conversationFlow.length,
-          total_answers: answerCount,
+          total_answers: conversationFlow.filter((i) => i.type === "answer")
+            .length,
           completion_status: status,
           is_skipped: isSkipped,
-          last_updated: latestUserAnswer ? latestUserAnswer.created_at :
-            (allEntries.length > 0 ? allEntries[allEntries.length - 1].created_at : null),
+          last_updated: latestUserAnswer
+            ? latestUserAnswer.created_at
+            : allEntries.length > 0
+              ? allEntries[allEntries.length - 1].created_at
+              : null,
           latest_answer: latestUserAnswer?.answer_text || null,
-          is_edited: latestUserAnswer?.metadata?.is_edit === true
+          is_edited: latestUserAnswer?.metadata?.is_edit === true,
         };
       });
 
       const analysisResultsByPhase = {};
 
-      phaseAnalysis.forEach(analysis => {
-        const analysisPhase = analysis.metadata?.phase || 'initial';
-        const analysisType = analysis.metadata?.analysis_type || 'unknown';
+      phaseAnalysis.forEach((analysis) => {
+        const p = analysis.metadata?.phase || "initial";
+        const t = analysis.metadata?.analysis_type || "unknown";
 
-        if (!analysisResultsByPhase[analysisPhase]) {
-          analysisResultsByPhase[analysisPhase] = {
-            phase: analysisPhase,
-            analyses: []
-          };
+        if (!analysisResultsByPhase[p]) {
+          analysisResultsByPhase[p] = { phase: p, analyses: [] };
         }
 
-        const existingIndex = analysisResultsByPhase[analysisPhase].analyses
-          .findIndex(a => a.analysis_type === analysisType);
+        const existing = analysisResultsByPhase[p].analyses.findIndex(
+          (a) => a.analysis_type === t
+        );
 
         const analysisData = {
-          analysis_type: analysisType,
-          analysis_name: analysis.message_text || `${analysisType.toUpperCase()} Analysis`,
+          analysis_type: t,
+          analysis_name: analysis.message_text || `${t.toUpperCase()} Analysis`,
           analysis_data: analysis.analysis_result,
           created_at: analysis.created_at,
-          phase: analysisPhase
+          phase: p,
         };
 
-        if (existingIndex !== -1) {
-          if (new Date(analysis.created_at) > new Date(analysisResultsByPhase[analysisPhase].analyses[existingIndex].created_at)) {
-            analysisResultsByPhase[analysisPhase].analyses[existingIndex] = analysisData;
+        if (existing >= 0) {
+          if (
+            new Date(analysis.created_at) >
+            new Date(analysisResultsByPhase[p].analyses[existing].created_at)
+          ) {
+            analysisResultsByPhase[p].analyses[existing] = analysisData;
           }
         } else {
-          analysisResultsByPhase[analysisPhase].analyses.push(analysisData);
+          analysisResultsByPhase[p].analyses.push(analysisData);
         }
       });
 
@@ -248,403 +282,181 @@ class ConversationController {
         conversations: result,
         phase_analysis: analysisResultsByPhase,
         total_questions: questions.length,
-        completed: result.filter(r => r.completion_status === 'complete').length,
-        skipped: result.filter(r => r.completion_status === 'skipped').length,
-        phase: phase || 'all',
-        user_id: targetUserId.toString(),
+        completed: result.filter((r) => r.completion_status === "complete")
+          .length,
+        skipped: result.filter((r) => r.completion_status === "skipped").length,
+        phase: phase || "all",
+        user_id: ownerIdToUse.toString(),
         business_info: businessInfo,
         document_info: documentInfo,
-        metadata: {
-          has_business_context: !!businessInfo,
-          has_document_uploaded: documentInfo?.has_document || false,
-          document_file_exists: documentInfo?.file_exists || false,
-          document_content_available: documentInfo?.file_content_available || false,
-          document_template_type: documentInfo?.template_type || null,
-          document_template_name: documentInfo?.template_name || null,
-          document_validation_confidence: documentInfo?.validation_confidence || null,
-          document_upload_mode: documentInfo?.upload_mode || null,
-          document_storage_type: documentInfo?.storage_type || null,
-          is_good_phase_ready: documentInfo?.has_document && documentInfo?.file_exists,
-          request_timestamp: new Date().toISOString(),
-          file_content_size: documentInfo?.file_content_base64 ?
-            Math.round(documentInfo.file_content_base64.length * 0.75) : 0,
-          file_content_warning: documentInfo?.file_content_base64 && documentInfo.file_content_base64.length > 1000000 ?
-            'Large file content included - consider using download endpoint for better performance' : null
-        }
       });
-
     } catch (error) {
-      console.error('Failed to fetch conversations:', error);
-      res.status(500).json({ error: 'Failed to fetch conversations' });
+      console.error("Failed to fetch conversations:", error);
+      res.status(500).json({ error: "Failed to fetch conversations" });
     }
   }
 
   static async create(req, res) {
     try {
-      const {
-        question_id,
-        answer_text,
-        is_followup = false,
+      const { business_id, question_id, message_text, answer_text } = req.body;
+
+      const access = await getBusinessAndValidateAccess(
         business_id,
-        is_complete = false,
-        is_skipped = false,
-        metadata
-      } = req.body;
+        req.user._id
+      );
+      if (access.error) return res.status(403).json({ error: access.error });
 
-      if (!question_id || (!answer_text && !is_skipped)) {
-        return res.status(400).json({ error: 'Question ID and answer text (or skip) required' });
-      }
+      const ownerId = new ObjectId(access.ownerId);
 
-      const question = await QuestionModel.findById(question_id);
-      if (!question) {
-        return res.status(404).json({ error: 'Question not found' });
-      }
-
-      const isEdit = metadata?.from_editable_brief === true || metadata?.is_edit === true;
-
-      // 🧹 If editing from brief: clear all follow-up + previous records, keep only final edited answer
-      if (isEdit) {
-        const cleanupFilter = {
-          user_id: new ObjectId(req.user._id),
-          question_id: new ObjectId(question_id),
-          conversation_type: 'question_answer'
-        };
-        if (business_id) cleanupFilter.business_id = new ObjectId(business_id);
-
-        const deleted = await ConversationModel.deleteMany(cleanupFilter);
-        console.log(`🧽 Cleared ${deleted.deletedCount} conversation entries for edited question ${question_id}`);
-
-        const editedConversation = {
-          user_id: new ObjectId(req.user._id),
-          business_id: business_id ? new ObjectId(business_id) : null,
-          question_id: new ObjectId(question_id),
-          conversation_type: 'question_answer',
-          message_type: 'user',
-          message_text: '',
-          answer_text: answer_text?.trim() || '',
-          is_followup: false,
-          is_skipped: false,
-          analysis_result: null,
-          metadata: {
-            ...metadata,
-            is_complete: true,
-            is_skipped: false,
-            is_edit: true,
-            from_editable_brief: true,
-            last_edited: new Date()
-          },
-          attempt_count: 1,
-          created_at: new Date(),
-          updated_at: new Date()
-        };
-
-        const inserted = await ConversationModel.create(editedConversation);
-
-        await logAuditEvent(
-          req.user._id,
-          'question_edited',
-          {
-            question_id,
-            question_text: question?.question_text?.substring(0, 100) + '...',
-            answer_preview: answer_text?.substring(0, 200) + '...',
-            deleted_count: deleted.deletedCount,
-            new_record_id: inserted,
-            business_id
-          },
-          business_id
-        );
-
-        return res.json({
-          message: 'Edited answer saved successfully (previous follow-ups removed)',
-          conversation_id: inserted,
-          is_complete: true,
-          is_edit: true,
-          action: 'replaced'
-        });
-      }
-
-      // 🧩 Normal answer save (non-edit mode)
-      const conversation = {
-        user_id: new ObjectId(req.user._id),
-        business_id: business_id ? new ObjectId(business_id) : null,
-        question_id: new ObjectId(question_id),
-        conversation_type: 'question_answer',
-        message_type: 'user',
-        message_text: '',
-        answer_text: answer_text || '',
-        is_followup,
-        is_skipped,
-        analysis_result: null,
-        metadata: {
-          ...metadata,
-          is_complete,
-          is_skipped
-        },
-        attempt_count: 1
+      const payload = {
+        user_id: ownerId,
+        business_id: new ObjectId(business_id),
+        question_id: question_id ? new ObjectId(question_id) : null,
+        message_text: message_text || null,
+        answer_text: answer_text || null,
+        message_type: answer_text ? "user" : "bot",
+        conversation_type: "question_answer",
+        created_at: new Date(),
       };
 
-      const conversationId = await ConversationModel.create(conversation);
+      const result = await ConversationModel.saveConversation(payload);
 
-      const eventType = is_skipped ? 'question_skipped' : 'question_answered';
-      await logAuditEvent(req.user._id, eventType, {
-        question_id,
-        question_text: question?.question_text?.substring(0, 100) + '...',
-        answer_preview: answer_text ? answer_text.substring(0, 200) + '...' : 'N/A',
-        is_followup
-      }, business_id);
-
-      res.json({
-        message: is_skipped ? 'Question skipped' : 'Answer saved',
-        conversation_id: conversationId,
-        is_complete,
-        is_skipped,
-        action: 'created'
+      res.status(201).json({
+        message: "Conversation entry added",
+        conversation: result,
       });
     } catch (error) {
-      console.error('Error saving conversation:', error);
-      res.status(500).json({ error: 'Failed to save conversation' });
+      console.error("Conversation create error:", error);
+      res.status(500).json({ error: "Failed to save conversation" });
     }
   }
-
 
   static async skip(req, res) {
     try {
-      const { question_id, business_id, metadata } = req.body;
+      const { business_id, question_id } = req.body;
 
-      if (!question_id) {
-        return res.status(400).json({ error: 'Question ID is required' });
-      }
+      const access = await getBusinessAndValidateAccess(
+        business_id,
+        req.user._id
+      );
+      if (access.error) return res.status(403).json({ error: access.error });
 
-      const question = await QuestionModel.findById(question_id);
-      if (!question) {
-        return res.status(404).json({ error: 'Question not found' });
-      }
+      const ownerId = new ObjectId(access.ownerId);
 
-      const conversation = {
-        user_id: new ObjectId(req.user._id),
-        business_id: business_id ? new ObjectId(business_id) : null,
+      const payload = {
+        user_id: ownerId,
+        business_id: new ObjectId(business_id),
         question_id: new ObjectId(question_id),
-        conversation_type: 'question_answer',
-        message_type: 'user',
-        message_text: '',
-        answer_text: '[Question Skipped]',
-        is_followup: false,
-        is_skipped: true,
-        analysis_result: null,
-        metadata: {
-          ...metadata,
-          is_complete: true,
-          is_skipped: true,
-          skip_reason: 'user_skipped'
-        },
-        attempt_count: 1
+        answer_text: "[Question Skipped]",
+        message_type: "user",
+        conversation_type: "question_answer",
+        created_at: new Date(),
       };
 
-      const conversationId = await ConversationModel.create(conversation);
+      const result = await ConversationModel.saveConversation(payload);
 
       res.json({
-        message: 'Question skipped successfully',
-        conversation_id: conversationId,
-        is_complete: true,
-        is_skipped: true
+        message: "Question skipped",
+        conversation: result,
       });
     } catch (error) {
-      console.error('Failed to skip question:', error);
-      res.status(500).json({ error: 'Failed to skip question' });
+      console.error("Skip error:", error);
+      res.status(500).json({ error: "Failed to skip question" });
     }
   }
 
-  static async saveFollowupQuestion(req, res) {
+  static async saveFollowup(req, res) {
     try {
-      const { question_id, followup_question_text, business_id, metadata } = req.body;
+      const { business_id, question_id, message_text } = req.body;
 
-      if (!question_id || !followup_question_text) {
-        return res.status(400).json({ error: 'Question ID and followup question text required' });
-      }
+      const access = await getBusinessAndValidateAccess(
+        business_id,
+        req.user._id
+      );
+      if (access.error) return res.status(403).json({ error: access.error });
 
-      const conversation = {
-        user_id: new ObjectId(req.user._id),
-        business_id: business_id ? new ObjectId(business_id) : null,
+      const ownerId = new ObjectId(access.ownerId);
+
+      const payload = {
+        user_id: ownerId,
+        business_id: new ObjectId(business_id),
         question_id: new ObjectId(question_id),
-        conversation_type: 'question_answer',
-        message_type: 'bot',
-        message_text: followup_question_text,
-        answer_text: null,
+        message_text,
+        message_type: "bot",
         is_followup: true,
-        analysis_result: null,
-        metadata: metadata || {}
+        conversation_type: "question_answer",
+        created_at: new Date(),
       };
 
-      const conversationId = await ConversationModel.create(conversation);
+      const result = await ConversationModel.saveConversation(payload);
 
       res.json({
-        message: 'Followup question saved',
-        conversation_id: conversationId
+        message: "Follow-up saved",
+        conversation: result,
       });
     } catch (error) {
-      console.error('Failed to save followup question:', error);
-      res.status(500).json({ error: 'Failed to save followup question' });
+      console.error("Follow-up error:", error);
+      res.status(500).json({ error: "Failed to save follow-up" });
     }
   }
 
   static async savePhaseAnalysis(req, res) {
     try {
-      const { phase, analysis_type, analysis_name, analysis_data, business_id, metadata } = req.body;
+      const { business_id, phase, analysis_type, analysis_result } = req.body;
 
-      if (!phase || !analysis_type || !analysis_name || !analysis_data) {
-        return res.status(400).json({ error: 'Phase, analysis type, name, and data are required' });
-      }
-
-      const enhancedMetadata = {
-        phase: phase,
-        analysis_type: analysis_type,
-        generated_at: new Date().toISOString(),
-        ...metadata
-      };
-
-      const phaseAnalysis = {
-        user_id: new ObjectId(req.user._id),
-        business_id: business_id ? new ObjectId(business_id) : null,
-        question_id: null,
-        conversation_type: 'phase_analysis',
-        message_type: 'system',
-        message_text: analysis_name,
-        answer_text: null,
-        is_followup: false,
-        analysis_result: analysis_data,
-        metadata: enhancedMetadata
-      };
-
-      const result = await ConversationModel.updateOne(
-        {
-          user_id: new ObjectId(req.user._id),
-          business_id: business_id ? new ObjectId(business_id) : null,
-          conversation_type: 'phase_analysis',
-          'metadata.phase': phase,
-          'metadata.analysis_type': analysis_type
-        },
-        { $set: phaseAnalysis },
-        { upsert: true }
+      const access = await getBusinessAndValidateAccess(
+        business_id,
+        req.user._id
       );
+      if (access.error) return res.status(403).json({ error: access.error });
 
-      await logAuditEvent(req.user._id, 'analysis_generated', {
-        analysis_type,
-        analysis_name,
-        phase,
-        analysis_result: analysis_data,
-        metadata: {
-          generated_at: new Date().toISOString(),
-          was_update: result.upsertedId ? false : true,
-          database_operation: result.upsertedId ? 'insert' : 'update',
-          ...enhancedMetadata
-        },
-        data_size: JSON.stringify(analysis_data).length,
-        analysis_summary: {
-          data_keys: Object.keys(analysis_data || {}),
-          has_data: !!analysis_data,
-          data_type: typeof analysis_data
-        }
-      }, business_id);
+      const ownerId = new ObjectId(access.ownerId);
 
-      res.json({
-        message: 'Phase analysis saved',
-        analysis_id: result.insertedId || 'updated',
-        analysis_type: analysis_type,
-        phase: phase
-      });
-    } catch (error) {
-      console.error('Failed to save phase analysis:', error);
-      res.status(500).json({ error: 'Failed to save phase analysis' });
-    }
-  }
-
-  static async getPhaseAnalysis(req, res) {
-    try {
-      const { phase, business_id, analysis_type, user_id } = req.query;
-
-      let targetUserId;
-
-      if (user_id) {
-        if (!['super_admin', 'company_admin'].includes(req.user.role.role_name)) {
-          return res.status(403).json({ error: 'Admin access required to view other users phase analysis' });
-        }
-
-        const targetUser = await UserModel.findById(user_id);
-        if (!targetUser) {
-          return res.status(404).json({ error: 'User not found' });
-        }
-
-        if (req.user.role.role_name === 'company_admin') {
-          if (!targetUser.company_id || targetUser.company_id.toString() !== req.user.company_id.toString()) {
-            return res.status(403).json({ error: 'Access denied - user not in your company' });
-          }
-        }
-
-        targetUserId = new ObjectId(user_id);
-      } else {
-        targetUserId = new ObjectId(req.user._id);
-      }
-
-      let filter = {
-        user_id: targetUserId,
-        conversation_type: 'phase_analysis'
+      const payload = {
+        user_id: ownerId,
+        business_id: new ObjectId(business_id),
+        conversation_type: "phase_analysis",
+        metadata: { phase, analysis_type },
+        analysis_result,
+        created_at: new Date(),
       };
 
-      if (business_id) filter.business_id = new ObjectId(business_id);
-      if (phase) filter['metadata.phase'] = phase;
-      if (analysis_type) filter['metadata.analysis_type'] = analysis_type;
-
-      const analysisResults = await ConversationModel.findByFilter(filter);
-
-      const formattedResults = analysisResults.map(analysis => ({
-        analysis_id: analysis._id,
-        phase: analysis.metadata?.phase,
-        analysis_type: analysis.metadata?.analysis_type,
-        analysis_name: analysis.message_text,
-        analysis_data: analysis.analysis_result,
-        created_at: analysis.created_at
-      }));
-
-      const resultsByPhase = formattedResults.reduce((acc, result) => {
-        const phase = result.phase || 'unknown';
-        if (!acc[phase]) {
-          acc[phase] = [];
-        }
-        acc[phase].push(result);
-        return acc;
-      }, {});
+      const result = await ConversationModel.saveConversation(payload);
 
       res.json({
-        analysis_results: formattedResults,
-        results_by_phase: resultsByPhase,
-        total_analyses: formattedResults.length,
-        user_id: targetUserId.toString()
+        message: "Phase analysis saved",
+        analysis: result,
       });
-
     } catch (error) {
-      console.error('Failed to fetch phase analysis:', error);
-      res.status(500).json({ error: 'Failed to fetch phase analysis' });
+      console.error("Phase analysis error:", error);
+      res.status(500).json({ error: "Failed to save analysis" });
     }
   }
 
   static async deleteAll(req, res) {
     try {
-      const { business_id } = req.query;
-      let filter = { user_id: new ObjectId(req.user._id) };
+      const { business_id } = req.body;
 
-      if (business_id) {
-        filter.business_id = new ObjectId(business_id);
-      }
+      const access = await getBusinessAndValidateAccess(
+        business_id,
+        req.user._id
+      );
+      if (access.error) return res.status(403).json({ error: access.error });
 
-      const result = await ConversationModel.deleteMany(filter);
+      const ownerId = new ObjectId(access.ownerId);
+
+      const deleteResult = await ConversationModel.deleteMany({
+        user_id: ownerId,
+        business_id: new ObjectId(business_id),
+      });
 
       res.json({
-        message: 'Conversations cleared',
-        deleted_count: result.deletedCount
+        message: "All conversations deleted",
+        deleted: deleteResult.deletedCount,
       });
     } catch (error) {
-      console.error('Failed to clear conversations:', error);
-      res.status(500).json({ error: 'Failed to clear conversations' });
+      console.error("Delete error:", error);
+      res.status(500).json({ error: "Failed to delete conversations" });
     }
   }
 }
