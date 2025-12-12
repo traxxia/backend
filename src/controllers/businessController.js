@@ -87,7 +87,7 @@ class BusinessController {
         return Promise.all(
           businessList.map(async (business) => {
             const conversations = await ConversationModel.findByFilter({
-              user_id: targetUserId,
+              user_id: business.user_id,
               business_id: business._id,
               conversation_type: "question_answer",
             });
