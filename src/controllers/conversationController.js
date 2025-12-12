@@ -57,7 +57,12 @@ class ConversationController {
       } else {
         requestedUserId = new ObjectId(req.user._id);
       }
-
+      if (business_id && user_id) {
+        return res.status(400).json({
+          error:
+            "Cannot combine business_id and user_id. Business conversations always belong to the business owner.",
+        });
+      }
       let questionFilter = { is_active: true };
       if (phase) questionFilter.phase = phase;
 
@@ -160,7 +165,7 @@ class ConversationController {
             c.question_id.toString() === question._id.toString()
         );
 
-        const allEntries = questionCorvs.sort(
+        const allEntries = questionConvs.sort(
           (a, b) => new Date(a.created_at) - new Date(b.created_at)
         );
 
@@ -341,6 +346,10 @@ class ConversationController {
       );
       if (access.error) return res.status(403).json({ error: access.error });
 
+      if (!question_id) {
+        return res.status(400).json({ error: "question_id is required" });
+      }
+
       const ownerId = new ObjectId(access.ownerId);
 
       const payload = {
@@ -365,7 +374,7 @@ class ConversationController {
     }
   }
 
-  static async saveFollowup(req, res) {
+  static async saveFollowupQuestion(req, res) {
     try {
       const { business_id, question_id, message_text } = req.body;
 
@@ -374,6 +383,10 @@ class ConversationController {
         req.user._id
       );
       if (access.error) return res.status(403).json({ error: access.error });
+
+      if (!question_id) {
+        return res.status(400).json({ error: "question_id is required" });
+      }
 
       const ownerId = new ObjectId(access.ownerId);
 
@@ -421,6 +434,11 @@ class ConversationController {
         created_at: new Date(),
       };
 
+      if (!phase || !analysis_type) {
+        return res
+          .status(400)
+          .json({ error: "phase and analysis_type are required" });
+      }
       const result = await ConversationModel.saveConversation(payload);
 
       res.json({
@@ -430,6 +448,66 @@ class ConversationController {
     } catch (error) {
       console.error("Phase analysis error:", error);
       res.status(500).json({ error: "Failed to save analysis" });
+    }
+  }
+
+  static async getPhaseAnalysis(req, res) {
+    try {
+      const { phase, business_id, analysis_type } = req.query;
+
+      if (!business_id) {
+        return res.status(400).json({ error: "business_id is required" });
+      }
+
+      const access = await getBusinessAndValidateAccess(
+        business_id,
+        req.user._id
+      );
+      if (access.error) {
+        return res.status(403).json({ error: access.error });
+      }
+
+      const ownerId = new ObjectId(access.ownerId);
+
+      const filter = {
+        user_id: ownerId,
+        business_id: new ObjectId(business_id),
+        conversation_type: "phase_analysis",
+      };
+
+      if (phase) filter["metadata.phase"] = phase;
+      if (analysis_type) filter["metadata.analysis_type"] = analysis_type;
+
+      const analysisResults = await ConversationModel.findByFilter(filter);
+
+      const formattedResults = analysisResults.map((analysis) => ({
+        analysis_id: analysis._id,
+        phase: analysis.metadata?.phase,
+        analysis_type: analysis.metadata?.analysis_type,
+        analysis_name:
+          analysis.message_text ||
+          `${analysis.metadata?.analysis_type || "Unknown"} Analysis`,
+        analysis_data: analysis.analysis_result,
+        created_at: analysis.created_at,
+      }));
+
+      const resultsByPhase = formattedResults.reduce((acc, result) => {
+        const p = result.phase || "unknown";
+        if (!acc[p]) acc[p] = [];
+        acc[p].push(result);
+        return acc;
+      }, {});
+
+      res.json({
+        business_id,
+        owner_id: ownerId.toString(),
+        total_analyses: formattedResults.length,
+        analysis_results: formattedResults,
+        results_by_phase: resultsByPhase,
+      });
+    } catch (error) {
+      console.error("Failed to fetch phase analysis:", error);
+      res.status(500).json({ error: "Failed to fetch phase analysis" });
     }
   }
 
