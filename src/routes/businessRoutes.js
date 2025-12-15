@@ -20,6 +20,6 @@ router.delete(
 );
 
 // Business and Project Status change route
-router.patch("/:id/status", auth, BusinessController.changeStatus);
+router.patch("/:id/status", authenticateToken, BusinessController.changeStatus);
 
 module.exports = router;
