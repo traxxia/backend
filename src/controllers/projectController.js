@@ -16,15 +16,14 @@ function getProjectPermissions({
     case "draft":
     case "prioritizing":
       return {
-        canCreate: isAdmin || isCollaborator,
+        canCreate: false,
         canEdit: isAdmin || isCollaborator,
       };
 
-    // ONLY admin can edit
     case "prioritized":
       return {
         canCreate: false,
-        canEdit: isAdmin,
+        canEdit: isAdmin || isCollaborator,
       };
 
     // fully locked
