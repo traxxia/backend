@@ -324,7 +324,7 @@ class ConversationController {
         created_at: new Date(),
       };
 
-      const result = await ConversationModel.saveConversation(payload);
+      const result = await ConversationModel.create(payload);
 
       res.status(201).json({
         message: "Conversation entry added",
@@ -362,7 +362,7 @@ class ConversationController {
         created_at: new Date(),
       };
 
-      const result = await ConversationModel.saveConversation(payload);
+      const result = await ConversationModel.create(payload);
 
       res.json({
         message: "Question skipped",
@@ -401,7 +401,7 @@ class ConversationController {
         created_at: new Date(),
       };
 
-      const result = await ConversationModel.saveConversation(payload);
+      const result = await ConversationModel.create(payload);
 
       res.json({
         message: "Follow-up saved",
@@ -439,7 +439,7 @@ class ConversationController {
           .status(400)
           .json({ error: "phase and analysis_type are required" });
       }
-      const result = await ConversationModel.saveConversation(payload);
+      const result = await ConversationModel.create(payload);
 
       res.json({
         message: "Phase analysis saved",
