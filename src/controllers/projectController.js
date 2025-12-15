@@ -5,6 +5,40 @@ const BusinessModel = require("../models/businessModel");
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 
+// Permission matrix for ALL project actions
+function getProjectPermissions({
+  businessStatus,
+  isOwner,
+  isCollaborator,
+  isAdmin,
+}) {
+  switch (businessStatus) {
+    case "draft":
+    case "prioritizing":
+      return {
+        canCreate: isAdmin || isCollaborator,
+        canEdit: isAdmin || isCollaborator,
+      };
+
+    // ONLY admin can edit
+    case "prioritized":
+      return {
+        canCreate: false,
+        canEdit: isAdmin,
+      };
+
+    // fully locked
+    case "launched":
+      return {
+        canCreate: false,
+        canEdit: false,
+      };
+
+    default:
+      return { canCreate: false, canEdit: false };
+  }
+}
+
 // Normalize string fields
 function normalizeString(value) {
   return typeof value === "string" ? value : "";
@@ -20,7 +54,6 @@ function normalizeBudget(value) {
 }
 
 class ProjectController {
-
   static async getAll(req, res) {
     try {
       const {
@@ -66,7 +99,6 @@ class ProjectController {
     }
   }
 
-
   static async getById(req, res) {
     try {
       const { id } = req.params;
@@ -85,7 +117,6 @@ class ProjectController {
       res.status(500).json({ error: "Server error" });
     }
   }
-
 
   static async create(req, res) {
     try {
@@ -119,20 +150,35 @@ class ProjectController {
         return res.status(400).json({ error: "Invalid status value" });
       }
 
-      // Check business exists
+      // Check business
       const business = await BusinessModel.findById(business_id);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
 
-      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
-      const isCollaborator = (business.collaborators || []).some(
+      // Permission
+      const isOwner = business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = business.collaborators?.some(
         (id) => id.toString() === req.user._id.toString()
       );
-      const isOwner = business.user_id.toString() === req.user._id.toString();
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
 
-      if (!(isAdmin || isCollaborator || isOwner)) {
+      // NOTE: Owner alone cannot work on projects unless also collaborator
+      const permissions = getProjectPermissions({
+        businessStatus: business.status,
+        isOwner,
+        isCollaborator,
+        isAdmin,
+      });
+
+      if (!permissions.canCreate) {
         return res.status(403).json({
-          error: "Not allowed to create project in this business",
+          error: `You cannot create a project when business is in '${business.status}' state`,
+        });
+      }
+
+      if (!(isAdmin || isCollaborator)) {
+        return res.status(403).json({
+          error: "Only collaborators or admins can create or edit projects",
         });
       }
 
@@ -174,125 +220,142 @@ class ProjectController {
   }
 
   static async update(req, res) {
-  try {
-    const { id } = req.params;
+    try {
+      const { id } = req.params;
 
-    if (!ObjectId.isValid(id))
-      return res.status(400).json({ error: "Invalid ID" });
+      if (!ObjectId.isValid(id))
+        return res.status(400).json({ error: "Invalid ID" });
 
-    const existing = await ProjectModel.findById(id);
-    if (!existing) return res.status(404).json({ error: "Not found" });
+      const existing = await ProjectModel.findById(id);
+      if (!existing) return res.status(404).json({ error: "Not found" });
 
-    if (existing.status === "launched") {
-      return res.status(403).json({
-        error: "This project has been launched and cannot be updated anymore.",
-      });
-    }
-
-    if (req.body.status === "launched") {
-      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+      if (existing.status === "launched") {
         return res.status(403).json({
-          error: "Only company_admin or super_admin can launch projects",
+          error:
+            "This project has been launched and cannot be updated anymore.",
         });
       }
-    }
 
-    // Check access
-    const business = await BusinessModel.findById(existing.business_id);
-    if (!business)
-      return res.status(404).json({ error: "Parent business not found" });
-
-    const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
-    const isCollaborator = (business.collaborators || []).some(
-      (id) => id.toString() === req.user._id.toString()
-    );
-    const isOwner = business.user_id.toString() === req.user._id.toString();
-
-    if (!(isAdmin || isCollaborator || isOwner)) {
-      return res.status(403).json({
-        error: "Not allowed to update projects for this business",
-      });
-    }
-
-    if (req.body.status && !VALID_STATUS.includes(req.body.status)) {
-      return res.status(400).json({ error: "Invalid status value" });
-    }
-
-    // === FIXED: Normalize fields safely for strict string-only schema ===
-    const updateData = {
-      updated_at: new Date(),
-    };
-
-    // Only include fields if they are provided and valid
-    if (req.body.description !== undefined)
-      updateData.description = normalizeString(req.body.description);
-
-    if (req.body.why_this_matters !== undefined)
-      updateData.why_this_matters = normalizeString(req.body.why_this_matters);
-
-    if (req.body.impact !== undefined)
-      updateData.impact = normalizeString(req.body.impact);
-
-    if (req.body.effort !== undefined)
-      updateData.effort = normalizeString(req.body.effort);
-
-    if (req.body.risk !== undefined)
-      updateData.risk = normalizeString(req.body.risk);
-
-    if (req.body.strategic_theme !== undefined)
-      updateData.strategic_theme = normalizeString(req.body.strategic_theme);
-
-    if (req.body.dependencies !== undefined)
-      updateData.dependencies = normalizeString(req.body.dependencies);
-
-    if (req.body.high_level_requirements !== undefined)
-      updateData.high_level_requirements = normalizeString(req.body.high_level_requirements);
-
-    if (req.body.scope_definition !== undefined)
-      updateData.scope_definition = normalizeString(req.body.scope_definition);
-
-    if (req.body.expected_outcome !== undefined)
-      updateData.expected_outcome = normalizeString(req.body.expected_outcome);
-
-    if (req.body.success_metrics !== undefined)
-      updateData.success_metrics = normalizeString(req.body.success_metrics);
-
-    if (req.body.estimated_timeline !== undefined)
-      updateData.estimated_timeline = normalizeString(req.body.estimated_timeline);
-
-    // CRITICAL FIX: budget_estimate must ALWAYS be a string (never null)
-    if (req.body.budget_estimate !== undefined) {
-      const budget = req.body.budget_estimate;
-      if (budget === "" || budget === null || budget === undefined) {
-        updateData.budget_estimate = ""; // empty string is acceptable as "no budget set"
-      } else {
-        const num = Number(budget);
-        updateData.budget_estimate = isNaN(num) ? "" : String(num);
+      if (req.body.status === "launched") {
+        if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+          return res.status(403).json({
+            error: "Only company_admin or super_admin can launch projects",
+          });
+        }
       }
+
+      // Check access
+      const business = await BusinessModel.findById(existing.business_id);
+      if (!business)
+        return res.status(404).json({ error: "Parent business not found" });
+
+      const isOwner = business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = business.collaborators?.some(
+        (id) => id.toString() === req.user._id.toString()
+      );
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
+      const permissions = getProjectPermissions({
+        businessStatus: business.status,
+        isOwner,
+        isCollaborator,
+        isAdmin,
+      });
+
+      if (!permissions.canEdit) {
+        return res.status(403).json({
+          error: `You cannot edit projects when business is in '${business.status}' state`,
+        });
+      }
+
+      if (req.body.status && !VALID_STATUS.includes(req.body.status)) {
+        return res.status(400).json({ error: "Invalid status value" });
+      }
+
+      // === FIXED: Normalize fields safely for strict string-only schema ===
+      const updateData = {
+        updated_at: new Date(),
+      };
+
+      // Only include fields if they are provided and valid
+      if (req.body.description !== undefined)
+        updateData.description = normalizeString(req.body.description);
+
+      if (req.body.why_this_matters !== undefined)
+        updateData.why_this_matters = normalizeString(
+          req.body.why_this_matters
+        );
+
+      if (req.body.impact !== undefined)
+        updateData.impact = normalizeString(req.body.impact);
+
+      if (req.body.effort !== undefined)
+        updateData.effort = normalizeString(req.body.effort);
+
+      if (req.body.risk !== undefined)
+        updateData.risk = normalizeString(req.body.risk);
+
+      if (req.body.strategic_theme !== undefined)
+        updateData.strategic_theme = normalizeString(req.body.strategic_theme);
+
+      if (req.body.dependencies !== undefined)
+        updateData.dependencies = normalizeString(req.body.dependencies);
+
+      if (req.body.high_level_requirements !== undefined)
+        updateData.high_level_requirements = normalizeString(
+          req.body.high_level_requirements
+        );
+
+      if (req.body.scope_definition !== undefined)
+        updateData.scope_definition = normalizeString(
+          req.body.scope_definition
+        );
+
+      if (req.body.expected_outcome !== undefined)
+        updateData.expected_outcome = normalizeString(
+          req.body.expected_outcome
+        );
+
+      if (req.body.success_metrics !== undefined)
+        updateData.success_metrics = normalizeString(req.body.success_metrics);
+
+      if (req.body.estimated_timeline !== undefined)
+        updateData.estimated_timeline = normalizeString(
+          req.body.estimated_timeline
+        );
+
+      //budget_estimate must ALWAYS be a string (never null)
+      if (req.body.budget_estimate !== undefined) {
+        const budget = req.body.budget_estimate;
+        if (budget === "" || budget === null || budget === undefined) {
+          updateData.budget_estimate = ""; // empty string is acceptable as "no budget set"
+        } else {
+          const num = Number(budget);
+          updateData.budget_estimate = isNaN(num) ? "" : String(num);
+        }
+      }
+
+      if (req.body.status) {
+        updateData.status = req.body.status;
+      }
+
+      delete updateData._id;
+      delete updateData.business_id;
+      delete updateData.created_at;
+      await ProjectModel.update(id, updateData);
+
+      const updated = await ProjectModel.findById(id);
+      const [project] = await ProjectModel.populateCreatedBy(updated);
+
+      res.json({
+        message: "Project updated successfully",
+        project,
+      });
+    } catch (err) {
+      console.error("PROJECT UPDATE ERR:", err);
+      res.status(500).json({ error: "Server error" });
     }
-
-    // Only set status if provided
-    if (req.body.status) {
-      updateData.status = req.body.status;
-    }
-
-    delete updateData._id;
-    delete updateData.business_id;
-    delete updateData.created_at;
-    await ProjectModel.update(id,  updateData );
-
-    const updated = await ProjectModel.findById(id);
-    const [project] = await ProjectModel.populateCreatedBy(updated);
-
-    res.json({
-      message: "Project updated successfully",
-      project,
-    });
-  } catch (err) {
-    console.error("PROJECT UPDATE ERR:", err);
-    res.status(500).json({ error: "Server error" });
   }
-}
 
   static async delete(req, res) {
     try {
@@ -324,4 +387,3 @@ class ProjectController {
 }
 
 module.exports = ProjectController;
- 

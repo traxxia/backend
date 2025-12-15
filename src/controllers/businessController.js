@@ -405,6 +405,52 @@ class BusinessController {
       res.status(500).json({ error: "Failed to remove collaborator" });
     }
   }
+
+  static async changeStatus(req, res) {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
+      const ADMIN_ROLES = ["company_admin", "super_admin"];
+
+      if (!VALID_STATUS.includes(status)) {
+        return res.status(400).json({ error: "Invalid status value" });
+      }
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({
+          error: "Only company_admin or super_admin can change business status",
+        });
+      }
+
+      const business = await BusinessModel.findById(id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Update business status
+      await BusinessModel.collection().updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status, updated_at: new Date() } }
+      );
+
+      // Update all projects under this business
+      await ProjectModel.collection().updateMany(
+        { business_id: new ObjectId(id) },
+        { $set: { status, updated_at: new Date() } }
+      );
+
+      return res.json({
+        message: "Business status updated successfully",
+        business_id: id,
+        new_status: status,
+      });
+    } catch (err) {
+      console.error("BUSINESS STATUS UPDATE ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
 }
 
 module.exports = BusinessController;

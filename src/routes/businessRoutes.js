@@ -19,4 +19,7 @@ router.delete(
   BusinessController.removeCollaborator
 );
 
+// Business and Project Status change route
+router.patch("/:id/status", auth, BusinessController.changeStatus);
+
 module.exports = router;
