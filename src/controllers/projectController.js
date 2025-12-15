@@ -14,6 +14,10 @@ function getProjectPermissions({
 }) {
   switch (businessStatus) {
     case "draft":
+      return {
+        canCreate: isAdmin || isCollaborator,
+        canEdit: isAdmin || isCollaborator,
+      };
     case "prioritizing":
       return {
         canCreate: false,
@@ -198,7 +202,12 @@ class ProjectController {
         expected_outcome: normalizeString(expected_outcome),
         success_metrics: normalizeString(success_metrics),
         estimated_timeline: normalizeString(estimated_timeline),
-        budget_estimate: normalizeBudget(budget_estimate),
+        budget_estimate:
+          budget_estimate === "" ||
+          budget_estimate === null ||
+          budget_estimate === undefined
+            ? ""
+            : String(Number(budget_estimate)),
         status,
         created_at: new Date(),
         updated_at: new Date(),
