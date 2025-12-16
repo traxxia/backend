@@ -139,13 +139,12 @@ class ProjectController {
         success_metrics,
         estimated_timeline,
         budget_estimate,
-        status,
       } = req.body;
 
       // Required fields
-      if (!business_id || !project_name || !status) {
+      if (!business_id || !project_name) {
         return res.status(400).json({
-          error: "business_id, project_name and status are required",
+          error: "business_id and project_name required",
         });
       }
 
@@ -208,7 +207,7 @@ class ProjectController {
           budget_estimate === undefined
             ? ""
             : String(Number(budget_estimate)),
-        status,
+        status: "draft",
         created_at: new Date(),
         updated_at: new Date(),
       };
