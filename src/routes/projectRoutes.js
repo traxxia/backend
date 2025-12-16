@@ -13,5 +13,7 @@ router.delete(
   requireAdmin,
   ProjectController.delete
 );
+router.put("/rank", authenticateToken, ProjectController.rankProjects);
+router.get("/rank/:user_id", authenticateToken, ProjectController.getRankings);
 
 module.exports = router;
