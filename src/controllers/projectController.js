@@ -148,9 +148,9 @@ class ProjectController {
         });
       }
 
-      if (!VALID_STATUS.includes(status)) {
-        return res.status(400).json({ error: "Invalid status value" });
-      }
+      // if (!VALID_STATUS.includes(status)) {
+      //   return res.status(400).json({ error: "Invalid status value" });
+      // }
 
       // Check business
       const business = await BusinessModel.findById(business_id);
