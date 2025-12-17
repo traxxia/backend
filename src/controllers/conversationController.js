@@ -7,21 +7,67 @@ const UserModel = require("../models/userModel");
 /**
  * Helper: Validate business + determine owner + access rights
  */
-async function getBusinessAndValidateAccess(business_id, currentUserId) {
+// async function getBusinessAndValidateAccess(business_id, currentUserId) {
+//   const business = await BusinessModel.findById(new ObjectId(business_id));
+//   if (!business) return { error: "Business not found" };
+
+//   const isOwner = business.user_id.toString() === currentUserId.toString();
+//   const isCollaborator = (business.collaborators || []).some(
+//     (id) => id.toString() === currentUserId.toString()
+//   );
+
+//   if (!isOwner && !isCollaborator) {
+//     return { error: "Not allowed to access conversations for this business" };
+//   }
+
+//   return { business, ownerId: business.user_id };
+// }
+
+async function getBusinessAndValidateAccess(business_id, currentUser) {
   const business = await BusinessModel.findById(new ObjectId(business_id));
   if (!business) return { error: "Business not found" };
 
-  const isOwner = business.user_id.toString() === currentUserId.toString();
+  const isOwner =
+    business.user_id.toString() === currentUser._id.toString();
+
   const isCollaborator = (business.collaborators || []).some(
-    (id) => id.toString() === currentUserId.toString()
+    (id) => id.toString() === currentUser._id.toString()
   );
 
-  if (!isOwner && !isCollaborator) {
+  const isAdmin = ["super_admin", "company_admin"].includes(
+    currentUser.role.role_name
+  );
+
+  const isViewer = currentUser.role.role_name === "viewer";
+
+  // company boundary check
+  if ((isAdmin || isViewer) && currentUser.company_id) {
+    const owner = await UserModel.findById(business.user_id);
+    if (
+      owner?.company_id?.toString() !==
+      currentUser.company_id.toString()
+    ) {
+      return { error: "Business not in your company" };
+    }
+  }
+
+  if (!isOwner && !isCollaborator && !isAdmin && !isViewer) {
     return { error: "Not allowed to access conversations for this business" };
   }
 
-  return { business, ownerId: business.user_id };
+  return {
+    business,
+    ownerId: business.user_id,
+    access: {
+      isOwner,
+      isCollaborator,
+      isAdmin,
+      isViewer,
+      canWrite: isOwner || isCollaborator || isAdmin,
+    },
+  };
 }
+
 
 class ConversationController {
   static async getAll(req, res) {
@@ -74,10 +120,15 @@ class ConversationController {
 
       //BUSINESS VALIDATION
       if (business_id) {
+        // const access = await getBusinessAndValidateAccess(
+        //   business_id,
+        //   req.user._id
+        // );
+
         const access = await getBusinessAndValidateAccess(
-          business_id,
-          req.user._id
-        );
+  business_id,
+  req.user
+);
 
         if (access.error) return res.status(403).json({ error: access.error });
 
@@ -305,12 +356,22 @@ class ConversationController {
     try {
       const { business_id, question_id, message_text, answer_text } = req.body;
 
-      const access = await getBusinessAndValidateAccess(
-        business_id,
-        req.user._id
-      );
-      if (access.error) return res.status(403).json({ error: access.error });
+      // const access = await getBusinessAndValidateAccess(
+      //   business_id,
+      //   req.user._id
+      // );
 
+      const access = await getBusinessAndValidateAccess(
+  business_id,
+  req.user
+);
+
+      if (access.error) return res.status(403).json({ error: access.error });
+if (!access.access.canWrite) {
+  return res.status(403).json({
+    error: "Read-only access. You cannot modify conversations.",
+  });
+}
       const ownerId = new ObjectId(access.ownerId);
 
       const payload = {
@@ -324,7 +385,7 @@ class ConversationController {
         created_at: new Date(),
       };
 
-      const result = await ConversationModel.saveConversation(payload);
+      const result = await ConversationModel.create(payload);
 
       res.status(201).json({
         message: "Conversation entry added",
@@ -340,12 +401,22 @@ class ConversationController {
     try {
       const { business_id, question_id } = req.body;
 
-      const access = await getBusinessAndValidateAccess(
-        business_id,
-        req.user._id
-      );
-      if (access.error) return res.status(403).json({ error: access.error });
+      // const access = await getBusinessAndValidateAccess(
+      //   business_id,
+      //   req.user._id
+      // );
 
+      const access = await getBusinessAndValidateAccess(
+  business_id,
+  req.user
+);
+
+      if (access.error) return res.status(403).json({ error: access.error });
+if (!access.access.canWrite) {
+  return res.status(403).json({
+    error: "Read-only access. You cannot modify conversations.",
+  });
+}
       if (!question_id) {
         return res.status(400).json({ error: "question_id is required" });
       }
@@ -362,7 +433,7 @@ class ConversationController {
         created_at: new Date(),
       };
 
-      const result = await ConversationModel.saveConversation(payload);
+      const result = await ConversationModel.create(payload);
 
       res.json({
         message: "Question skipped",
@@ -378,12 +449,21 @@ class ConversationController {
     try {
       const { business_id, question_id, message_text } = req.body;
 
-      const access = await getBusinessAndValidateAccess(
-        business_id,
-        req.user._id
-      );
-      if (access.error) return res.status(403).json({ error: access.error });
+      // const access = await getBusinessAndValidateAccess(
+      //   business_id,
+      //   req.user._id
+      // );
 
+      const access = await getBusinessAndValidateAccess(
+  business_id,
+  req.user
+);
+      if (access.error) return res.status(403).json({ error: access.error });
+if (!access.access.canWrite) {
+  return res.status(403).json({
+    error: "Read-only access. You cannot modify conversations.",
+  });
+}
       if (!question_id) {
         return res.status(400).json({ error: "question_id is required" });
       }
@@ -401,7 +481,7 @@ class ConversationController {
         created_at: new Date(),
       };
 
-      const result = await ConversationModel.saveConversation(payload);
+      const result = await ConversationModel.create(payload);
 
       res.json({
         message: "Follow-up saved",
@@ -417,12 +497,22 @@ class ConversationController {
     try {
       const { business_id, phase, analysis_type, analysis_result } = req.body;
 
+      // const access = await getBusinessAndValidateAccess(
+      //   business_id,
+      //   req.user._id
+      // );
+
       const access = await getBusinessAndValidateAccess(
-        business_id,
-        req.user._id
-      );
+  business_id,
+  req.user
+);
       if (access.error) return res.status(403).json({ error: access.error });
 
+      if (!access.access.canWrite) {
+  return res.status(403).json({
+    error: "Read-only access. You cannot modify conversations.",
+  });
+}
       const ownerId = new ObjectId(access.ownerId);
 
       const payload = {
@@ -439,7 +529,7 @@ class ConversationController {
           .status(400)
           .json({ error: "phase and analysis_type are required" });
       }
-      const result = await ConversationModel.saveConversation(payload);
+      const result = await ConversationModel.create(payload);
 
       res.json({
         message: "Phase analysis saved",
@@ -459,10 +549,15 @@ class ConversationController {
         return res.status(400).json({ error: "business_id is required" });
       }
 
+      // const access = await getBusinessAndValidateAccess(
+      //   business_id,
+      //   req.user._id
+      // );
+
       const access = await getBusinessAndValidateAccess(
-        business_id,
-        req.user._id
-      );
+  business_id,
+  req.user
+);
       if (access.error) {
         return res.status(403).json({ error: access.error });
       }
@@ -515,11 +610,23 @@ class ConversationController {
     try {
       const { business_id } = req.body;
 
+      // const access = await getBusinessAndValidateAccess(
+      //   business_id,
+      //   req.user._id
+      // );
+
       const access = await getBusinessAndValidateAccess(
-        business_id,
-        req.user._id
-      );
+  business_id,
+  req.user
+);
       if (access.error) return res.status(403).json({ error: access.error });
+
+
+      if (!access.access.canWrite) {
+  return res.status(403).json({
+    error: "Read-only access. You cannot modify conversations.",
+  });
+}
 
       const ownerId = new ObjectId(access.ownerId);
 

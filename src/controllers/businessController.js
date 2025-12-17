@@ -44,14 +44,14 @@ class BusinessController {
         targetUserId = new ObjectId(req.user._id);
       }
 
-      // fetch owned and collaborating businesses
-      // const owned = await BusinessModel.findByUserId(targetUserId);
-      // const collabs = await BusinessModel.findByCollaborator(targetUserId);
 
       let owned = [];
       let collabs = [];
 
-      if (req.user.role.role_name === "company_admin" && !user_id) {
+      if (
+  ["company_admin", "viewer"].includes(req.user.role.role_name) &&
+  !user_id
+) {
 
         const companyUsers = await UserModel.getAll({
           company_id: req.user.company_id,
@@ -91,7 +91,7 @@ class BusinessController {
         // permission rules:
         const canCreateProject = isCollaborator || isAdmin;
         const canEditProject = isCollaborator || isAdmin;
-        const canLaunchProject = isAdmin; // company_admin + super_admin
+        const canLaunchProject = isAdmin;
 
         return {
           isOwner,
