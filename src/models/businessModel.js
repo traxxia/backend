@@ -25,6 +25,20 @@ class BusinessModel {
       .toArray();
   }
 
+  static async findByUserIds(userIds) {
+  if (!Array.isArray(userIds) || userIds.length === 0) {
+    return [];
+  }
+
+  return await this.collection()
+    .find({
+      user_id: { $in: userIds },
+    })
+    .sort({ created_at: -1 })
+    .toArray();
+}
+
+
   // owner-scoped lookup used in some existing flows (delete/update by owner)
   static async findByIdOwnerScoped(businessId, userId) {
     return await this.collection().findOne({

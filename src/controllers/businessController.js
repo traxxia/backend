@@ -45,8 +45,29 @@ class BusinessController {
       }
 
       // fetch owned and collaborating businesses
-      const owned = await BusinessModel.findByUserId(targetUserId);
-      const collabs = await BusinessModel.findByCollaborator(targetUserId);
+      // const owned = await BusinessModel.findByUserId(targetUserId);
+      // const collabs = await BusinessModel.findByCollaborator(targetUserId);
+
+      let owned = [];
+      let collabs = [];
+
+      if (req.user.role.role_name === "company_admin" && !user_id) {
+
+        const companyUsers = await UserModel.getAll({
+          company_id: req.user.company_id,
+        });
+
+        const companyUserIds = companyUsers.map(
+          (u) => new ObjectId(u._id)
+        );
+
+        owned = await BusinessModel.findByUserIds(companyUserIds);
+        collabs = await BusinessModel.findByCollaborator(req.user._id);
+      } else {
+        owned = await BusinessModel.findByUserId(targetUserId);
+        collabs = await BusinessModel.findByCollaborator(targetUserId);
+      }
+
 
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
       const collaborating_businesses = collabs.filter(
@@ -144,11 +165,11 @@ class BusinessController {
               financial_document_info:
                 business.has_financial_document && business.financial_document
                   ? {
-                      filename: business.financial_document.original_name,
-                      upload_date: business.financial_document.upload_date,
-                      file_size: business.financial_document.file_size,
-                      file_type: business.financial_document.file_type,
-                    }
+                    filename: business.financial_document.original_name,
+                    upload_date: business.financial_document.upload_date,
+                    file_size: business.financial_document.file_size,
+                    file_type: business.financial_document.file_type,
+                  }
                   : null,
               question_statistics: {
                 total_questions: totalQuestions,
