@@ -403,13 +403,24 @@ static async rankProjects(req, res) {
       const business = await BusinessModel.findById(business_id);
       if (!business) return res.status(404).json({ error: "Business not found" });
 
-    const rankingDocs = projects.map(p => ({
-      user_id: new ObjectId(user_id),
-      business_id: new ObjectId(business_id),
-      project_id: new ObjectId(p.project_id),
-      rank: p.rank,
-      rationals: p.rationals || "",
-    }));
+      const allProjects = await ProjectModel.findAll({
+  business_id: new ObjectId(business_id),
+});
+
+const rankMap = {};
+const rationalMap = {};
+projects.forEach(p => {
+  rankMap[p.project_id] = p.rank;
+  rationalMap[p.project_id] = p.rationals || "";
+});
+
+    const rankingDocs = allProjects.map(project => ({
+  user_id: new ObjectId(user_id),
+  business_id: new ObjectId(business_id),
+  project_id: project._id,
+  rank: rankMap[project._id.toString()] || null, 
+  rationals: rationalMap[project._id.toString()] || "",
+}));
 
     await ProjectRankingModel.bulkUpsert(rankingDocs);
 
@@ -469,12 +480,41 @@ static async getRankings(req, res) {
       projectMap[p._id.toString()] = p;
     });
 
-    const responseProjects = rankings.map(r => ({
-      project_id: r.project_id,
-      project_name: projectMap[r.project_id.toString()]?.project_name || "",
-      rank: r.rank,
-      description: r.description,
-    }));
+    // const responseProjects = rankings.map(r => ({
+    //   project_id: r.project_id,
+    //   project_name: projectMap[r.project_id.toString()]?.project_name || "",
+    //   rank: r.rank,
+    //   description: r.description,
+    // }));
+
+
+    const ranked = [];
+const unranked = [];
+
+rankings.forEach(r => {
+  const project = projectMap[r.project_id.toString()];
+  if (!project) return;
+
+  if (r.rank !== null) {
+    ranked.push({ ranking: r, project });
+  } else {
+    unranked.push({ ranking: r, project });
+  }
+});
+ranked.sort((a, b) => a.ranking.rank - b.ranking.rank);
+
+unranked.sort(
+  (a, b) =>
+    new Date(a.project.created_at) - new Date(b.project.created_at)
+);
+
+const ordered = [...ranked, ...unranked];
+
+const responseProjects = ordered.map(({ ranking, project }) => ({
+  project_id: project._id,
+  project_name: project.project_name,
+  rank: ranking.rank, // number or null
+}));
 
     res.json({
       user_id,
