@@ -18,9 +18,11 @@ class ProjectRankingModel {
           $set: {
             rank: r.rank,
             rationals: r.rationals,
+            ...(r.rank !== undefined ? { rank: r.rank } : {}),
             updated_at: new Date(),
           },
           $setOnInsert: {
+            locked: r.locked || false,
             created_at: new Date(),
           },
         },
@@ -29,6 +31,22 @@ class ProjectRankingModel {
     }));
 
     return this.collection().bulkWrite(ops);
+  }
+
+  static async lockRank(userId, projectId){
+    return this.collection().updateOne(
+      { user_id: new ObjectId(userId), project_id: new ObjectId(projectId)},
+      {$set: { locked: true, updated_at: new Date()}}
+
+    )
+  }
+
+  static async isLocked(userId, projectId){
+    const doc = await this.collection().findOne({
+      user_id: new ObjectId(userId),
+      project_id: new ObjectId(projectId)
+    })
+    return doc?.locked === true;
   }
 
   static async findByUserAndBusiness(userId, businessId) {

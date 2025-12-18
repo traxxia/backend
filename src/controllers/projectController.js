@@ -403,30 +403,50 @@ class ProjectController {
       const business = await BusinessModel.findById(business_id);
       if (!business) return res.status(404).json({ error: "Business not found" });
 
+      
+
+
       const allProjects = await ProjectModel.findAll({
         business_id: new ObjectId(business_id),
+        
       });
 
-      const rankMap = {};
-      const rationalMap = {};
-      projects.forEach(p => {
-        rankMap[p.project_id] = p.rank;
-        rationalMap[p.project_id] = p.rationals || "";
-      });
+     const existingRankings = await ProjectRankingModel.collection()
+      .find({
+        user_id: new ObjectId(user_id),
+        business_id: new ObjectId(business_id)
+      })
+      .toArray();
 
-      const rankingDocs = allProjects.map(project => ({
+    const rankMap = {};
+    const rationalMap = {};
+    projects.forEach(p => {
+      rankMap[p.project_id] = p.rank;
+      rationalMap[p.project_id] = p.rationals || "";
+    });
+
+    const rankingDocs = allProjects.map(project => {
+      const projIdStr = project._id.toString();
+      const existing = existingRankings.find(r => r.project_id.toString() === projIdStr);
+      const isLocked = existing?.locked || false;
+
+      return {
         user_id: new ObjectId(user_id),
         business_id: new ObjectId(business_id),
         project_id: project._id,
-        rank: rankMap[project._id.toString()] || null,
-        rationals: rationalMap[project._id.toString()] || "",
-      }));
+        rank: isLocked ? existing.rank : rankMap[projIdStr] || null,
+        rationals: isLocked ? existing.rationals : rationalMap[projIdStr] || "",
+        locked: existing?.locked || false,   
+      };
+    });
 
       await ProjectRankingModel.bulkUpsert(rankingDocs);
 
       // updated rankings for response
       const rankedProjects =
         await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
+
+        const lockedProjects = rankedProjects.filter(r => r.locked).map(r => r.project_id);
 
       res.json({
         user_id,
@@ -435,7 +455,11 @@ class ProjectController {
           project_id: r.project_id,
           rank: r.rank,
           rationals: r.rationals,
+          locked: r.locked || false,
         })),
+        locked_projects: lockedProjects,
+        message: lockedProjects.length ? "Could not update locked project-ranks" 
+        : "Project ranks updated successfully"
       });
     } catch (err) {
       console.error("Rank Projects err:", err);
@@ -507,6 +531,7 @@ class ProjectController {
         project_id: project._id,
         project_name: project.project_name,
         rank: ranking.rank,
+        locked: ranking.locked || false,
       }));
 
       res.json({
@@ -590,6 +615,44 @@ class ProjectController {
       res.status(500).json({ error: "Server error" });
     }
   }
+
+  static async lockRank(req, res) {
+  try {
+    const user_id = req.user._id;
+    const { project_id } = req.query;
+
+    if (!ObjectId.isValid(project_id)) {
+      return res.status(400).json({ error: "Invalid project_id" });
+    }
+
+    const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+     if (isAdmin) {
+      return res.status(403).json({ error: "Admins cannot lock ranks" });
+    }
+
+
+    const alreadyLocked = await ProjectRankingModel.isLocked(
+      user_id,
+      project_id
+    );
+
+    if (alreadyLocked) {
+      return res.status(409).json({
+        error: "Project ranking is already locked",
+        project_id,
+      });
+    }
+
+    // Lock the rank
+    await ProjectRankingModel.lockRank(user_id, project_id);
+
+    res.json({ message: "Rank locked successfully", project_id });
+  } catch (err) {
+    console.error("Lock rank err:", err);
+    res.status(500).json({ error: "Server error" });
+  }
+}
+
 
   static async delete(req, res) {
     try {

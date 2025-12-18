@@ -8,11 +8,8 @@ router.post("/", authenticateToken, ProjectController.create);
 
 router.put("/rank", authenticateToken, ProjectController.rankProjects);
 router.get("/rank/:user_id", authenticateToken, ProjectController.getRankings);
-router.get(
-  "/admin-rank",
-  authenticateToken,
-  ProjectController.getAdminRankings
-);
+router.get("/admin-rank",authenticateToken,ProjectController.getAdminRankings);
+router.post("/lock-rank",authenticateToken,ProjectController.lockRank);
 
 
 router.get("/:id", authenticateToken, ProjectController.getById);
