@@ -189,7 +189,7 @@ class ProjectController {
         });
       }
 
-      if(project_type && !PROJECT_TYPES.includes(project_type)){
+      if (project_type && !PROJECT_TYPES.includes(project_type)) {
         return res.status(400).json({
           error: "Invalid project_type value"
         });
@@ -214,8 +214,8 @@ class ProjectController {
         estimated_timeline: normalizeString(estimated_timeline),
         budget_estimate:
           budget_estimate === "" ||
-          budget_estimate === null ||
-          budget_estimate === undefined
+            budget_estimate === null ||
+            budget_estimate === undefined
             ? ""
             : String(Number(budget_estimate)),
         status,
@@ -376,159 +376,220 @@ class ProjectController {
     }
   }
 
-static async rankProjects(req, res) {
-  try {
-    const { business_id, projects } = req.body;
-    const user_id = req.user._id; //from token
+  static async rankProjects(req, res) {
+    try {
+      const { business_id, projects } = req.body;
+      const user_id = req.user._id;
 
-    if (!ObjectId.isValid(business_id) || !Array.isArray(projects)) {
-      return res.status(400).json({ error: "Invalid request data" });
-    }
-
-    if (projects.length === 0) {
-      return res.status(400).json({ error: "Projects array cannot be empty" });
-    }
-
-    // validate 
-    for (const p of projects) {
-      if (!ObjectId.isValid(p.project_id)) {
-        return res.status(400).json({ error: "Invalid project_id" });
+      if (!ObjectId.isValid(business_id) || !Array.isArray(projects)) {
+        return res.status(400).json({ error: "Invalid request data" });
       }
-      if (typeof p.rank !== "number" || p.rank < 1) {
-        return res.status(400).json({ error: "Invalid rank value" });
-      }
-    }
 
-    // Check Business
+      if (projects.length === 0) {
+        return res.status(400).json({ error: "Projects array cannot be empty" });
+      }
+
+      // validate 
+      for (const p of projects) {
+        if (!ObjectId.isValid(p.project_id)) {
+          return res.status(400).json({ error: "Invalid project_id" });
+        }
+        if (typeof p.rank !== "number" || p.rank < 1) {
+          return res.status(400).json({ error: "Invalid rank value" });
+        }
+      }
+
+      // Check Business
       const business = await BusinessModel.findById(business_id);
       if (!business) return res.status(404).json({ error: "Business not found" });
 
       const allProjects = await ProjectModel.findAll({
-  business_id: new ObjectId(business_id),
-});
+        business_id: new ObjectId(business_id),
+      });
 
-const rankMap = {};
-const rationalMap = {};
-projects.forEach(p => {
-  rankMap[p.project_id] = p.rank;
-  rationalMap[p.project_id] = p.rationals || "";
-});
+      const rankMap = {};
+      const rationalMap = {};
+      projects.forEach(p => {
+        rankMap[p.project_id] = p.rank;
+        rationalMap[p.project_id] = p.rationals || "";
+      });
 
-    const rankingDocs = allProjects.map(project => ({
-  user_id: new ObjectId(user_id),
-  business_id: new ObjectId(business_id),
-  project_id: project._id,
-  rank: rankMap[project._id.toString()] || null, 
-  rationals: rationalMap[project._id.toString()] || "",
-}));
+      const rankingDocs = allProjects.map(project => ({
+        user_id: new ObjectId(user_id),
+        business_id: new ObjectId(business_id),
+        project_id: project._id,
+        rank: rankMap[project._id.toString()] || null,
+        rationals: rationalMap[project._id.toString()] || "",
+      }));
 
-    await ProjectRankingModel.bulkUpsert(rankingDocs);
+      await ProjectRankingModel.bulkUpsert(rankingDocs);
 
-    // updated rankings for response
-    const rankedProjects =
-      await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
+      // updated rankings for response
+      const rankedProjects =
+        await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
 
-    res.json({
-      user_id,
-      business_id,
-      projects: rankedProjects.map(r => ({
-        project_id: r.project_id,
-        rank: r.rank,
-        rationals: r.rationals,
-      })),
-    });
-  } catch (err) {
-    console.error("Rank Projects err:", err);
-    res.status(500).json({ error: "Server error" });
-  }
-}
-
-static async getRankings(req, res) {
-  try {
-    const { user_id } = req.params;
-    const { business_id } = req.query;
-
-    if (!ObjectId.isValid(user_id)) {
-      return res.status(400).json({ error: "Invalid user_id" });
-    }
-
-    if (!ObjectId.isValid(business_id)) {
-      return res.status(400).json({ error: "Invalid business_id" });
-    }
-
-    const rankings = await ProjectRankingModel.findByUserAndBusiness(
-      user_id,
-      business_id
-    );
-
-    if (rankings.length === 0) {
-      return res.json({
+      res.json({
         user_id,
         business_id,
-        projects: [],
+        projects: rankedProjects.map(r => ({
+          project_id: r.project_id,
+          rank: r.rank,
+          rationals: r.rationals,
+        })),
       });
+    } catch (err) {
+      console.error("Rank Projects err:", err);
+      res.status(500).json({ error: "Server error" });
     }
-
-    // Fetch project
-    const projectIds = rankings.map(r => r.project_id);
-    const projects = await ProjectModel.findAll({
-      _id: { $in: projectIds },
-    });
-
-    const projectMap = {};
-    projects.forEach(p => {
-      projectMap[p._id.toString()] = p;
-    });
-
-    // const responseProjects = rankings.map(r => ({
-    //   project_id: r.project_id,
-    //   project_name: projectMap[r.project_id.toString()]?.project_name || "",
-    //   rank: r.rank,
-    //   description: r.description,
-    // }));
-
-
-    const ranked = [];
-const unranked = [];
-
-rankings.forEach(r => {
-  const project = projectMap[r.project_id.toString()];
-  if (!project) return;
-
-  if (r.rank !== null) {
-    ranked.push({ ranking: r, project });
-  } else {
-    unranked.push({ ranking: r, project });
   }
-});
-ranked.sort((a, b) => a.ranking.rank - b.ranking.rank);
 
-unranked.sort(
-  (a, b) =>
-    new Date(a.project.created_at) - new Date(b.project.created_at)
-);
+  static async getRankings(req, res) {
+    try {
+      const { user_id } = req.params;
+      const { business_id } = req.query;
 
-const ordered = [...ranked, ...unranked];
+      if (!ObjectId.isValid(user_id)) {
+        return res.status(400).json({ error: "Invalid user_id" });
+      }
 
-const responseProjects = ordered.map(({ ranking, project }) => ({
-  project_id: project._id,
-  project_name: project.project_name,
-  rank: ranking.rank, // number or null
-}));
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
 
-    res.json({
-      user_id,
-      business_id,
-      projects: responseProjects,
-    });
+      const rankings = await ProjectRankingModel.findByUserAndBusiness(
+        user_id,
+        business_id
+      );
 
-  } catch (err) {
-    console.error("err:", err);
-    res.status(500).json({ error: "Server error" });
+      if (rankings.length === 0) {
+        return res.json({
+          user_id,
+          business_id,
+          projects: [],
+        });
+      }
+
+      // Fetch project
+      const projectIds = rankings.map(r => r.project_id);
+      const projects = await ProjectModel.findAll({
+        _id: { $in: projectIds },
+      });
+
+      const projectMap = {};
+      projects.forEach(p => {
+        projectMap[p._id.toString()] = p;
+      });
+
+
+      const ranked = [];
+      const unranked = [];
+
+      rankings.forEach(r => {
+        const project = projectMap[r.project_id.toString()];
+        if (!project) return;
+
+        if (r.rank !== null) {
+          ranked.push({ ranking: r, project });
+        } else {
+          unranked.push({ ranking: r, project });
+        }
+      });
+      ranked.sort((a, b) => a.ranking.rank - b.ranking.rank);
+
+      unranked.sort(
+        (a, b) =>
+          new Date(a.project.created_at) - new Date(b.project.created_at)
+      );
+
+      const ordered = [...ranked, ...unranked];
+
+      const responseProjects = ordered.map(({ ranking, project }) => ({
+        project_id: project._id,
+        project_name: project.project_name,
+        rank: ranking.rank,
+      }));
+
+      res.json({
+        user_id,
+        business_id,
+        projects: responseProjects,
+      });
+
+    } catch (err) {
+      console.error("err:", err);
+      res.status(500).json({ error: "Server error" });
+    }
   }
-}
+
+  static async getAdminRankings(req, res) {
 
 
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const adminUserId = business.user_id;
+
+      const rankings = await ProjectRankingModel.findByUserAndBusiness(
+        adminUserId,
+        business_id
+      );
+
+      const projects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id),
+      });
+
+      const rankMap = {};
+      rankings.forEach(r => {
+        rankMap[r.project_id.toString()] = r.rank;
+      });
+
+      const ranked = [];
+      const unranked = [];
+
+      projects.forEach(p => {
+        const rank = rankMap[p._id.toString()] ?? null;
+        const item = {
+          admin_user_id: adminUserId,
+          business_id,
+          project_id: p._id,
+          rank,
+          created_at: p.created_at,
+        };
+
+        if (rank !== null) {
+          ranked.push(item);
+        } else {
+          unranked.push(item);
+        }
+      });
+
+      ranked.sort((a, b) => a.rank - b.rank);
+      unranked.sort(
+        (a, b) => new Date(a.created_at) - new Date(b.created_at)
+      );
+
+      const response = [...ranked, ...unranked].map(({ created_at, ...rest }) => rest);
+
+      res.json({
+        admin_user_id: adminUserId,
+        business_id,
+        projects: response,
+      });
+
+    } catch (err) {
+      console.error("ADMIN RANKINGS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
 
   static async delete(req, res) {
     try {

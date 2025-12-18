@@ -7,21 +7,6 @@ const UserModel = require("../models/userModel");
 /**
  * Helper: Validate business + determine owner + access rights
  */
-// async function getBusinessAndValidateAccess(business_id, currentUserId) {
-//   const business = await BusinessModel.findById(new ObjectId(business_id));
-//   if (!business) return { error: "Business not found" };
-
-//   const isOwner = business.user_id.toString() === currentUserId.toString();
-//   const isCollaborator = (business.collaborators || []).some(
-//     (id) => id.toString() === currentUserId.toString()
-//   );
-
-//   if (!isOwner && !isCollaborator) {
-//     return { error: "Not allowed to access conversations for this business" };
-//   }
-
-//   return { business, ownerId: business.user_id };
-// }
 
 async function getBusinessAndValidateAccess(business_id, currentUser) {
   const business = await BusinessModel.findById(new ObjectId(business_id));
@@ -120,10 +105,6 @@ class ConversationController {
 
       //BUSINESS VALIDATION
       if (business_id) {
-        // const access = await getBusinessAndValidateAccess(
-        //   business_id,
-        //   req.user._id
-        // );
 
         const access = await getBusinessAndValidateAccess(
   business_id,
@@ -356,11 +337,6 @@ class ConversationController {
     try {
       const { business_id, question_id, message_text, answer_text } = req.body;
 
-      // const access = await getBusinessAndValidateAccess(
-      //   business_id,
-      //   req.user._id
-      // );
-
       const access = await getBusinessAndValidateAccess(
   business_id,
   req.user
@@ -400,11 +376,6 @@ if (!access.access.canWrite) {
   static async skip(req, res) {
     try {
       const { business_id, question_id } = req.body;
-
-      // const access = await getBusinessAndValidateAccess(
-      //   business_id,
-      //   req.user._id
-      // );
 
       const access = await getBusinessAndValidateAccess(
   business_id,
@@ -449,11 +420,6 @@ if (!access.access.canWrite) {
     try {
       const { business_id, question_id, message_text } = req.body;
 
-      // const access = await getBusinessAndValidateAccess(
-      //   business_id,
-      //   req.user._id
-      // );
-
       const access = await getBusinessAndValidateAccess(
   business_id,
   req.user
@@ -496,11 +462,6 @@ if (!access.access.canWrite) {
   static async savePhaseAnalysis(req, res) {
     try {
       const { business_id, phase, analysis_type, analysis_result } = req.body;
-
-      // const access = await getBusinessAndValidateAccess(
-      //   business_id,
-      //   req.user._id
-      // );
 
       const access = await getBusinessAndValidateAccess(
   business_id,
@@ -548,11 +509,6 @@ if (!access.access.canWrite) {
       if (!business_id) {
         return res.status(400).json({ error: "business_id is required" });
       }
-
-      // const access = await getBusinessAndValidateAccess(
-      //   business_id,
-      //   req.user._id
-      // );
 
       const access = await getBusinessAndValidateAccess(
   business_id,
@@ -609,11 +565,6 @@ if (!access.access.canWrite) {
   static async deleteAll(req, res) {
     try {
       const { business_id } = req.body;
-
-      // const access = await getBusinessAndValidateAccess(
-      //   business_id,
-      //   req.user._id
-      // );
 
       const access = await getBusinessAndValidateAccess(
   business_id,
