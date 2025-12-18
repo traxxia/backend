@@ -3,6 +3,7 @@ const BusinessModel = require("../models/businessModel");
 const UserModel = require("../models/userModel");
 const ConversationModel = require("../models/conversationModel");
 const QuestionModel = require("../models/questionModel");
+const ProjectModel = require("../models/projectModel")
 const { logAuditEvent } = require("../services/auditService");
 const {
   MAX_BUSINESSES_PER_USER,
@@ -49,9 +50,9 @@ class BusinessController {
       let collabs = [];
 
       if (
-  ["company_admin", "viewer"].includes(req.user.role.role_name) &&
-  !user_id
-) {
+        ["company_admin", "viewer"].includes(req.user.role.role_name) &&
+        !user_id
+      ) {
 
         const companyUsers = await UserModel.getAll({
           company_id: req.user.company_id,
@@ -72,6 +73,21 @@ class BusinessController {
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
       const collaborating_businesses = collabs.filter(
         (b) => !ownedIds.has(b._id.toString())
+      );
+
+      // check business with started projects
+      const allBusinesses = [...owned, ...collaborating_businesses];
+      const businessIds = allBusinesses.map(
+        (b) => new ObjectId(b._id)
+      );
+
+      const businessesWithProjects = await ProjectModel.collection()
+        .distinct("business_id", {
+          business_id: { $in: businessIds },
+        });
+
+      const businessHasProjectSet = new Set(
+        businessesWithProjects.map((id) => id.toString())
       );
 
       const totalQuestions = await QuestionModel.countDocuments({
@@ -184,6 +200,9 @@ class BusinessController {
                 included_phases: ALLOWED_PHASES,
               },
               access,
+              has_projects: businessHasProjectSet.has(
+                business._id.toString()
+              ),
             };
           })
         );
