@@ -14,6 +14,7 @@ const projectRoutes = require("./projectRoutes");
 router.use("/api", authRoutes);
 router.use("/api/companies", companyRoutes);
 router.use("/api/businesses", businessRoutes);
+router.use("/api/business", businessRoutes);
 router.use("/api/questions", questionRoutes);
 router.use("/api/conversations", conversationRoutes);
 router.use("/api/businesses", documentRoutes);

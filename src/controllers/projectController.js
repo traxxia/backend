@@ -125,7 +125,6 @@ class ProjectController {
   }
 
   static async create(req, res) {
-    console.log("REQ BODY:", req.body);
     try {
       const {
         business_id,
@@ -143,20 +142,18 @@ class ProjectController {
         success_metrics,
         estimated_timeline,
         budget_estimate,
-        status,
-        project_type,
       } = req.body;
 
       // Required fields
-      if (!business_id || !project_name || !status) {
+      if (!business_id || !project_name) {
         return res.status(400).json({
-          error: "business_id, project_name and status are required",
+          error: "business_id and project_name required",
         });
       }
 
-      if (!VALID_STATUS.includes(status)) {
-        return res.status(400).json({ error: "Invalid status value" });
-      }
+      // if (!VALID_STATUS.includes(status)) {
+      //   return res.status(400).json({ error: "Invalid status value" });
+      // }
 
       // Check business
       const business = await BusinessModel.findById(business_id);
@@ -190,12 +187,6 @@ class ProjectController {
         });
       }
 
-      if (project_type && !PROJECT_TYPES.includes(project_type)) {
-        return res.status(400).json({
-          error: "Invalid project_type value"
-        });
-      }
-
       // Normalize fields for MongoDB validation
       const data = {
         business_id: new ObjectId(business_id),
@@ -215,12 +206,11 @@ class ProjectController {
         estimated_timeline: normalizeString(estimated_timeline),
         budget_estimate:
           budget_estimate === "" ||
-            budget_estimate === null ||
-            budget_estimate === undefined
+          budget_estimate === null ||
+          budget_estimate === undefined
             ? ""
             : String(Number(budget_estimate)),
-        status,
-        project_type: project_type || "",
+        status: "draft",
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -496,8 +486,10 @@ class ProjectController {
       };
 
       if (business) {
-        const total_users =
-          1 + (Array.isArray(business.collaborators) ? business.collaborators.length : 0);
+        // total_users should represent only collaborators eligible to rank
+        const total_users = Array.isArray(business.collaborators)
+          ? business.collaborators.length
+          : 0;
 
         const lockedUserIds = await ProjectRankingModel.collection()
           .distinct("user_id", {

@@ -257,8 +257,16 @@ class ConversationController {
         );
 
         let status = "incomplete";
-        if (isSkipped) status = "skipped";
-        else if (latestUserAnswer?.metadata?.is_complete) status = "complete";
+        if (isSkipped) {
+          status = "skipped";
+        } else if (latestUserAnswer?.metadata?.is_complete) {
+          // Explicit completion flag saved in metadata
+          status = "complete";
+        } else if (hasRealAnswer) {
+          // Fallback: treat any real (non-skipped) answer as completed
+          status = "complete";
+        }
+
 
         return {
           question_id: question._id,
