@@ -1,6 +1,7 @@
 const { ObjectId } = require('mongodb');
 const QuestionModel = require('../models/questionModel');
 const ConversationModel = require('../models/conversationModel');
+const BusinessModel = require('../models/businessModel');
 const { ALLOWED_PHASES, VALID_PHASES, VALID_SEVERITIES } = require('../config/constants');
 const { logAuditEvent } = require('../services/auditService');
 
@@ -151,9 +152,21 @@ class QuestionController {
         }
       }
 
-      const conversations = await ConversationModel.findByFilter({
-        user_id: new ObjectId(req.user._id),
-        business_id: business_id ? new ObjectId(business_id) : null,
+      // Determine which user ID to use for conversations.
+      // For business conversations we always store under the business owner,
+      // not the collaborator viewing them.
+      let ownerIdToUse = new ObjectId(req.user._id);
+
+      if (business_id) {
+        const business = await BusinessModel.findById(new ObjectId(business_id));
+        if (!business) {
+          return res.status(404).json({ error: 'Business not found' });
+        }
+        ownerIdToUse = new ObjectId(business.user_id);
+      }
+
+      const conversationFilter = {
+        user_id: ownerIdToUse,
         conversation_type: 'question_answer',
         $or: [
           { 'metadata.is_complete': true },
@@ -166,7 +179,13 @@ class QuestionController {
             }
           }
         ]
-      });
+      };
+
+      if (business_id) {
+        conversationFilter.business_id = new ObjectId(business_id);
+      }
+
+      const conversations = await ConversationModel.findByFilter(conversationFilter);
 
       const answeredQuestionIds = new Set(
         conversations.map(conv => conv.question_id?.toString()).filter(Boolean)

@@ -45,13 +45,49 @@ class BusinessController {
         targetUserId = new ObjectId(req.user._id);
       }
 
-      // fetch owned and collaborating businesses
-      const owned = await BusinessModel.findByUserId(targetUserId);
-      const collabs = await BusinessModel.findByCollaborator(targetUserId);
+
+      let owned = [];
+      let collabs = [];
+
+      if (
+        ["company_admin", "viewer"].includes(req.user.role.role_name) &&
+        !user_id
+      ) {
+
+        const companyUsers = await UserModel.getAll({
+          company_id: req.user.company_id,
+        });
+
+        const companyUserIds = companyUsers.map(
+          (u) => new ObjectId(u._id)
+        );
+
+        owned = await BusinessModel.findByUserIds(companyUserIds);
+        collabs = await BusinessModel.findByCollaborator(req.user._id);
+      } else {
+        owned = await BusinessModel.findByUserId(targetUserId);
+        collabs = await BusinessModel.findByCollaborator(targetUserId);
+      }
+
 
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
       const collaborating_businesses = collabs.filter(
         (b) => !ownedIds.has(b._id.toString())
+      );
+
+      // check business with started projects
+      const allBusinesses = [...owned, ...collaborating_businesses];
+      const businessIds = allBusinesses.map(
+        (b) => new ObjectId(b._id)
+      );
+
+      const businessesWithProjects = await ProjectModel.collection()
+        .distinct("business_id", {
+          business_id: { $in: businessIds },
+        });
+
+      const businessHasProjectSet = new Set(
+        businessesWithProjects.map((id) => id.toString())
       );
 
       const totalQuestions = await QuestionModel.countDocuments({
@@ -71,7 +107,7 @@ class BusinessController {
         // permission rules:
         const canCreateProject = isCollaborator || isAdmin;
         const canEditProject = isCollaborator || isAdmin;
-        const canLaunchProject = isAdmin; // company_admin + super_admin
+        const canLaunchProject = isAdmin;
 
         return {
           isOwner,
@@ -145,11 +181,11 @@ class BusinessController {
               financial_document_info:
                 business.has_financial_document && business.financial_document
                   ? {
-                      filename: business.financial_document.original_name,
-                      upload_date: business.financial_document.upload_date,
-                      file_size: business.financial_document.file_size,
-                      file_type: business.financial_document.file_type,
-                    }
+                    filename: business.financial_document.original_name,
+                    upload_date: business.financial_document.upload_date,
+                    file_size: business.financial_document.file_size,
+                    file_type: business.financial_document.file_type,
+                  }
                   : null,
               question_statistics: {
                 total_questions: totalQuestions,
@@ -164,6 +200,9 @@ class BusinessController {
                 included_phases: ALLOWED_PHASES,
               },
               access,
+              has_projects: businessHasProjectSet.has(
+                business._id.toString()
+              ),
             };
           })
         );

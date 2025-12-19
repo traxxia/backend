@@ -1,9 +1,11 @@
 const { ObjectId } = require("mongodb");
 const ProjectModel = require("../models/projectModel");
 const BusinessModel = require("../models/businessModel");
+const ProjectRankingModel = require("../models/projectRankingModel");
 
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
+const PROJECT_TYPES = ["immediate", "short_term", "long_term"]
 
 // Permission matrix for ALL project actions
 function getProjectPermissions({
@@ -94,6 +96,7 @@ class ProjectController {
       const raw = await ProjectModel.findAll(filter);
       const total = await ProjectModel.count(filter);
       const projects = await ProjectModel.populateCreatedBy(raw);
+
 
       res.json({ total, count: projects.length, projects });
     } catch (err) {
@@ -364,6 +367,313 @@ class ProjectController {
     }
   }
 
+  static async rankProjects(req, res) {
+    try {
+      const { business_id, projects } = req.body;
+      const user_id = req.user._id;
+
+      if (!ObjectId.isValid(business_id) || !Array.isArray(projects)) {
+        return res.status(400).json({ error: "Invalid request data" });
+      }
+
+      if (projects.length === 0) {
+        return res.status(400).json({ error: "Projects array cannot be empty" });
+      }
+
+      // validate 
+      for (const p of projects) {
+        if (!ObjectId.isValid(p.project_id)) {
+          return res.status(400).json({ error: "Invalid project_id" });
+        }
+        if (typeof p.rank !== "number" || p.rank < 1) {
+          return res.status(400).json({ error: "Invalid rank value" });
+        }
+      }
+
+      // Check Business
+      const business = await BusinessModel.findById(business_id);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+
+
+
+      const allProjects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id),
+
+      });
+
+      const existingRankings = await ProjectRankingModel.collection()
+        .find({
+          user_id: new ObjectId(user_id),
+          business_id: new ObjectId(business_id)
+        })
+        .toArray();
+
+      const rankMap = {};
+      const rationalMap = {};
+      projects.forEach(p => {
+        rankMap[p.project_id] = p.rank;
+        rationalMap[p.project_id] = p.rationals || "";
+      });
+
+      const rankingDocs = allProjects.map(project => {
+        const projIdStr = project._id.toString();
+        const existing = existingRankings.find(r => r.project_id.toString() === projIdStr);
+        const isLocked = existing?.locked || false;
+
+        return {
+          user_id: new ObjectId(user_id),
+          business_id: new ObjectId(business_id),
+          project_id: project._id,
+          rank: isLocked ? existing.rank : rankMap[projIdStr] || null,
+          rationals: isLocked ? existing.rationals : rationalMap[projIdStr] || "",
+          locked: existing?.locked || false,
+        };
+      });
+
+      await ProjectRankingModel.bulkUpsert(rankingDocs);
+
+      // updated rankings for response
+      const rankedProjects =
+        await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
+
+      const lockedProjects = rankedProjects.filter(r => r.locked).map(r => r.project_id);
+
+      res.json({
+        user_id,
+        business_id,
+        projects: rankedProjects.map(r => ({
+          project_id: r.project_id,
+          rank: r.rank,
+          rationals: r.rationals,
+          locked: r.locked || false,
+        })),
+        locked_projects: lockedProjects,
+        message: lockedProjects.length ? "Could not update locked project-ranks"
+          : "Project ranks updated successfully"
+      });
+    } catch (err) {
+      console.error("Rank Projects err:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async getRankings(req, res) {
+    try {
+      const { user_id } = req.params;
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(user_id)) {
+        return res.status(400).json({ error: "Invalid user_id" });
+      }
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const rankings = await ProjectRankingModel.findByUserAndBusiness(
+        user_id,
+        business_id
+      );
+
+      // get users and locking summary
+
+      const business = await BusinessModel.findById(business_id);
+
+      let ranking_lock_summary = {
+        locked_users_count: 0,
+        total_users: 0,
+      };
+
+      if (business) {
+        // total_users should represent only collaborators eligible to rank
+        const total_users = Array.isArray(business.collaborators)
+          ? business.collaborators.length
+          : 0;
+
+        const lockedUserIds = await ProjectRankingModel.collection()
+          .distinct("user_id", {
+            business_id: new ObjectId(business_id),
+            locked: true,
+          });
+
+        ranking_lock_summary = {
+          locked_users_count: lockedUserIds.length,
+          total_users,
+        };
+      }
+
+
+      if (rankings.length === 0) {
+        return res.json({
+          user_id,
+          business_id,
+          projects: [],
+        });
+      }
+
+      // Fetch project
+      const projectIds = rankings.map(r => r.project_id);
+      const projects = await ProjectModel.findAll({
+        _id: { $in: projectIds },
+      });
+
+      const projectMap = {};
+      projects.forEach(p => {
+        projectMap[p._id.toString()] = p;
+      });
+
+
+      const ranked = [];
+      const unranked = [];
+
+      rankings.forEach(r => {
+        const project = projectMap[r.project_id.toString()];
+        if (!project) return;
+
+        if (r.rank !== null) {
+          ranked.push({ ranking: r, project });
+        } else {
+          unranked.push({ ranking: r, project });
+        }
+      });
+      ranked.sort((a, b) => a.ranking.rank - b.ranking.rank);
+
+      unranked.sort(
+        (a, b) =>
+          new Date(a.project.created_at) - new Date(b.project.created_at)
+      );
+
+      const ordered = [...ranked, ...unranked];
+
+      const responseProjects = ordered.map(({ ranking, project }) => ({
+        project_id: project._id,
+        project_name: project.project_name,
+        rank: ranking.rank,
+        locked: ranking.locked || false,
+      }));
+
+      res.json({
+        user_id,
+        business_id,
+        projects: responseProjects,
+        ranking_lock_summary
+      });
+
+    } catch (err) {
+      console.error("err:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async getAdminRankings(req, res) {
+
+
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const adminUserId = business.user_id;
+
+      const rankings = await ProjectRankingModel.findByUserAndBusiness(
+        adminUserId,
+        business_id
+      );
+
+      const projects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id),
+      });
+
+      const rankMap = {};
+      rankings.forEach(r => {
+        rankMap[r.project_id.toString()] = r.rank;
+      });
+
+      const ranked = [];
+      const unranked = [];
+
+      projects.forEach(p => {
+        const rank = rankMap[p._id.toString()] ?? null;
+        const item = {
+          admin_user_id: adminUserId,
+          business_id,
+          project_id: p._id,
+          rank,
+          created_at: p.created_at,
+        };
+
+        if (rank !== null) {
+          ranked.push(item);
+        } else {
+          unranked.push(item);
+        }
+      });
+
+      ranked.sort((a, b) => a.rank - b.rank);
+      unranked.sort(
+        (a, b) => new Date(a.created_at) - new Date(b.created_at)
+      );
+
+      const response = [...ranked, ...unranked].map(({ created_at, ...rest }) => rest);
+
+      res.json({
+        admin_user_id: adminUserId,
+        business_id,
+        projects: response,
+      });
+
+    } catch (err) {
+      console.error("ADMIN RANKINGS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async lockRank(req, res) {
+    try {
+      const user_id = req.user._id;
+      const { project_id } = req.query;
+
+      if (!ObjectId.isValid(project_id)) {
+        return res.status(400).json({ error: "Invalid project_id" });
+      }
+
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+      if (isAdmin) {
+        return res.status(403).json({ error: "Admins cannot lock ranks" });
+      }
+
+
+      const alreadyLocked = await ProjectRankingModel.isLocked(
+        user_id,
+        project_id
+      );
+
+      if (alreadyLocked) {
+        return res.status(409).json({
+          error: "Project ranking is already locked",
+          project_id,
+        });
+      }
+
+      // Lock the rank
+      await ProjectRankingModel.lockRank(user_id, project_id);
+
+      res.json({ message: "Rank locked successfully", project_id });
+    } catch (err) {
+      console.error("Lock rank err:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+
   static async delete(req, res) {
     try {
       const { id } = req.params;
@@ -392,5 +702,7 @@ class ProjectController {
     }
   }
 }
+
+
 
 module.exports = ProjectController;
