@@ -8,6 +8,7 @@ const UserModel = require("../models/userModel");
  * Helper: Validate business + determine owner + access rights
  */
 
+
 async function getBusinessAndValidateAccess(business_id, currentUser) {
   const business = await BusinessModel.findById(new ObjectId(business_id));
   if (!business) return { error: "Business not found" };
