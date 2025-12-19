@@ -1,0 +1,46 @@
+name: TRAXXIA-$(Date:yyyyMMdd)-$(Rev:r)
+
+trigger:
+  branches:
+    include:
+      - main
+      - develop
+
+variables:
+  MAJOR: 1        # Increment manually for major changes
+  MINOR: 0        # Increment manually for minor features
+  PATCH: $[counter(format('{0}.{1}', variables['MAJOR'], variables['MINOR']), 0)]
+
+  # SEMVER: $(MAJOR).$(MINOR).$(PATCH).$(Build.BuildId)
+  SEMVER: $(MAJOR).$(MINOR).$(PATCH)
+  IMAGE_VERSION: $(SEMVER)
+  IMAGE_NAME: trax_dev_backend
+
+stages:
+  - stage: BuildAndPush
+    displayName: Build and Push Docker Image for Traxxia Backend
+    jobs:
+      - job: BuildJob
+        displayName: Build Docker Image and Push to ACR
+        pool:
+          vmImage: 'ubuntu-latest'
+
+        steps:
+          - checkout: self
+            clean: true
+            fetchDepth: 1
+
+          - task: Docker@2
+            displayName: 'Build and Push Traxxia BE Docker Image to ACR'
+            inputs:
+              containerRegistry: 'trax-sc-dev-acr'     # Use your ACR service connection
+              repository: $(IMAGE_NAME)
+              command: buildAndPush
+              Dockerfile: 'docker/Dockerfile'
+              buildContext: '$(Build.SourcesDirectory)'
+              tags: |
+                latest
+                $(IMAGE_VERSION)
+
+          - script: echo "Docker Image tagged as $(IMAGE_NAME):$(IMAGE_VERSION)"
+            displayName: 'Output NucliOs Backend Docker Tag'
