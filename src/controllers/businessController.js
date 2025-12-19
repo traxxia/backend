@@ -3,7 +3,7 @@ const BusinessModel = require("../models/businessModel");
 const UserModel = require("../models/userModel");
 const ConversationModel = require("../models/conversationModel");
 const QuestionModel = require("../models/questionModel");
-const ProjectModel = require("../models/projectModel")
+const ProjectModel = require("../models/projectModel");
 const { logAuditEvent } = require("../services/auditService");
 const {
   MAX_BUSINESSES_PER_USER,
