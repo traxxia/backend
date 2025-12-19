@@ -14,6 +14,8 @@ const projectRoutes = require("./projectRoutes");
 router.use("/api", authRoutes);
 router.use("/api/companies", companyRoutes);
 router.use("/api/businesses", businessRoutes);
+// Alias singular path to the same business routes to support
+// clients calling /api/business/... as well as /api/businesses/...
 router.use("/api/business", businessRoutes);
 router.use("/api/questions", questionRoutes);
 router.use("/api/conversations", conversationRoutes);
