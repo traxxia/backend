@@ -10,7 +10,6 @@ const {
   ALLOWED_PHASES,
 } = require("../config/constants");
 
-
 const VALID_ADMIN_ROLES = ["super_admin", "company_admin"];
 
 class BusinessController {
@@ -278,6 +277,7 @@ class BusinessController {
         city: city ? city.trim() : "",
         country: country ? country.trim() : "",
         collaborators: [],
+        status: "draft",
       };
 
       const businessId = await BusinessModel.create(businessData);
@@ -449,7 +449,7 @@ class BusinessController {
       const { id } = req.params;
       const { status } = req.body;
 
-      const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
+      const VALID_STATUS = ["prioritizing", "prioritized", "launched"];
       const ADMIN_ROLES = ["company_admin", "super_admin"];
 
       if (!VALID_STATUS.includes(status)) {
