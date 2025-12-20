@@ -60,4 +60,5 @@ class ProjectRankingModel {
   }
 }
 
+
 module.exports = ProjectRankingModel;
