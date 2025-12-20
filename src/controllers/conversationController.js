@@ -8,20 +8,56 @@ const { logAuditEvent } = require("../services/auditService");
 /**
  * Helper: Validate business + determine owner + access rights
  */
-async function getBusinessAndValidateAccess(business_id, currentUserId) {
+async function getBusinessAndValidateAccess(business_id, currentUser) {
   const business = await BusinessModel.findById(new ObjectId(business_id));
   if (!business) return { error: "Business not found" };
 
-  const isOwner = business.user_id.toString() === currentUserId.toString();
+  const isOwner = business.user_id.toString() === currentUser._id.toString();
+
   const isCollaborator = (business.collaborators || []).some(
-    (id) => id.toString() === currentUserId.toString()
+    (id) => id.toString() === currentUser._id.toString()
   );
 
-  if (!isOwner && !isCollaborator) {
+  const isAdmin = ["super_admin", "company_admin"].includes(
+  currentUser.role?.role_name
+);
+
+const isViewer = currentUser.role?.role_name === "viewer";
+
+  console.log({
+    userId: currentUser._id,
+    role: currentUser.role?.role_name,
+    company: currentUser.company_id,
+    isOwner,
+    isCollaborator,
+    isAdmin,
+    isViewer
+  });
+
+  if(isAdmin && currentUser.company_id){
+    const owner = await UserModel.findById(business.user_id);
+    if(
+      owner?.company_id?.toString() !== currentUser.company_id.toString()
+    ){
+      return { error: "Business not in your company" }
+    }
+  }
+
+  if (!isOwner && !isCollaborator && !isAdmin && !isViewer) {
     return { error: "Not allowed to access conversations for this business" };
   }
 
-  return { business, ownerId: business.user_id };
+  return { 
+     business,
+     ownerId: business.user_id,
+     access: {
+      isOwner,
+      isCollaborator,
+      isAdmin,
+      canWrite: isOwner || isCollaborator || isAdmin,
+     }
+          
+    };
 }
 
 class ConversationController {
@@ -77,7 +113,7 @@ class ConversationController {
       if (business_id) {
         const access = await getBusinessAndValidateAccess(
           business_id,
-          req.user._id
+          req.user
         );
 
         if (access.error) return res.status(403).json({ error: access.error });
@@ -328,7 +364,7 @@ class ConversationController {
 
       const access = await getBusinessAndValidateAccess(
         business_id,
-        req.user._id
+        req.user
       );
       if (access.error) return res.status(403).json({ error: access.error });
 
@@ -468,7 +504,7 @@ class ConversationController {
 
       const access = await getBusinessAndValidateAccess(
         business_id,
-        req.user._id
+        req.user
       );
       if (access.error) return res.status(403).json({ error: access.error });
 
@@ -517,7 +553,7 @@ class ConversationController {
 
       const access = await getBusinessAndValidateAccess(
         business_id,
-        req.user._id
+        req.user
       );
       if (access.error) return res.status(403).json({ error: access.error });
 
@@ -578,7 +614,7 @@ class ConversationController {
       // Access control
       const access = await getBusinessAndValidateAccess(
         business_id,
-        req.user._id
+        req.user
       );
       if (access.error) return res.status(403).json({ error: access.error });
 
@@ -652,7 +688,7 @@ class ConversationController {
 
       const access = await getBusinessAndValidateAccess(
         business_id,
-        req.user._id
+        req.user
       );
       if (access.error) {
         return res.status(403).json({ error: access.error });
@@ -708,7 +744,7 @@ class ConversationController {
 
       const access = await getBusinessAndValidateAccess(
         business_id,
-        req.user._id
+        req.user
       );
       if (access.error) return res.status(403).json({ error: access.error });
 
