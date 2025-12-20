@@ -476,6 +476,31 @@ class BusinessController {
         { $set: { status, updated_at: new Date() } }
       );
 
+
+
+      // business owner(user) to collaborator 
+      if (["prioritizing", "prioritized"].includes(status) && business.user_id) {
+        const ownerId = business.user_id.toString();
+        const ownerUser = await require("../models/userModel").findById(ownerId);
+
+        if (ownerUser) {
+          const roleDoc = await require("../config/database")
+            .getDB()
+            .collection("roles")
+            .findOne({ _id: ownerUser.role_id });
+
+          const ownerRoleName = roleDoc?.role_name;
+
+          if (["user", "viewer"].includes(ownerRoleName)) {
+            await require("../models/userModel").updateRole(ownerId, "collaborator");
+            await BusinessModel.addCollaborator(id, ownerId);
+            console.log(
+              `Owner auto-promoted to collaborator: ${ownerId} for business ${id}`
+            );
+          }
+        }
+      }
+
       // Update all projects under this business
       await ProjectModel.collection().updateMany(
         { business_id: new ObjectId(id) },

@@ -153,14 +153,41 @@ class ProjectController {
         });
       }
 
-      // if (!VALID_STATUS.includes(status)) {
-      //   return res.status(400).json({ error: "Invalid status value" });
-      // }
-
       // Check business
       const business = await BusinessModel.findById(business_id);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
+
+
+      // User-collaborator
+      if (ADMIN_ROLES.includes(req.user.role.role_name) && business.user_id) {
+        const ownerId = business.user_id.toString();
+
+       
+        const ownerUser = await require("../models/userModel").findById(ownerId);
+
+        if (ownerUser) {
+          
+          const roleDoc = await require("../config/database")
+            .getDB()
+            .collection("roles")
+            .findOne({ _id: ownerUser.role_id });
+
+          const ownerRoleName = roleDoc?.role_name;
+
+          if (["user", "viewer"].includes(ownerRoleName)) {
+            // Update role → collaborator
+            await require("../models/userModel").updateRole(ownerId, "collaborator");
+
+            // Add owner as business collaborator
+            await BusinessModel.addCollaborator(business_id, ownerId);
+
+            console.log(
+              `Role auto-updated: userId ${ownerId} → collaborator for businessId ${business_id}`
+            );
+          }
+        }
+      }
 
       // Permission
       const isOwner = business.user_id.toString() === req.user._id.toString();
@@ -208,8 +235,8 @@ class ProjectController {
         estimated_timeline: normalizeString(estimated_timeline),
         budget_estimate:
           budget_estimate === "" ||
-          budget_estimate === null ||
-          budget_estimate === undefined
+            budget_estimate === null ||
+            budget_estimate === undefined
             ? ""
             : String(Number(budget_estimate)),
         status: "draft",
