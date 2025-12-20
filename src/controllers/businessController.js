@@ -45,7 +45,6 @@ class BusinessController {
         targetUserId = new ObjectId(req.user._id);
       }
 
-
       let owned = [];
       let collabs = [];
 
@@ -53,14 +52,11 @@ class BusinessController {
         ["company_admin", "viewer"].includes(req.user.role.role_name) &&
         !user_id
       ) {
-
         const companyUsers = await UserModel.getAll({
           company_id: req.user.company_id,
         });
 
-        const companyUserIds = companyUsers.map(
-          (u) => new ObjectId(u._id)
-        );
+        const companyUserIds = companyUsers.map((u) => new ObjectId(u._id));
 
         owned = await BusinessModel.findByUserIds(companyUserIds);
         collabs = await BusinessModel.findByCollaborator(req.user._id);
@@ -69,7 +65,6 @@ class BusinessController {
         collabs = await BusinessModel.findByCollaborator(targetUserId);
       }
 
-
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
       const collaborating_businesses = collabs.filter(
         (b) => !ownedIds.has(b._id.toString())
@@ -77,14 +72,14 @@ class BusinessController {
 
       // check business with started projects
       const allBusinesses = [...owned, ...collaborating_businesses];
-      const businessIds = allBusinesses.map(
-        (b) => new ObjectId(b._id)
-      );
+      const businessIds = allBusinesses.map((b) => new ObjectId(b._id));
 
-      const businessesWithProjects = await ProjectModel.collection()
-        .distinct("business_id", {
+      const businessesWithProjects = await ProjectModel.collection().distinct(
+        "business_id",
+        {
           business_id: { $in: businessIds },
-        });
+        }
+      );
 
       const businessHasProjectSet = new Set(
         businessesWithProjects.map((id) => id.toString())
@@ -181,11 +176,11 @@ class BusinessController {
               financial_document_info:
                 business.has_financial_document && business.financial_document
                   ? {
-                    filename: business.financial_document.original_name,
-                    upload_date: business.financial_document.upload_date,
-                    file_size: business.financial_document.file_size,
-                    file_type: business.financial_document.file_type,
-                  }
+                      filename: business.financial_document.original_name,
+                      upload_date: business.financial_document.upload_date,
+                      file_size: business.financial_document.file_size,
+                      file_type: business.financial_document.file_type,
+                    }
                   : null,
               question_statistics: {
                 total_questions: totalQuestions,
@@ -200,9 +195,7 @@ class BusinessController {
                 included_phases: ALLOWED_PHASES,
               },
               access,
-              has_projects: businessHasProjectSet.has(
-                business._id.toString()
-              ),
+              has_projects: businessHasProjectSet.has(business._id.toString()),
             };
           })
         );
@@ -382,16 +375,20 @@ class BusinessController {
           .status(400)
           .json({ error: "Owner cannot be added as collaborator" });
       }
+      const alreadyAssigned = (business.collaborators || []).some(
+        (id) => id.toString() === collaboratorId
+      );
+
+      if (alreadyAssigned) {
+        return res.status(400).json({
+          error: "This collaborator already assigned in this business",
+        });
+      }
 
       const addResult = await BusinessModel.addCollaborator(
         businessId,
         collaboratorId
       );
-      if (addResult.modifiedCount === 0 && addResult.matchedCount === 1) {
-        return res
-          .status(200)
-          .json({ message: "Collaborator already assigned or no change" });
-      }
 
       if (typeof logAuditEvent === "function") {
         await logAuditEvent(req.user._id, "collaborator_assigned", {
