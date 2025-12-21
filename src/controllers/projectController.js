@@ -218,6 +218,27 @@ class ProjectController {
       };
 
       const insertedId = await ProjectModel.create(data);
+      
+      // Ensure the business owner is always a collaborator once projects exist
+      try {
+        if (business.user_id) {
+          const ownerIdStr = business.user_id.toString();
+          const alreadyCollaborator = Array.isArray(business.collaborators)
+            ? business.collaborators.some((id) => id.toString() === ownerIdStr)
+            : false;
+
+          if (!alreadyCollaborator) {
+            await BusinessModel.addCollaborator(
+              business._id.toString(),
+              ownerIdStr
+            );
+          }
+        }
+      } catch (collabErr) {
+        console.error("Failed to auto-assign owner as collaborator:", collabErr);
+        // We do not throw here to avoid blocking project creation if this step fails
+      }
+
       const raw = await ProjectModel.findById(insertedId);
       const [project] = await ProjectModel.populateCreatedBy(raw);
 
