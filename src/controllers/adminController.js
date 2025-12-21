@@ -215,6 +215,51 @@ class AdminController {
     }
   }
 
+
+static async updateUserRole(req, res) {
+  try {
+    
+    const { user_id } = req.params;
+    const { role } = req.body;
+
+
+    if (!ObjectId.isValid(user_id)) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    if (!role) {
+      return res.status(400).json({ error: "Role is required" });
+    }
+
+    const allowedRoles = ["user", "viewer", "collaborator", "company_admin"];
+
+    if (!allowedRoles.includes(role.toLowerCase())) {
+      return res.status(400).json({
+        error: `Invalid role. Allowed roles: ${allowedRoles.join(", ")}`,
+      });
+    }
+
+    const targetUser = await UserModel.findById(user_id);
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    await UserModel.updateRole(user_id, role.toLowerCase());
+
+    return res.json({
+      message: "User role updated successfully",
+      user_id,
+      new_role: role.toLowerCase(),
+      updated_by: "super_admin",
+    });
+  } catch (error) {
+    console.error("Failed to update user role:", error);
+    return res.status(500).json({ error: "Failed to update user role" });
+  }
+}
+
+
+
   static async getAuditTrail(req, res) {
     try {
       const {
