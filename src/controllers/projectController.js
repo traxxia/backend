@@ -515,6 +515,7 @@ class ProjectController {
 };
 
 if (business) {
+  // All users who have rankings for this business
   const allRankingUserIds = await ProjectRankingModel.collection()
     .distinct("user_id", {
       business_id: new ObjectId(business_id),
@@ -531,9 +532,6 @@ if (business) {
     locked_users_count: lockedUserIds.length,
   };
 }
-
-
-
       if (rankings.length === 0) {
         return res.json({
           user_id,
