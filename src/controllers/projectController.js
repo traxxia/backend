@@ -510,27 +510,28 @@ class ProjectController {
       const business = await BusinessModel.findById(business_id);
 
       let ranking_lock_summary = {
-        locked_users_count: 0,
-        total_users: 0,
-      };
+  locked_users_count: 0,
+  total_users: 0,
+};
 
-      if (business) {
-        // total_users should represent only collaborators eligible to rank
-        const total_users = Array.isArray(business.collaborators)
-          ? business.collaborators.length
-          : 0;
+if (business) {
+  const allRankingUserIds = await ProjectRankingModel.collection()
+    .distinct("user_id", {
+      business_id: new ObjectId(business_id),
+    });
 
-        const lockedUserIds = await ProjectRankingModel.collection()
-          .distinct("user_id", {
-            business_id: new ObjectId(business_id),
-            locked: true,
-          });
+  const lockedUserIds = await ProjectRankingModel.collection()
+    .distinct("user_id", {
+      business_id: new ObjectId(business_id),
+      locked: true,
+    });
 
-        ranking_lock_summary = {
-          locked_users_count: lockedUserIds.length,
-          total_users,
-        };
-      }
+  ranking_lock_summary = {
+    total_users: allRankingUserIds.length,
+    locked_users_count: lockedUserIds.length,
+  };
+}
+
 
 
       if (rankings.length === 0) {
@@ -599,23 +600,23 @@ class ProjectController {
 
 
     try {
-      const { business_id } = req.query;
+      const { business_id, admin_user_id } = req.query; 
 
-      if (!ObjectId.isValid(business_id)) {
-        return res.status(400).json({ error: "Invalid business_id" });
-      }
+    if (!ObjectId.isValid(business_id)) {
+      return res.status(400).json({ error: "Invalid business_id" });
+    }
 
-      const business = await BusinessModel.findById(business_id);
-      if (!business) {
-        return res.status(404).json({ error: "Business not found" });
-      }
+    if (!ObjectId.isValid(admin_user_id)) {
+      return res.status(400).json({ error: "Invalid admin_user_id" });
+    }
 
-      const adminUserId = business.user_id;
+    const business = await BusinessModel.findById(business_id);
+    if (!business) return res.status(404).json({ error: "Business not found" });
 
-      const rankings = await ProjectRankingModel.findByUserAndBusiness(
-        adminUserId,
-        business_id
-      );
+    const rankings = await ProjectRankingModel.findByUserAndBusiness(
+      admin_user_id,
+      business_id
+    );
 
       const projects = await ProjectModel.findAll({
         business_id: new ObjectId(business_id),
@@ -632,7 +633,7 @@ class ProjectController {
       projects.forEach(p => {
         const rank = rankMap[p._id.toString()] ?? null;
         const item = {
-          admin_user_id: adminUserId,
+          admin_user_id: admin_user_id,
           business_id,
           project_id: p._id,
           rank,
@@ -654,7 +655,7 @@ class ProjectController {
       const response = [...ranked, ...unranked].map(({ created_at, ...rest }) => rest);
 
       res.json({
-        admin_user_id: adminUserId,
+        admin_user_id: admin_user_id,
         business_id,
         projects: response,
       });
