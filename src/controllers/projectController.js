@@ -196,7 +196,7 @@ class ProjectController {
       );
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
 
-      // NOTE: Owner alone cannot work on projects unless also collaborator
+      //Owner alone cannot work on projects unless also collaborator
       const permissions = getProjectPermissions({
         businessStatus: business.status,
         isOwner,
