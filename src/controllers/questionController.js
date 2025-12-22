@@ -187,9 +187,20 @@ class QuestionController {
 
       const conversations = await ConversationModel.findByFilter(conversationFilter);
 
+      // const answeredQuestionIds = new Set(
+      //   conversations.map(conv => conv.question_id?.toString()).filter(Boolean)
+      // );
+
       const answeredQuestionIds = new Set(
-        conversations.map(conv => conv.question_id?.toString()).filter(Boolean)
-      );
+  conversations
+    .filter(conv =>
+      conv.answer_text &&
+      conv.answer_text !== '[Question Skipped]'
+    )
+    .map(conv => conv.question_id?.toString())
+    .filter(Boolean)
+);
+
 
       const missingQuestions = questionsToCheck.filter(q =>
         !answeredQuestionIds.has(q._id.toString())
@@ -336,50 +347,113 @@ class QuestionController {
     }
   }
 
+  // static async delete(req, res) {
+  //   try {
+  //     const questionId = req.params.id;
+
+  //     if (!ObjectId.isValid(questionId)) {
+  //       return res.status(400).json({ error: 'Invalid question ID' });
+  //     }
+
+  //     const question = await QuestionModel.findById(questionId);
+  //     if (!question) {
+  //       return res.status(404).json({ error: 'Question not found' });
+  //     }
+
+  //     const conversationCount = await ConversationModel.countDocuments({ 
+  //       question_id: new ObjectId(questionId) 
+  //     });
+
+  //     if (conversationCount > 0) {
+  //       return res.status(400).json({
+  //         error: 'Cannot delete question with existing conversations',
+  //         conversation_count: conversationCount
+  //       });
+  //     }
+
+  //     const result = await QuestionModel.delete(questionId);
+
+  //     if (result.deletedCount === 0) {
+  //       return res.status(500).json({ error: 'Failed to delete question' });
+  //     }
+
+  //     res.json({
+  //       message: 'Question deleted successfully',
+  //       deleted_question: {
+  //         id: questionId,
+  //         question_text: question.question_text,
+  //         phase: question.phase
+  //       }
+  //     });
+
+  //   } catch (error) {
+  //     console.error('Failed to delete question:', error);
+  //     res.status(500).json({ error: 'Failed to delete question' });
+  //   }
+  // }
+
   static async delete(req, res) {
-    try {
-      const questionId = req.params.id;
+  try {
+    const questionId = req.params.id;
+    const { delete_mode = 'preserve_answers' } = req.body;
 
-      if (!ObjectId.isValid(questionId)) {
-        return res.status(400).json({ error: 'Invalid question ID' });
-      }
-
-      const question = await QuestionModel.findById(questionId);
-      if (!question) {
-        return res.status(404).json({ error: 'Question not found' });
-      }
-
-      const conversationCount = await ConversationModel.countDocuments({ 
-        question_id: new ObjectId(questionId) 
-      });
-
-      if (conversationCount > 0) {
-        return res.status(400).json({
-          error: 'Cannot delete question with existing conversations',
-          conversation_count: conversationCount
-        });
-      }
-
-      const result = await QuestionModel.delete(questionId);
-
-      if (result.deletedCount === 0) {
-        return res.status(500).json({ error: 'Failed to delete question' });
-      }
-
-      res.json({
-        message: 'Question deleted successfully',
-        deleted_question: {
-          id: questionId,
-          question_text: question.question_text,
-          phase: question.phase
-        }
-      });
-
-    } catch (error) {
-      console.error('Failed to delete question:', error);
-      res.status(500).json({ error: 'Failed to delete question' });
+    if (!ObjectId.isValid(questionId)) {
+      return res.status(400).json({ error: 'Invalid question ID' });
     }
+
+    const question = await QuestionModel.findById(questionId);
+    if (!question) {
+      return res.status(404).json({ error: 'Question not found' });
+    }
+
+    const questionObjectId = new ObjectId(questionId);
+
+    // OPTION 1: PERMANENT DELETE
+    if (delete_mode === 'permanent') {
+      await ConversationModel.deleteMany({
+        question_id: questionObjectId
+      });
+
+      await QuestionModel.delete(questionId);
+
+      return res.json({
+        message: 'Question and all related answers permanently deleted',
+        delete_mode: 'permanent'
+      });
+    }
+
+    // OPTION 2: DELETE QUESTION BUT PRESERVE ANSWERS
+    await ConversationModel.updateMany(
+      { question_id: questionObjectId },
+      {
+        $set: {
+          question_deleted: true,
+          preserved_content: {
+            question_text: question.question_text,
+            objective: question.objective,
+            required_info: question.required_info,
+            used_for: question.used_for
+          }
+        }
+      }
+    );
+
+    await QuestionModel.update(questionId, {
+      is_active: false,
+      deleted_at: new Date()
+    });
+
+    return res.json({
+      message: 'Question deleted, but the answered content will be used for regeneration',
+      delete_mode: 'preserve_answers'
+    });
+
+  } catch (error) {
+    console.error('Failed to delete question:', error);
+    res.status(500).json({ error: 'Failed to delete question' });
   }
+}
+
 
   static async update(req, res) {
     try {

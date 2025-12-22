@@ -32,6 +32,16 @@ class ConversationModel {
       .updateOne(filter, update, options);
   }
 
+
+  static async updateMany(filter, update, options = {}) {
+  const db = getDB();
+  return await db
+    .collection('user_business_conversations')
+    .updateMany(filter, update, options);
+}
+
+
+
   static async deleteMany(filter) {
     const db = getDB();
     return await db.collection('user_business_conversations')
