@@ -5,7 +5,7 @@ const ProjectRankingModel = require("../models/projectRankingModel");
 
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
-const PROJECT_TYPES = ["immediate", "short_term", "long_term"]
+const PROJECT_TYPES = ["immediate", "short_term", "long_term"];
 
 // Permission matrix for ALL project actions
 function getProjectPermissions({
@@ -58,6 +58,21 @@ function normalizeBudget(value) {
   }
   const num = Number(value);
   return isNaN(num) ? null : num;
+}
+
+// Normalize and validate project_type, returning canonical value or null
+function normalizeProjectType(value) {
+  if (value === undefined || value === null || value === "") return null;
+
+  const v = String(value).trim().toLowerCase();
+
+  const map = {
+    immediate_action: "immediate action",
+    "short_term_initiative": "short term initiative",
+    "long_term_shift": "long term shift",
+  };
+
+  return map[v] || null;
 }
 
 class ProjectController {
@@ -144,6 +159,7 @@ class ProjectController {
         success_metrics,
         estimated_timeline,
         budget_estimate,
+        project_type,
       } = req.body;
 
       // Required fields
@@ -161,6 +177,15 @@ class ProjectController {
       const business = await BusinessModel.findById(business_id);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
+
+      // Validate project_type if provided
+      const normalizedProjectType = normalizeProjectType(project_type);
+      if (project_type && !normalizedProjectType) {
+        return res.status(400).json({
+          error: "Invalid project_type value",
+          allowed_values: PROJECT_TYPES,
+        });
+      }
 
       // Permission
       const isOwner = business.user_id.toString() === req.user._id.toString();
@@ -206,6 +231,7 @@ class ProjectController {
         expected_outcome: normalizeString(expected_outcome),
         success_metrics: normalizeString(success_metrics),
         estimated_timeline: normalizeString(estimated_timeline),
+        project_type: normalizedProjectType,
         budget_estimate:
           budget_estimate === "" ||
           budget_estimate === null ||
@@ -305,6 +331,16 @@ class ProjectController {
         return res.status(400).json({ error: "Invalid status value" });
       }
 
+      const normalizedUpdateProjectType = normalizeProjectType(
+        req.body.project_type
+      );
+      if (req.body.project_type && !normalizedUpdateProjectType) {
+        return res.status(400).json({
+          error: "Invalid project_type value",
+          allowed_values: PROJECT_TYPES,
+        });
+      }
+
       // === FIXED: Normalize fields safely for strict string-only schema ===
       const updateData = {
         updated_at: new Date(),
@@ -356,6 +392,10 @@ class ProjectController {
         updateData.estimated_timeline = normalizeString(
           req.body.estimated_timeline
         );
+
+      if (req.body.project_type !== undefined) {
+        updateData.project_type = normalizedUpdateProjectType;
+      }
 
       //budget_estimate must ALWAYS be a string (never null)
       if (req.body.budget_estimate !== undefined) {
