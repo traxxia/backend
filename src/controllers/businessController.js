@@ -5,6 +5,8 @@ const ConversationModel = require("../models/conversationModel");
 const QuestionModel = require("../models/questionModel");
 const ProjectModel = require("../models/projectModel");
 const { logAuditEvent } = require("../services/auditService");
+const { getDB } = require("../config/database") 
+
 const {
   MAX_BUSINESSES_PER_USER,
   ALLOWED_PHASES,
@@ -12,11 +14,42 @@ const {
 
 const VALID_ADMIN_ROLES = ["super_admin", "company_admin"];
 
+
+
 class BusinessController {
+
+
   static async getAll(req, res) {
     try {
       const { user_id } = req.query;
       let targetUserId;
+
+
+const db = getDB();
+
+// Fetch the role document for company_admin
+const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
+const companyAdminRoleId = companyAdminRole?._id;
+
+let companyAdminIds = [];
+
+if (req.user.company_id && companyAdminRoleId) {
+  try {
+    const companyAdmins = await UserModel.getAll({
+      company_id: req.user.company_id,
+      role_id: companyAdminRoleId
+    });
+
+    // Ensure we always have an array of string IDs
+    companyAdminIds = Array.isArray(companyAdmins)
+      ? companyAdmins.map(admin => admin._id.toString())
+      : [];
+
+  } catch (err) {
+    console.error("Failed to fetch company admins:", err);
+    companyAdminIds = [];
+  }
+}
 
       if (user_id) {
         if (!VALID_ADMIN_ROLES.includes(req.user.role.role_name)) {
@@ -167,6 +200,7 @@ class BusinessController {
 
             return {
               ...business,
+              company_admin_id: companyAdminIds,
               city: business.city || "",
               country: business.country || "",
               location_display: [business.city, business.country]
@@ -204,6 +238,11 @@ class BusinessController {
       const enhancedOwned = await enhance(owned);
       const enhancedCollaborating = await enhance(collaborating_businesses);
 
+//       console.log("DEBUG companyAdminIds:", companyAdminIds);
+// console.log("DEBUG targetUserId:", targetUserId.toString());
+// console.log("DEBUG owned:", owned.map(b => b._id.toString()));
+// console.log("DEBUG collaborating_businesses:", collaborating_businesses.map(b => b._id.toString()));
+
       res.json({
         businesses: enhancedOwned,
         collaborating_businesses: enhancedCollaborating,
@@ -221,6 +260,7 @@ class BusinessController {
           phases_excluded: ["good"],
         },
         user_id: targetUserId.toString(),
+        company_admin_ids: companyAdminIds
       });
     } catch (error) {
       console.error("Failed to fetch businesses:", error);
@@ -472,6 +512,31 @@ class BusinessController {
         { _id: new ObjectId(id) },
         { $set: { status, updated_at: new Date() } }
       );
+
+
+
+      // business owner(user) to collaborator 
+      if (["prioritizing", "prioritized"].includes(status) && business.user_id) {
+        const ownerId = business.user_id.toString();
+        const ownerUser = await require("../models/userModel").findById(ownerId);
+
+        if (ownerUser) {
+          const roleDoc = await require("../config/database")
+            .getDB()
+            .collection("roles")
+            .findOne({ _id: ownerUser.role_id });
+
+          const ownerRoleName = roleDoc?.role_name;
+
+          if (["user", "viewer"].includes(ownerRoleName)) {
+            await require("../models/userModel").updateRole(ownerId, "collaborator");
+            await BusinessModel.addCollaborator(id, ownerId);
+            console.log(
+              `Owner auto-promoted to collaborator: ${ownerId} for business ${id}`
+            );
+          }
+        }
+      }
 
       // Update all projects under this business
       await ProjectModel.collection().updateMany(
