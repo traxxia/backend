@@ -12,7 +12,6 @@ const {
   ALLOWED_PHASES,
 } = require("../config/constants");
 
-
 const VALID_ADMIN_ROLES = ["super_admin", "company_admin"];
 
 
@@ -79,10 +78,6 @@ if (req.user.company_id && companyAdminRoleId) {
         targetUserId = new ObjectId(req.user._id);
       }
 
-
-
-
-
       let owned = [];
       let collabs = [];
 
@@ -90,14 +85,11 @@ if (req.user.company_id && companyAdminRoleId) {
         ["company_admin", "viewer"].includes(req.user.role.role_name) &&
         !user_id
       ) {
-
         const companyUsers = await UserModel.getAll({
           company_id: req.user.company_id,
         });
 
-        const companyUserIds = companyUsers.map(
-          (u) => new ObjectId(u._id)
-        );
+        const companyUserIds = companyUsers.map((u) => new ObjectId(u._id));
 
         owned = await BusinessModel.findByUserIds(companyUserIds);
         collabs = await BusinessModel.findByCollaborator(req.user._id);
@@ -106,7 +98,6 @@ if (req.user.company_id && companyAdminRoleId) {
         collabs = await BusinessModel.findByCollaborator(targetUserId);
       }
 
-
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
       const collaborating_businesses = collabs.filter(
         (b) => !ownedIds.has(b._id.toString())
@@ -114,14 +105,14 @@ if (req.user.company_id && companyAdminRoleId) {
 
       // check business with started projects
       const allBusinesses = [...owned, ...collaborating_businesses];
-      const businessIds = allBusinesses.map(
-        (b) => new ObjectId(b._id)
-      );
+      const businessIds = allBusinesses.map((b) => new ObjectId(b._id));
 
-      const businessesWithProjects = await ProjectModel.collection()
-        .distinct("business_id", {
+      const businessesWithProjects = await ProjectModel.collection().distinct(
+        "business_id",
+        {
           business_id: { $in: businessIds },
-        });
+        }
+      );
 
       const businessHasProjectSet = new Set(
         businessesWithProjects.map((id) => id.toString())
@@ -219,11 +210,11 @@ if (req.user.company_id && companyAdminRoleId) {
               financial_document_info:
                 business.has_financial_document && business.financial_document
                   ? {
-                    filename: business.financial_document.original_name,
-                    upload_date: business.financial_document.upload_date,
-                    file_size: business.financial_document.file_size,
-                    file_type: business.financial_document.file_type,
-                  }
+                      filename: business.financial_document.original_name,
+                      upload_date: business.financial_document.upload_date,
+                      file_size: business.financial_document.file_size,
+                      file_type: business.financial_document.file_type,
+                    }
                   : null,
               question_statistics: {
                 total_questions: totalQuestions,
@@ -238,9 +229,7 @@ if (req.user.company_id && companyAdminRoleId) {
                 included_phases: ALLOWED_PHASES,
               },
               access,
-              has_projects: businessHasProjectSet.has(
-                business._id.toString(),                
-              ),
+              has_projects: businessHasProjectSet.has(business._id.toString()),
             };
           })
         );
@@ -328,6 +317,7 @@ if (req.user.company_id && companyAdminRoleId) {
         city: city ? city.trim() : "",
         country: country ? country.trim() : "",
         collaborators: [],
+        status: "draft",
       };
 
       const businessId = await BusinessModel.create(businessData);
@@ -426,16 +416,20 @@ if (req.user.company_id && companyAdminRoleId) {
           .status(400)
           .json({ error: "Owner cannot be added as collaborator" });
       }
+      const alreadyAssigned = (business.collaborators || []).some(
+        (id) => id.toString() === collaboratorId
+      );
+
+      if (alreadyAssigned) {
+        return res.status(400).json({
+          error: "This collaborator already assigned in this business",
+        });
+      }
 
       const addResult = await BusinessModel.addCollaborator(
         businessId,
         collaboratorId
       );
-      if (addResult.modifiedCount === 0 && addResult.matchedCount === 1) {
-        return res
-          .status(200)
-          .json({ message: "Collaborator already assigned or no change" });
-      }
 
       if (typeof logAuditEvent === "function") {
         await logAuditEvent(req.user._id, "collaborator_assigned", {
@@ -495,7 +489,7 @@ if (req.user.company_id && companyAdminRoleId) {
       const { id } = req.params;
       const { status } = req.body;
 
-      const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
+      const VALID_STATUS = ["prioritizing", "prioritized", "launched"];
       const ADMIN_ROLES = ["company_admin", "super_admin"];
 
       if (!VALID_STATUS.includes(status)) {
