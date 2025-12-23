@@ -100,7 +100,28 @@ class ProjectController {
       const projects = await ProjectModel.populateCreatedBy(raw);
 
 
-      res.json({ total, count: projects.length, projects });
+      let ranking_lock_summary = { locked_users_count: 0, total_users: 0 };
+
+if (business_id && ObjectId.isValid(business_id)) {
+  const allRankingUserIds = await ProjectRankingModel.collection()
+    .distinct("user_id", {
+      business_id: new ObjectId(business_id),
+    });
+
+  const lockedUserIds = await ProjectRankingModel.collection()
+    .distinct("user_id", {
+      business_id: new ObjectId(business_id),
+      locked: true,
+    });
+
+  ranking_lock_summary = {
+    total_users: allRankingUserIds.length,
+    locked_users_count: lockedUserIds.length,
+  };
+}
+
+
+      res.json({ total, count: projects.length, projects, ranking_lock_summary, });
     } catch (err) {
       console.error("PROJECT GET ALL ERR:", err);
       res.status(500).json({ error: "Server error" });
