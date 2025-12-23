@@ -20,7 +20,7 @@ router.get('/audit-trail/event-types', authenticateToken, requireAdmin, AdminCon
 
 // User data route
 router.get('/user-data/:user_id', authenticateToken, requireAdmin, AdminController.getUserData);
-router.put('/users/:user_id/role',authenticateToken,requireSuperAdmin, AdminController.updateUserRole);
+router.put('/users/:user_id/role',authenticateToken, requireAdmin, AdminController.updateUserRole);
 
 // Question routes
 router.post('/questions', authenticateToken, requireSuperAdmin, QuestionController.create);
