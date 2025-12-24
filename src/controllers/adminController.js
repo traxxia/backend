@@ -250,15 +250,13 @@ static async updateUserRole(req, res) {
       message: "User role updated successfully",
       user_id,
       new_role: role.toLowerCase(),
-      updated_by: "super_admin",
+      role: req.user.role.role_name,
     });
   } catch (error) {
     console.error("Failed to update user role:", error);
     return res.status(500).json({ error: "Failed to update user role" });
   }
 }
-
-
 
   static async getAuditTrail(req, res) {
     try {

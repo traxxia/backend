@@ -5,7 +5,7 @@ const ProjectRankingModel = require("../models/projectRankingModel");
 
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
-const PROJECT_TYPES = ["immediate", "short_term", "long_term"];
+const PROJECT_TYPES = ["immediate_action", "short_term_initiative", "long_term_shift"];
 
 // Permission matrix for ALL project actions
 function getProjectPermissions({
@@ -60,21 +60,6 @@ function normalizeBudget(value) {
   return isNaN(num) ? null : num;
 }
 
-// Normalize and validate project_type, returning canonical value or null
-function normalizeProjectType(value) {
-  if (value === undefined || value === null || value === "") return null;
-
-  const v = String(value).trim().toLowerCase();
-
-  const map = {
-    immediate_action: "immediate action",
-    "short_term_initiative": "short term initiative",
-    "long_term_shift": "long term shift",
-  };
-
-  return map[v] || null;
-}
-
 class ProjectController {
   static async getAll(req, res) {
     try {
@@ -115,7 +100,28 @@ class ProjectController {
       const projects = await ProjectModel.populateCreatedBy(raw);
 
 
-      res.json({ total, count: projects.length, projects });
+      let ranking_lock_summary = { locked_users_count: 0, total_users: 0 };
+
+if (business_id && ObjectId.isValid(business_id)) {
+  const allRankingUserIds = await ProjectRankingModel.collection()
+    .distinct("user_id", {
+      business_id: new ObjectId(business_id),
+    });
+
+  const lockedUserIds = await ProjectRankingModel.collection()
+    .distinct("user_id", {
+      business_id: new ObjectId(business_id),
+      locked: true,
+    });
+
+  ranking_lock_summary = {
+    total_users: allRankingUserIds.length,
+    locked_users_count: lockedUserIds.length,
+  };
+}
+
+
+      res.json({ total, count: projects.length, projects, ranking_lock_summary, });
     } catch (err) {
       console.error("PROJECT GET ALL ERR:", err);
       res.status(500).json({ error: "Server error" });
@@ -160,6 +166,7 @@ class ProjectController {
         estimated_timeline,
         budget_estimate,
         project_type,
+        
       } = req.body;
 
       // Required fields
@@ -232,11 +239,19 @@ class ProjectController {
         });
       }
 
+      if (!project_type || !PROJECT_TYPES.includes(project_type)) {
+  return res.status(400).json({
+    error: "project_type must be one of immediate_action, short_term_initiative, long_term_shift",
+  });
+}
+
+
       // Normalize fields for MongoDB validation
       const data = {
         business_id: new ObjectId(business_id),
         user_id: new ObjectId(req.user._id),
         project_name: project_name.trim(),
+        project_type,
         description: normalizeString(description),
         why_this_matters: normalizeString(why_this_matters),
         impact: normalizeString(impact),
@@ -249,7 +264,6 @@ class ProjectController {
         expected_outcome: normalizeString(expected_outcome),
         success_metrics: normalizeString(success_metrics),
         estimated_timeline: normalizeString(estimated_timeline),
-        project_type: normalizedProjectType,
         budget_estimate:
           budget_estimate === "" ||
             budget_estimate === null ||
@@ -349,16 +363,6 @@ class ProjectController {
         return res.status(400).json({ error: "Invalid status value" });
       }
 
-      const normalizedUpdateProjectType = normalizeProjectType(
-        req.body.project_type
-      );
-      if (req.body.project_type && !normalizedUpdateProjectType) {
-        return res.status(400).json({
-          error: "Invalid project_type value",
-          allowed_values: PROJECT_TYPES,
-        });
-      }
-
       // === FIXED: Normalize fields safely for strict string-only schema ===
       const updateData = {
         updated_at: new Date(),
@@ -410,10 +414,6 @@ class ProjectController {
         updateData.estimated_timeline = normalizeString(
           req.body.estimated_timeline
         );
-
-      if (req.body.project_type !== undefined) {
-        updateData.project_type = normalizedUpdateProjectType;
-      }
 
       //budget_estimate must ALWAYS be a string (never null)
       if (req.body.budget_estimate !== undefined) {
