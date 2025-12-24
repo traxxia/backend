@@ -241,7 +241,7 @@ if (business_id && ObjectId.isValid(business_id)) {
 
       if (!project_type || !PROJECT_TYPES.includes(project_type)) {
   return res.status(400).json({
-    error: "project_type must be one of immediate_action, short_term_initiative, long_term_shift",
+    error: "Invalid values",
   });
 }
 
