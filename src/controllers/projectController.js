@@ -6,7 +6,7 @@ const { getDB } = require("../config/database");
 
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
-const PROJECT_TYPES = ["immediate_action", "short_term_initiative", "long_term_shift"];
+const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 
 // Permission matrix for ALL project actions
 function getProjectPermissions({
