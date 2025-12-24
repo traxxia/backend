@@ -2,6 +2,7 @@ const { ObjectId } = require("mongodb");
 const ProjectModel = require("../models/projectModel");
 const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
+const { getDB } = require("../config/database");
 
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
@@ -62,6 +63,8 @@ function normalizeBudget(value) {
 
 class ProjectController {
   static async getAll(req, res) {
+    const db = getDB();
+
     try {
       const {
         business_id,
@@ -102,24 +105,39 @@ class ProjectController {
 
       let ranking_lock_summary = { locked_users_count: 0, total_users: 0 };
 
-if (business_id && ObjectId.isValid(business_id)) {
-  const allRankingUserIds = await ProjectRankingModel.collection()
-    .distinct("user_id", {
-      business_id: new ObjectId(business_id),
-    });
+      if (business_id && ObjectId.isValid(business_id)) {
+        const business = await BusinessModel.findById(business_id);
+        if (business) {
+          // Owner + collaborators
+          const collaboratorIds = [
+            business.user_id?.toString(),
+            ...(business.collaborators || []).map(id => id.toString())
+          ];
 
-  const lockedUserIds = await ProjectRankingModel.collection()
-    .distinct("user_id", {
-      business_id: new ObjectId(business_id),
-      locked: true,
-    });
+          const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
 
-  ranking_lock_summary = {
-    total_users: allRankingUserIds.length,
-    locked_users_count: lockedUserIds.length,
-  };
-}
+          const users = await db.collection("users").find({
+            _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+          }).toArray();
 
+          // Filter non-admins
+          const nonAdminUserIds = users
+            .filter(u => !ADMIN_ROLES.includes(u.role_name))
+            .map(u => u._id.toString());
+
+          // Locked counts for non-admins only
+          const lockedUserIds = await ProjectRankingModel.collection().distinct("user_id", {
+            business_id: new ObjectId(business_id),
+            locked: true,
+            user_id: { $in: nonAdminUserIds.map(id => new ObjectId(id)) }
+          });
+
+          ranking_lock_summary = {
+            total_users: nonAdminUserIds.length,
+            locked_users_count: lockedUserIds.length
+          };
+        }
+      }
 
       res.json({ total, count: projects.length, projects, ranking_lock_summary, });
     } catch (err) {
@@ -166,7 +184,7 @@ if (business_id && ObjectId.isValid(business_id)) {
         estimated_timeline,
         budget_estimate,
         project_type,
-        
+
       } = req.body;
 
       // Required fields
@@ -186,15 +204,14 @@ if (business_id && ObjectId.isValid(business_id)) {
       if (ADMIN_ROLES.includes(req.user.role.role_name) && business.user_id) {
         const ownerId = business.user_id.toString();
 
-       
+
         const ownerUser = await require("../models/userModel").findById(ownerId);
 
         if (ownerUser) {
-          
-          const roleDoc = await require("../config/database")
-            .getDB()
-            .collection("roles")
-            .findOne({ _id: ownerUser.role_id });
+
+          const db = getDB();
+
+          const roleDoc = await db.collection("roles").findOne({ _id: ownerUser.role_id });
 
           const ownerRoleName = roleDoc?.role_name;
 
@@ -240,10 +257,10 @@ if (business_id && ObjectId.isValid(business_id)) {
       }
 
       if (!project_type || !PROJECT_TYPES.includes(project_type)) {
-  return res.status(400).json({
-    error: "Invalid values",
-  });
-}
+        return res.status(400).json({
+          error: "Invalid values",
+        });
+      }
 
 
       // Normalize fields for MongoDB validation
@@ -276,7 +293,7 @@ if (business_id && ObjectId.isValid(business_id)) {
       };
 
       const insertedId = await ProjectModel.create(data);
-      
+
       // Ensure the business owner is always a collaborator once projects exist
       try {
         if (business.user_id) {
@@ -558,32 +575,51 @@ if (business_id && ObjectId.isValid(business_id)) {
       );
 
       // get users and locking summary
-
       const business = await BusinessModel.findById(business_id);
 
       let ranking_lock_summary = {
-  locked_users_count: 0,
-  total_users: 0,
-};
+        locked_users_count: 0,
+        total_users: 0,
+      };
 
-if (business) {
-  // All users who have rankings for this business
-  const allRankingUserIds = await ProjectRankingModel.collection()
-    .distinct("user_id", {
-      business_id: new ObjectId(business_id),
-    });
+      if (business) {
 
-  const lockedUserIds = await ProjectRankingModel.collection()
-    .distinct("user_id", {
-      business_id: new ObjectId(business_id),
-      locked: true,
-    });
+        // Get all collaborators for the business (exclude admins)
+        const businessDoc = await BusinessModel.findById(business_id);
+        const collaboratorIds = [
+          businessDoc.user_id?.toString(), // owner
+          ...(businessDoc.collaborators || []).map(id => id.toString())
+        ];
 
-  ranking_lock_summary = {
-    total_users: allRankingUserIds.length,
-    locked_users_count: lockedUserIds.length,
-  };
-}
+        // Remove duplicates
+        const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+
+        // Fetch their roles
+        const db = getDB();
+
+        const users = await db.collection("users").find({
+          _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+        }).toArray();
+
+        // Filter out admins
+        const nonAdminUserIds = users
+          .filter(u => !ADMIN_ROLES.includes(u.role_name))
+          .map(u => u._id.toString());
+
+        // Count locked users
+        const lockedUserIds = await ProjectRankingModel.collection()
+          .distinct("user_id", {
+            business_id: new ObjectId(business_id),
+            locked: true,
+            user_id: { $in: nonAdminUserIds.map(id => new ObjectId(id)) }
+          });
+
+        ranking_lock_summary = {
+          total_users: nonAdminUserIds.length,
+          locked_users_count: lockedUserIds.length,
+        };
+
+      }
       if (rankings.length === 0) {
         return res.json({
           user_id,
@@ -650,23 +686,23 @@ if (business) {
 
 
     try {
-      const { business_id, admin_user_id } = req.query; 
+      const { business_id, admin_user_id } = req.query;
 
-    if (!ObjectId.isValid(business_id)) {
-      return res.status(400).json({ error: "Invalid business_id" });
-    }
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
 
-    if (!ObjectId.isValid(admin_user_id)) {
-      return res.status(400).json({ error: "Invalid admin_user_id" });
-    }
+      if (!ObjectId.isValid(admin_user_id)) {
+        return res.status(400).json({ error: "Invalid admin_user_id" });
+      }
 
-    const business = await BusinessModel.findById(business_id);
-    if (!business) return res.status(404).json({ error: "Business not found" });
+      const business = await BusinessModel.findById(business_id);
+      if (!business) return res.status(404).json({ error: "Business not found" });
 
-    const rankings = await ProjectRankingModel.findByUserAndBusiness(
-      admin_user_id,
-      business_id
-    );
+      const rankings = await ProjectRankingModel.findByUserAndBusiness(
+        admin_user_id,
+        business_id
+      );
 
       const projects = await ProjectModel.findAll({
         business_id: new ObjectId(business_id),
