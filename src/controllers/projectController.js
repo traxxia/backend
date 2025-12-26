@@ -7,6 +7,8 @@ const { getDB } = require("../config/database");
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
+const DEFAULT_PROJECT_TYPE = "immediate action";
+
 
 // Permission matrix for ALL project actions
 function getProjectPermissions({
@@ -256,19 +258,25 @@ class ProjectController {
         });
       }
 
-      if (!project_type || !PROJECT_TYPES.includes(project_type)) {
+      // Normalize project_type (allow missing → default)
+      const normalizedProjectType =
+        project_type === undefined || project_type === null || project_type === ""
+          ? DEFAULT_PROJECT_TYPE
+          : project_type;
+
+      if (!PROJECT_TYPES.includes(normalizedProjectType)) {
         return res.status(400).json({
-          error: "Invalid values",
+          error: `project_type must be one of ${PROJECT_TYPES.join(", ")}`,
         });
       }
-
 
       // Normalize fields for MongoDB validation
       const data = {
         business_id: new ObjectId(business_id),
         user_id: new ObjectId(req.user._id),
         project_name: project_name.trim(),
-        project_type,
+        // project_type,
+        project_type: normalizedProjectType,
         description: normalizeString(description),
         why_this_matters: normalizeString(why_this_matters),
         impact: normalizeString(impact),
