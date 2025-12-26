@@ -489,7 +489,7 @@ if (req.user.company_id && companyAdminRoleId) {
       const { id } = req.params;
       const { status } = req.body;
 
-      const VALID_STATUS = ["prioritizing", "prioritized", "launched"];
+      const VALID_STATUS = ["prioritizing", "prioritized", "launched", "reprioritizing"];
       const ADMIN_ROLES = ["company_admin", "super_admin"];
 
       if (!VALID_STATUS.includes(status)) {
@@ -513,10 +513,8 @@ if (req.user.company_id && companyAdminRoleId) {
         { $set: { status, updated_at: new Date() } }
       );
 
-
-
       // business owner(user) to collaborator 
-      if (["prioritizing", "prioritized"].includes(status) && business.user_id) {
+      if (["prioritizing", "prioritized", "reprioritizing"].includes(status) && business.user_id) {
         const ownerId = business.user_id.toString();
         const ownerUser = await require("../models/userModel").findById(ownerId);
 

@@ -4,7 +4,7 @@ const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const { getDB } = require("../config/database");
 
-const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
+const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
@@ -42,12 +42,16 @@ function getProjectPermissions({
         canEdit: false,
       };
 
+    case "reprioritizing":
+      return {
+        canCreate: false,
+        canEdit: isAdmin,
+      }
+
     default:
       return { canCreate: false, canEdit: false };
   }
 }
-
-
 
 // Normalize string fields
 function normalizeString(value) {
@@ -359,6 +363,14 @@ class ProjectController {
           });
         }
       }
+      if (req.body.status === "reprioritizing") {
+        if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+          return res.status(403).json({
+            error: "Only company_admin or super_admin can set project to reprioritizing",
+          });
+        }
+      }
+
 
       // Check access
       const business = await BusinessModel.findById(existing.business_id);
@@ -378,7 +390,10 @@ class ProjectController {
         isAdmin,
       });
 
-      if (!permissions.canEdit) {
+      const canEditProject = existing.status === "reprioritizing" || permissions.canEdit;
+
+
+      if (!canEditProject) {
         return res.status(403).json({
           error: `You cannot edit projects when business is in '${business.status}' state`,
         });
@@ -824,8 +839,51 @@ class ProjectController {
       console.error("PROJECT DELETE ERR:", err);
       res.status(500).json({ error: "Server error" });
     }
+  };
+
+  static async changeStatus(req, res) {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
+      const ADMIN_ROLES = ["company_admin", "super_admin"];
+
+      if (!VALID_STATUS.includes(status)) {
+        return res.status(400).json({ error: "Invalid status value" });
+      }
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({
+          error: "Only company_admin or super_admin can change project status",
+        });
+      }
+
+      const project = await ProjectModel.findById(id);
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+
+      await ProjectModel.collection().updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status, updated_at: new Date() } }
+      );
+
+      res.json({
+        message: "Project status updated successfully",
+        project_id: id,
+        new_status: status,
+      });
+    } catch (err) {
+      console.error("PROJECT STATUS UPDATE ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
   }
+
+
 }
+
+
 
 
 
