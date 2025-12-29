@@ -365,8 +365,8 @@ class ProjectController {
 
         // Ensure business_id is properly an ObjectId
         const businessId = typeof existing.business_id === "string"
-            ? new ObjectId(existing.business_id)
-            : existing.business_id;
+          ? new ObjectId(existing.business_id)
+          : existing.business_id;
 
         await BusinessModel.clearAllowedCollaborators(businessId);
       }
@@ -409,7 +409,7 @@ class ProjectController {
       let canEditProject = false;
 
       if (existing.status === "reprioritizing") {
-        // Only admins or allowed collaborators can edit
+
         if (isAdmin) {
           canEditProject = true;
         } else {
@@ -417,22 +417,14 @@ class ProjectController {
           canEditProject = allowedCollabs.some(id => id.toString() === req.user._id.toString());
         }
       } else {
-        // Normal permission check for other statuses
         canEditProject = permissions.canEdit;
       }
 
-      // Enforce the check
       if (!canEditProject) {
         return res.status(403).json({
           error: `You cannot edit this project in its current status`,
         });
       }
-
-      // if (!canEditProject) {
-      //   return res.status(403).json({
-      //     error: `You cannot edit projects when business is in '${business.status}' state`,
-      //   });
-      // }
 
       if (req.body.status && !VALID_STATUS.includes(req.body.status)) {
         return res.status(400).json({ error: "Invalid status value" });
@@ -546,9 +538,24 @@ class ProjectController {
         }
       }
 
-      // Check Business
       const business = await BusinessModel.findById(business_id);
       if (!business) return res.status(404).json({ error: "Business not found" });
+
+      const isAdmin = ["company_admin", "super_admin"].includes(req.user.role.role_name);
+
+      if (business.status === "reprioritizing") {
+        if (!isAdmin) {
+          const allowed = await BusinessModel.getAllowedRankingCollaborators(business_id);
+
+          const allowedIds = allowed.map(uid => uid.toString());
+
+          if (!allowedIds.includes(user_id.toString())) {
+            return res.status(403).json({
+              error: "You are not allowed to rank during reprioritizing",
+            });
+          }
+        }
+      }
 
       const allProjects = await ProjectModel.findAll({
         business_id: new ObjectId(business_id),

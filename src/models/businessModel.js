@@ -148,6 +148,36 @@ class BusinessModel {
     );
   }
 
+ static async setAllowedRankingCollaborators(businessId, collaboratorIds) {
+  return await this.collection().updateOne(
+    { _id: new ObjectId(businessId) },
+    {
+      $set: {
+        allowed_ranking_collaborators: collaboratorIds.map(id => new ObjectId(id)),
+        updated_at: new Date(),
+      },
+    }
+  );
+}
+
+static async getAllowedRankingCollaborators(businessId) {
+  const business = await this.findById(businessId);
+  return business?.allowed_ranking_collaborators || [];
+}
+
+static async clearAllowedRankingCollaborators(businessId) {
+  return await this.collection().updateOne(
+    { _id: new ObjectId(businessId) },
+    {
+      $set: {
+        allowed_ranking_collaborators: [],
+        updated_at: new Date(),
+      },
+    }
+  );
+}
+
+
 
 }
 

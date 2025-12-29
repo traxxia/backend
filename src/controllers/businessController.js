@@ -4,6 +4,7 @@ const UserModel = require("../models/userModel");
 const ConversationModel = require("../models/conversationModel");
 const QuestionModel = require("../models/questionModel");
 const ProjectModel = require("../models/projectModel");
+const ProjectRankingModel = require("../models/projectRankingModel")
 const { logAuditEvent } = require("../services/auditService");
 const { getDB } = require("../config/database")
 
@@ -465,6 +466,53 @@ class BusinessController {
     }
   }
 
+  static async setAllowedRankingCollaborators(req, res) {
+    try {
+      const { id } = req.params;
+      const { collaborator_ids } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: "Invalid business id" });
+      }
+
+      if (!Array.isArray(collaborator_ids)) {
+        return res.status(400).json({
+          error: "collaborator_ids must be an array of user IDs",
+        });
+      }
+
+      if (!["company_admin", "super_admin"].includes(req.user.role.role_name)) {
+        return res.status(403).json({
+          error: "Only admin can set ranking collaborators",
+        });
+      }
+
+      const business = await BusinessModel.findById(id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // only collaborators of this business are allowed
+      const validIds = collaborator_ids.filter(cid =>
+        (business.collaborators || []).some(
+          bid => bid.toString() === cid.toString()
+        )
+      );
+
+      await BusinessModel.setAllowedRankingCollaborators(id, validIds);
+
+      res.json({
+        message: "Allowed ranking collaborators updated",
+        allowed_ranking_collaborators: validIds,
+      });
+    } catch (err) {
+      console.error("SET RANKING COLLAB ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+
+
   static async assignCollaborator(req, res) {
     try {
       const businessId = req.params.id;
@@ -582,6 +630,17 @@ class BusinessController {
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
+
+      if (status === "reprioritizing") {
+        await ProjectRankingModel.unlockRankingByBusiness(id);
+        await BusinessModel.clearAllowedRankingCollaborators(id);
+      }
+
+      if (status === "launched") {
+        await ProjectRankingModel.lockRankingByBusiness(id);
+        await BusinessModel.clearAllowedRankingCollaborators(id);
+      }
+
 
       // Update business status
       await BusinessModel.collection().updateOne(
