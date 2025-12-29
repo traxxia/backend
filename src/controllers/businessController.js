@@ -5,7 +5,7 @@ const ConversationModel = require("../models/conversationModel");
 const QuestionModel = require("../models/questionModel");
 const ProjectModel = require("../models/projectModel");
 const { logAuditEvent } = require("../services/auditService");
-const { getDB } = require("../config/database") 
+const { getDB } = require("../config/database")
 
 const {
   MAX_BUSINESSES_PER_USER,
@@ -25,31 +25,31 @@ class BusinessController {
       let targetUserId;
 
 
-const db = getDB();
+      const db = getDB();
 
-// Fetch the role document for company_admin
-const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
-const companyAdminRoleId = companyAdminRole?._id;
+      // Fetch the role document for company_admin
+      const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
+      const companyAdminRoleId = companyAdminRole?._id;
 
-let companyAdminIds = [];
+      let companyAdminIds = [];
 
-if (req.user.company_id && companyAdminRoleId) {
-  try {
-    const companyAdmins = await UserModel.getAll({
-      company_id: req.user.company_id,
-      role_id: companyAdminRoleId
-    });
+      if (req.user.company_id && companyAdminRoleId) {
+        try {
+          const companyAdmins = await UserModel.getAll({
+            company_id: req.user.company_id,
+            role_id: companyAdminRoleId
+          });
 
-    // Ensure we always have an array of string IDs
-    companyAdminIds = Array.isArray(companyAdmins)
-      ? companyAdmins.map(admin => admin._id.toString())
-      : [];
+          // Ensure we always have an array of string IDs
+          companyAdminIds = Array.isArray(companyAdmins)
+            ? companyAdmins.map(admin => admin._id.toString())
+            : [];
 
-  } catch (err) {
-    console.error("Failed to fetch company admins:", err);
-    companyAdminIds = [];
-  }
-}
+        } catch (err) {
+          console.error("Failed to fetch company admins:", err);
+          companyAdminIds = [];
+        }
+      }
 
       if (user_id) {
         if (!VALID_ADMIN_ROLES.includes(req.user.role.role_name)) {
@@ -210,11 +210,11 @@ if (req.user.company_id && companyAdminRoleId) {
               financial_document_info:
                 business.has_financial_document && business.financial_document
                   ? {
-                      filename: business.financial_document.original_name,
-                      upload_date: business.financial_document.upload_date,
-                      file_size: business.financial_document.file_size,
-                      file_type: business.financial_document.file_type,
-                    }
+                    filename: business.financial_document.original_name,
+                    upload_date: business.financial_document.upload_date,
+                    file_size: business.financial_document.file_size,
+                    file_type: business.financial_document.file_type,
+                  }
                   : null,
               question_statistics: {
                 total_questions: totalQuestions,
@@ -238,10 +238,10 @@ if (req.user.company_id && companyAdminRoleId) {
       const enhancedOwned = await enhance(owned);
       const enhancedCollaborating = await enhance(collaborating_businesses);
 
-//       console.log("DEBUG companyAdminIds:", companyAdminIds);
-// console.log("DEBUG targetUserId:", targetUserId.toString());
-// console.log("DEBUG owned:", owned.map(b => b._id.toString()));
-// console.log("DEBUG collaborating_businesses:", collaborating_businesses.map(b => b._id.toString()));
+      //       console.log("DEBUG companyAdminIds:", companyAdminIds);
+      // console.log("DEBUG targetUserId:", targetUserId.toString());
+      // console.log("DEBUG owned:", owned.map(b => b._id.toString()));
+      // console.log("DEBUG collaborating_businesses:", collaborating_businesses.map(b => b._id.toString()));
 
       res.json({
         businesses: enhancedOwned,
@@ -386,6 +386,82 @@ if (req.user.company_id && companyAdminRoleId) {
     } catch (error) {
       console.error("Delete business error:", error);
       res.status(500).json({ error: "Failed to delete business" });
+    }
+  }
+
+  static async getCollaborators(req, res) {
+    try {
+      const businessId = req.params.id;
+
+      if (!ObjectId.isValid(businessId)) {
+        return res.status(400).json({ error: "Invalid business id" });
+      }
+
+      const business = await BusinessModel.findById(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Only company_admin / super_admin can access
+      const role = req.user.role.role_name;
+      if (!["company_admin", "super_admin"].includes(role)) {
+        return res.status(403).json({
+          error: "Only company_admin or super_admin can view collaborators",
+        });
+      }
+
+      const collaboratorIds = business.collaborators || [];
+
+      const collaborators = await UserModel.getAll({
+        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
+      });
+
+      const response = collaborators.map(u => ({
+        _id: u._id,
+        name: u.name,
+      }));
+
+      res.json({ collaborators: response });
+    } catch (err) {
+      console.error("GET collaborators error:", err);
+      res.status(500).json({ error: "Failed to fetch collaborators" });
+    }
+  }
+
+  static async setAllowedCollaborators(req, res) {
+    try {
+      const businessId = req.params.id;
+      const { collaborator_ids } = req.body; // array of user IDs
+
+      if (!ObjectId.isValid(businessId)) {
+        return res.status(400).json({ error: "Invalid business id" });
+      }
+
+      const business = await BusinessModel.findById(businessId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      // Only admin can update
+      const role = req.user.role.role_name;
+      if (!["company_admin", "super_admin"].includes(role)) {
+        return res.status(403).json({ error: "Only admin can set allowed collaborators" });
+      }
+
+      const validIds = (collaborator_ids || []).filter(id =>
+        (business.collaborators || []).some(c => c.toString() === id.toString())
+      );
+
+      await BusinessModel.collection().updateOne(
+        { _id: new ObjectId(businessId) },
+        { $set: { allowed_collaborators: validIds, updated_at: new Date() } }
+      );
+
+      res.json({
+        message: "Allowed collaborators updated",
+        allowed_collaborators: validIds.map(id => id.toString())
+      });
+    } catch (err) {
+      console.error("Set allowed collaborators error:", err);
+      res.status(500).json({ error: "Failed to update allowed collaborators" });
     }
   }
 

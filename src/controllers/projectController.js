@@ -362,13 +362,29 @@ class ProjectController {
             error: "Only company_admin or super_admin can launch projects",
           });
         }
+
+        // Ensure business_id is properly an ObjectId
+        const businessId = typeof existing.business_id === "string"
+            ? new ObjectId(existing.business_id)
+            : existing.business_id;
+
+        await BusinessModel.clearAllowedCollaborators(businessId);
       }
+
+
       if (req.body.status === "reprioritizing") {
         if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
           return res.status(403).json({
             error: "Only company_admin or super_admin can set project to reprioritizing",
           });
         }
+
+        const allowedCollabs = req.body.allowed_collaborators || [];
+        if (!Array.isArray(allowedCollabs)) {
+          return res.status(400).json({ error: "allowed_collaborators must be an array of user IDs" });
+        }
+
+        await BusinessModel.setAllowedCollaborators(existing.business_id, allowedCollabs);
       }
 
 
@@ -390,14 +406,33 @@ class ProjectController {
         isAdmin,
       });
 
-      const canEditProject = existing.status === "reprioritizing" || permissions.canEdit;
+      let canEditProject = false;
 
+      if (existing.status === "reprioritizing") {
+        // Only admins or allowed collaborators can edit
+        if (isAdmin) {
+          canEditProject = true;
+        } else {
+          const allowedCollabs = await BusinessModel.getAllowedCollaborators(existing.business_id);
+          canEditProject = allowedCollabs.some(id => id.toString() === req.user._id.toString());
+        }
+      } else {
+        // Normal permission check for other statuses
+        canEditProject = permissions.canEdit;
+      }
 
+      // Enforce the check
       if (!canEditProject) {
         return res.status(403).json({
-          error: `You cannot edit projects when business is in '${business.status}' state`,
+          error: `You cannot edit this project in its current status`,
         });
       }
+
+      // if (!canEditProject) {
+      //   return res.status(403).json({
+      //     error: `You cannot edit projects when business is in '${business.status}' state`,
+      //   });
+      // }
 
       if (req.body.status && !VALID_STATUS.includes(req.body.status)) {
         return res.status(400).json({ error: "Invalid status value" });
@@ -514,9 +549,6 @@ class ProjectController {
       // Check Business
       const business = await BusinessModel.findById(business_id);
       if (!business) return res.status(404).json({ error: "Business not found" });
-
-
-
 
       const allProjects = await ProjectModel.findAll({
         business_id: new ObjectId(business_id),
@@ -864,6 +896,18 @@ class ProjectController {
         return res.status(404).json({ error: "Project not found" });
       }
 
+
+      if (status === "launched") {
+        const businessId =
+          typeof project.business_id === "string"
+            ? new ObjectId(project.business_id)
+            : project.business_id;
+
+        console.log("Clearing allowed_collaborators for business:", businessId);
+
+        await BusinessModel.clearAllowedCollaborators(businessId);
+      }
+
       await ProjectModel.collection().updateOne(
         { _id: new ObjectId(id) },
         { $set: { status, updated_at: new Date() } }
@@ -882,9 +926,5 @@ class ProjectController {
 
 
 }
-
-
-
-
 
 module.exports = ProjectController;

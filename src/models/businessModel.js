@@ -26,17 +26,17 @@ class BusinessModel {
   }
 
   static async findByUserIds(userIds) {
-  if (!Array.isArray(userIds) || userIds.length === 0) {
-    return [];
-  }
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return [];
+    }
 
-  return await this.collection()
-    .find({
-      user_id: { $in: userIds },
-    })
-    .sort({ created_at: -1 })
-    .toArray();
-}
+    return await this.collection()
+      .find({
+        user_id: { $in: userIds },
+      })
+      .sort({ created_at: -1 })
+      .toArray();
+  }
 
 
   // owner-scoped lookup used in some existing flows (delete/update by owner)
@@ -122,6 +122,33 @@ class BusinessModel {
       }
     );
   }
+
+
+  static async setAllowedCollaborators(businessId, collaboratorIds) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $set: {
+          allowed_collaborators: collaboratorIds.map(id => new ObjectId(id)),
+          updated_at: new Date(),
+        },
+      }
+    );
+  }
+
+  static async getAllowedCollaborators(businessId) {
+    const business = await this.findById(businessId);
+    return business?.allowed_collaborators || [];
+  }
+
+  static async clearAllowedCollaborators(businessId) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      { $set: { allowed_collaborators: [], updated_at: new Date() } }
+    );
+  }
+
+
 }
 
 module.exports = BusinessModel;

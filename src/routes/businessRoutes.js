@@ -8,6 +8,15 @@ router.post("/", authenticateToken, BusinessController.create);
 router.delete("/:id", authenticateToken, BusinessController.delete);
 
 // collaborator routes
+
+router.get(
+  "/:id/collaborators",
+  authenticateToken,
+  BusinessController.getCollaborators
+);
+
+router.patch('/:id/allowed-collaborators', authenticateToken, BusinessController.setAllowedCollaborators);
+
 router.post(
   "/:id/collaborators",
   authenticateToken,
