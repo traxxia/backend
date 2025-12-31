@@ -15,8 +15,11 @@ router.get(
   BusinessController.getCollaborators
 );
 
-router.patch('/:id/allowed-collaborators', authenticateToken, BusinessController.setAllowedCollaborators);
-
+router.patch(
+  '/:businessId/project/:projectId/allowed-collaborators',
+  authenticateToken,
+  BusinessController.setAllowedCollaborators
+);
 router.patch(
   "/:id/allowed-ranking-collaborators",
   authenticateToken,

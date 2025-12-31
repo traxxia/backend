@@ -106,7 +106,12 @@ class ProjectController {
 
       const raw = await ProjectModel.findAll(filter);
       const total = await ProjectModel.count(filter);
-      const projects = await ProjectModel.populateCreatedBy(raw);
+      let projects = await ProjectModel.populateCreatedBy(raw);
+
+       projects = projects.map(project => ({
+      ...project,
+      allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
+    }));
 
 
       let ranking_lock_summary = { locked_users_count: 0, total_users: 0 };
@@ -914,6 +919,11 @@ class ProjectController {
         console.log("Clearing allowed_collaborators for business:", businessId);
 
         await BusinessModel.clearAllowedCollaborators(businessId);
+
+         await ProjectModel.collection().updateMany(
+  { business_id: businessId }, 
+  { $set: { allowed_collaborators: [], updated_at: new Date() } }
+);
       }
 
       await ProjectModel.collection().updateOne(
