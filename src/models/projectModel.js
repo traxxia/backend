@@ -71,6 +71,28 @@ class ProjectModel {
       created_by: userMap[project.user_id?.toString()] || "Unknown User",
     }));
   }
+
+  static async setAllowedCollaborators(projectId, collaboratorIds) {
+  return await this.collection().updateOne(
+    { _id: new ObjectId(projectId) },
+    { $set: { allowed_collaborators: collaboratorIds.map(id => new ObjectId(id)), updated_at: new Date() } }
+  );
 }
+
+static async getAllowedCollaborators(projectId) {
+  const project = await this.findById(projectId);
+  return project?.allowed_collaborators || [];
+}
+
+static async clearAllowedCollaborators(projectId) {
+  return await this.collection().updateOne(
+    { _id: new ObjectId(projectId) },
+    { $set: { allowed_collaborators: [], updated_at: new Date() } }
+  );
+}
+}
+
+
+
 
 module.exports = ProjectModel;

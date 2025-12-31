@@ -124,29 +124,29 @@ class BusinessModel {
   }
 
 
-  static async setAllowedCollaborators(businessId, collaboratorIds) {
-    return await this.collection().updateOne(
-      { _id: new ObjectId(businessId) },
-      {
-        $set: {
-          allowed_collaborators: collaboratorIds.map(id => new ObjectId(id)),
-          updated_at: new Date(),
-        },
-      }
-    );
-  }
+  // static async setAllowedCollaborators(businessId, collaboratorIds) {
+  //   return await this.collection().updateOne(
+  //     { _id: new ObjectId(businessId) },
+  //     {
+  //       $set: {
+  //         allowed_collaborators: collaboratorIds.map(id => new ObjectId(id)),
+  //         updated_at: new Date(),
+  //       },
+  //     }
+  //   );
+  // }
 
-  static async getAllowedCollaborators(businessId) {
-    const business = await this.findById(businessId);
-    return business?.allowed_collaborators || [];
-  }
+  // static async getAllowedCollaborators(businessId) {
+  //   const business = await this.findById(businessId);
+  //   return business?.allowed_collaborators || [];
+  // }
 
-  static async clearAllowedCollaborators(businessId) {
-    return await this.collection().updateOne(
-      { _id: new ObjectId(businessId) },
-      { $set: { allowed_collaborators: [], updated_at: new Date() } }
-    );
-  }
+  // static async clearAllowedCollaborators(businessId) {
+  //   return await this.collection().updateOne(
+  //     { _id: new ObjectId(businessId) },
+  //     { $set: { allowed_collaborators: [], updated_at: new Date() } }
+  //   );
+  // }
 
  static async setAllowedRankingCollaborators(businessId, collaboratorIds) {
   return await this.collection().updateOne(

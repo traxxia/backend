@@ -389,7 +389,7 @@ class ProjectController {
           return res.status(400).json({ error: "allowed_collaborators must be an array of user IDs" });
         }
 
-        await BusinessModel.setAllowedCollaborators(existing.business_id, allowedCollabs);
+        await ProjectModel.setAllowedCollaborators(existing.business_id, allowedCollabs);
       }
 
 
@@ -418,7 +418,7 @@ class ProjectController {
         if (isAdmin) {
           canEditProject = true;
         } else {
-          const allowedCollabs = await BusinessModel.getAllowedCollaborators(existing.business_id);
+          const allowedCollabs = await ProjectModel.getAllowedCollaborators(existing.business_id);
           canEditProject = allowedCollabs.some(id => id.toString() === req.user._id.toString());
         }
       } else {
@@ -918,7 +918,7 @@ class ProjectController {
 
         console.log("Clearing allowed_collaborators for business:", businessId);
 
-        await BusinessModel.clearAllowedCollaborators(businessId);
+        await ProjectModel.clearAllowedCollaborators(project._id);
 
          await ProjectModel.collection().updateMany(
   { business_id: businessId }, 

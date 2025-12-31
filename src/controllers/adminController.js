@@ -231,7 +231,7 @@ static async updateUserRole(req, res) {
       return res.status(400).json({ error: "Role is required" });
     }
 
-    const allowedRoles = ["user", "viewer", "collaborator", "company_admin"];
+    const allowedRoles = ["user", "viewer", "collaborator"];
 
     if (!allowedRoles.includes(role.toLowerCase())) {
       return res.status(400).json({
