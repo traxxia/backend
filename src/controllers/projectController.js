@@ -728,6 +728,7 @@ class ProjectController {
         project_id: project._id,
         project_name: project.project_name,
         rank: ranking.rank,
+        rationals: ranking.rationals || "",
         locked: ranking.locked || false,
       }));
 
