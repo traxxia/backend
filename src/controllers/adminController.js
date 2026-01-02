@@ -66,6 +66,12 @@ class AdminController {
         return res.status(400).json({ error: "Admin email already exists" });
       }
 
+      const normalizedCompanyName = company_name.trim().toLowerCase();
+      const existingCompany = await CompanyModel.findByName(normalizedCompanyName);
+      if(existingCompany){
+        return res.status(400).json({ error: "Company with this name already exists"})
+      }
+
       let logoUrl = null;
       if (req.file) {
         logoUrl = `${req.protocol}://${req.get("host")}/uploads/logos/${req.file.filename}`;
@@ -73,6 +79,7 @@ class AdminController {
 
       const companyId = await CompanyModel.create({
         company_name,
+        company_name_normalized: normalizedCompanyName,
         industry: industry || "",
         size: size || "",
         logo: logoUrl,

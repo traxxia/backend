@@ -12,6 +12,14 @@ class CompanyModel {
     return result.insertedId;
   }
 
+  static async findByName(normalizedName) {
+  const db = getDB();
+  return await db.collection('companies').findOne({
+    company_name_normalized: normalizedName,
+    // status: { $ne: 'inactive' } 
+  });
+}
+
   static async findAll(filter = {}) {
     const db = getDB();
     return await db.collection('companies').aggregate([
