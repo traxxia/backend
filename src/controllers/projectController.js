@@ -108,10 +108,10 @@ class ProjectController {
       const total = await ProjectModel.count(filter);
       let projects = await ProjectModel.populateCreatedBy(raw);
 
-       projects = projects.map(project => ({
-      ...project,
-      allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
-    }));
+      projects = projects.map(project => ({
+        ...project,
+        allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
+      }));
 
 
       let ranking_lock_summary = { locked_users_count: 0, total_users: 0 };
@@ -120,10 +120,8 @@ class ProjectController {
         const business = await BusinessModel.findById(business_id);
         if (business) {
           // Owner + collaborators
-          const collaboratorIds = [
-            business.user_id?.toString(),
-            ...(business.collaborators || []).map(id => id.toString())
-          ];
+          const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+
 
           const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
 
@@ -212,7 +210,7 @@ class ProjectController {
 
 
       // User-collaborator
-      if (ADMIN_ROLES.includes(req.user.role.role_name) && business.user_id) {
+      if (!ADMIN_ROLES.includes(req.user.role.role_name) && business.user_id) {
         const ownerId = business.user_id.toString();
 
 
@@ -246,6 +244,16 @@ class ProjectController {
         (id) => id.toString() === req.user._id.toString()
       );
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
+
+      if (
+        isAdmin &&
+        (!Array.isArray(business.collaborators) || business.collaborators.length === 0)
+      ) {
+        return res.status(400).json({
+          error: "Please add at least one collaborator before creating a project",
+        });
+      }
 
       // NOTE: Owner alone cannot work on projects unless also collaborator
       const permissions = getProjectPermissions({
@@ -312,23 +320,25 @@ class ProjectController {
       const insertedId = await ProjectModel.create(data);
 
       // Ensure the business owner is always a collaborator once projects exist
-      try {
-        if (business.user_id) {
-          const ownerIdStr = business.user_id.toString();
-          const alreadyCollaborator = Array.isArray(business.collaborators)
-            ? business.collaborators.some((id) => id.toString() === ownerIdStr)
-            : false;
+      if (!isAdmin) {
+        try {
+          if (business.user_id) {
+            const ownerIdStr = business.user_id.toString();
+            const alreadyCollaborator = Array.isArray(business.collaborators)
+              ? business.collaborators.some((id) => id.toString() === ownerIdStr)
+              : false;
 
-          if (!alreadyCollaborator) {
-            await BusinessModel.addCollaborator(
-              business._id.toString(),
-              ownerIdStr
-            );
+            if (!alreadyCollaborator) {
+              await BusinessModel.addCollaborator(
+                business._id.toString(),
+                ownerIdStr
+              );
+            }
           }
+        } catch (collabErr) {
+          console.error("Failed to auto-assign owner as collaborator:", collabErr);
+          // We do not throw here to avoid blocking project creation if this step fails
         }
-      } catch (collabErr) {
-        console.error("Failed to auto-assign owner as collaborator:", collabErr);
-        // We do not throw here to avoid blocking project creation if this step fails
       }
 
       const raw = await ProjectModel.findById(insertedId);
@@ -439,6 +449,10 @@ class ProjectController {
       const updateData = {
         updated_at: new Date(),
       };
+
+      if (Array.isArray(req.body.allowed_collaborators)) {
+        updateData.allowed_collaborators = req.body.allowed_collaborators;
+      }
 
       // Only include fields if they are provided and valid
       if (req.body.description !== undefined)
@@ -653,10 +667,8 @@ class ProjectController {
 
         // Get all collaborators for the business (exclude admins)
         const businessDoc = await BusinessModel.findById(business_id);
-        const collaboratorIds = [
-          businessDoc.user_id?.toString(), // owner
-          ...(businessDoc.collaborators || []).map(id => id.toString())
-        ];
+        const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+
 
         // Remove duplicates
         const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
@@ -920,10 +932,10 @@ class ProjectController {
 
         await ProjectModel.clearAllowedCollaborators(project._id);
 
-         await ProjectModel.collection().updateMany(
-  { business_id: businessId }, 
-  { $set: { allowed_collaborators: [], updated_at: new Date() } }
-);
+        await ProjectModel.collection().updateMany(
+          { business_id: businessId },
+          { $set: { allowed_collaborators: [], updated_at: new Date() } }
+        );
       }
 
       await ProjectModel.collection().updateOne(
