@@ -2,6 +2,7 @@ const { ObjectId } = require("mongodb");
 const ProjectModel = require("../models/projectModel");
 const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
+const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
 
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
@@ -243,6 +244,51 @@ class ProjectController {
       const isCollaborator = business.collaborators?.some(
         (id) => id.toString() === req.user._id.toString()
       );
+
+
+      const ownerIdStr = business.user_id?.toString();
+
+      if (ownerIdStr) {
+        // Fetch business owner role
+        const ownerUser = await UserModel.findById(ownerIdStr);
+
+        let ownerRoleName = null;
+        if (ownerUser?.role_id) {
+          const db = getDB();
+          const roleDoc = await db
+            .collection("roles")
+            .findOne({ _id: ownerUser.role_id });
+          ownerRoleName = roleDoc?.role_name;
+        }
+
+        const ownerIsAdmin = ADMIN_ROLES.includes(ownerRoleName);
+
+        // Auto-add if owner is not admin
+        if (!ownerIsAdmin) {
+          const alreadyCollaborator = Array.isArray(business.collaborators)
+            ? business.collaborators.some((id) => id.toString() === ownerIdStr)
+            : false;
+
+          if (!alreadyCollaborator) {
+            await BusinessModel.addCollaborator(
+              business._id.toString(),
+              ownerIdStr
+            );
+
+            if (!Array.isArray(business.collaborators)) {
+              business.collaborators = [];
+            }
+
+            business.collaborators.push(new ObjectId(ownerIdStr));
+
+            console.log(
+              `Non-admin owner auto-added as collaborator: ${ownerIdStr}`
+            );
+          }
+        }
+      }
+
+
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
 
 

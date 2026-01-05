@@ -317,7 +317,7 @@ class BusinessController {
         description: description ? description.trim() : "",
         city: city ? city.trim() : "",
         country: country ? country.trim() : "",
-        collaborators: [],
+        collaborators: isCollaborator ? [new ObjectId(req.user._id)] : [],
         status: "draft",
       };
 
