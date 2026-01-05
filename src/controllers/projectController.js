@@ -1009,6 +1009,85 @@ class ProjectController {
   }
 
 
+  static async grantEditAccess(req, res) {
+    try {
+      const { scope, business_id, project_id } = req.body;
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      if (!["projectEdit", "reRanking"].includes(scope)) {
+        return res.status(400).json({ error: "Invalid scope" });
+      }
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      if (scope === "projectEdit") {
+        if (!ObjectId.isValid(project_id)) {
+          return res.status(400).json({ error: "Invalid project_id" });
+        }
+
+        const project = await ProjectModel.findById(project_id);
+        if (!project) {
+          return res.status(404).json({ error: "Project not found" });
+        }
+
+        if (project.business_id.toString() !== business_id) {
+          return res.status(400).json({ error: "Project does not belong to business" });
+        }
+
+        await ProjectModel.update(project_id, {
+          status: "reprioritizing",
+          updated_at: new Date(),
+        });
+
+        return res.json({
+          scope: "project",
+          message: "Project edit access granted",
+          project_id,
+          new_status: "reprioritizing",
+        });
+      }
+
+     
+      if (scope === "reRanking") {
+        await ProjectRankingModel.unlockRankingByBusiness(business_id);
+        await BusinessModel.clearAllowedRankingCollaborators(business_id);
+
+        await BusinessModel.collection().updateOne(
+          { _id: new ObjectId(business_id) },
+          { $set: { status: "reprioritizing", updated_at: new Date() } }
+        );
+
+        await ProjectModel.collection().updateMany(
+          { business_id: new ObjectId(business_id) },
+          { $set: { status: "reprioritizing", updated_at: new Date() } }
+        );
+
+        return res.json({
+          scope: "business",
+          message: "Business edit access granted",
+          business_id,
+          new_status: "reprioritizing",
+        });
+      }
+
+    } catch (err) {
+      console.error("EDIT MODE ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+
+
 }
 
 module.exports = ProjectController;

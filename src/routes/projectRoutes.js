@@ -15,6 +15,7 @@ router.post("/lock-rank",authenticateToken,ProjectController.lockRank);
 router.get("/:id", authenticateToken, ProjectController.getById);
 router.patch("/:id", authenticateToken, ProjectController.update);
 router.patch("/:id/status",authenticateToken,ProjectController.changeStatus)
+router.put("/edit-access", authenticateToken, ProjectController.grantEditAccess);
 
 router.delete(
   "/:id",
