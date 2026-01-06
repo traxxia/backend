@@ -411,10 +411,15 @@ class ProjectController {
       if (!existing) return res.status(404).json({ error: "Not found" });
 
       if (existing.status === "launched") {
-        return res.status(403).json({
-          error:
-            "This project has been launched and cannot be updated anymore.",
-        });
+        const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+        const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
+          existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
+
+        if (!isAdmin && !isInAllowedCollabs) {
+          return res.status(403).json({
+            error: "This project has been launched and cannot be updated anymore.",
+          });
+        }
       }
 
       if (req.body.status === "launched") {
@@ -424,14 +429,17 @@ class ProjectController {
           });
         }
 
-        // Ensure business_id is properly an ObjectId
         const businessId = typeof existing.business_id === "string"
           ? new ObjectId(existing.business_id)
           : existing.business_id;
 
         await BusinessModel.clearAllowedCollaborators(businessId);
-      }
 
+        await ProjectModel.collection().updateMany(
+          { business_id: businessId },
+          { $set: { allowed_collaborators: [], updated_at: new Date() } }
+        );
+      }
 
       if (req.body.status === "reprioritizing") {
         if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
@@ -445,15 +453,12 @@ class ProjectController {
           return res.status(400).json({ error: "allowed_collaborators must be an array of user IDs" });
         }
 
-        // await ProjectModel.setAllowedCollaborators(existing.business_id, allowedCollabs);
         await ProjectModel.update(id, {
           allowed_collaborators: allowedCollabs,
           updated_at: new Date()
         });
       }
 
-
-      // Check access
       const business = await BusinessModel.findById(existing.business_id);
       if (!business)
         return res.status(404).json({ error: "Parent business not found" });
@@ -473,13 +478,14 @@ class ProjectController {
 
       let canEditProject = false;
 
-      if (existing.status === "reprioritizing") {
-
+      if (existing.status === "launched") {
+        const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
+          existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
+        canEditProject = isAdmin || isInAllowedCollabs;
+      } else if (existing.status === "reprioritizing") {
         if (isAdmin) {
           canEditProject = true;
         } else {
-          // const allowedCollabs = await ProjectModel.getAllowedCollaborators(existing.business_id);
-          // canEditProject = allowedCollabs.some(id => id.toString() === req.user._id.toString());
           const allowedCollabs = existing.allowed_collaborators || [];
           canEditProject = allowedCollabs.some(
             (id) => id.toString() === req.user._id.toString()
@@ -499,7 +505,6 @@ class ProjectController {
         return res.status(400).json({ error: "Invalid status value" });
       }
 
-      // === FIXED: Normalize fields safely for strict string-only schema ===
       const updateData = {
         updated_at: new Date(),
       };
@@ -508,7 +513,6 @@ class ProjectController {
         updateData.allowed_collaborators = req.body.allowed_collaborators;
       }
 
-      // Only include fields if they are provided and valid
       if (req.body.description !== undefined)
         updateData.description = normalizeString(req.body.description);
 
@@ -573,6 +577,7 @@ class ProjectController {
       delete updateData._id;
       delete updateData.business_id;
       delete updateData.created_at;
+
       await ProjectModel.update(id, updateData);
 
       const updated = await ProjectModel.findById(id);
@@ -708,8 +713,6 @@ class ProjectController {
         user_id,
         business_id
       );
-
-      // get users and locking summary
       const business = await BusinessModel.findById(business_id);
 
       let ranking_lock_summary = {
@@ -718,28 +721,19 @@ class ProjectController {
       };
 
       if (business) {
-
-        // Get all collaborators for the business (exclude admins)
         const businessDoc = await BusinessModel.findById(business_id);
         const collaboratorIds = (business.collaborators || []).map(id => id.toString());
-
-
-        // Remove duplicates
         const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
-
-        // Fetch their roles
         const db = getDB();
 
         const users = await db.collection("users").find({
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
-        // Filter out admins
         const nonAdminUserIds = users
           .filter(u => !ADMIN_ROLES.includes(u.role_name))
           .map(u => u._id.toString());
 
-        // Count locked users
         const lockedUserIds = await ProjectRankingModel.collection()
           .distinct("user_id", {
             business_id: new ObjectId(business_id),
@@ -817,8 +811,6 @@ class ProjectController {
   }
 
   static async getAdminRankings(req, res) {
-
-
     try {
       const { business_id, admin_user_id } = req.query;
 
@@ -900,7 +892,6 @@ class ProjectController {
         return res.status(403).json({ error: "Admins cannot lock ranks" });
       }
 
-
       const alreadyLocked = await ProjectRankingModel.isLocked(
         user_id,
         project_id
@@ -913,7 +904,6 @@ class ProjectController {
         });
       }
 
-      // Lock the rank
       await ProjectRankingModel.lockRank(user_id, project_id);
 
       res.json({ message: "Rank locked successfully", project_id });
@@ -922,7 +912,6 @@ class ProjectController {
       res.status(500).json({ error: "Server error" });
     }
   }
-
 
   static async delete(req, res) {
     try {
@@ -1043,40 +1032,23 @@ class ProjectController {
         if (project.business_id.toString() !== business_id) {
           return res.status(400).json({ error: "Project does not belong to business" });
         }
-
-        await ProjectModel.update(project_id, {
-          status: "reprioritizing",
-          updated_at: new Date(),
-        });
-
         return res.json({
           scope: "project",
-          message: "Project edit access granted",
+          message: "Project edit access will be granted",
           project_id,
-          new_status: "reprioritizing",
+          current_status: project.status,
         });
       }
 
-     
       if (scope === "reRanking") {
         await ProjectRankingModel.unlockRankingByBusiness(business_id);
         await BusinessModel.clearAllowedRankingCollaborators(business_id);
 
-        await BusinessModel.collection().updateOne(
-          { _id: new ObjectId(business_id) },
-          { $set: { status: "reprioritizing", updated_at: new Date() } }
-        );
-
-        await ProjectModel.collection().updateMany(
-          { business_id: new ObjectId(business_id) },
-          { $set: { status: "reprioritizing", updated_at: new Date() } }
-        );
-
         return res.json({
           scope: "business",
-          message: "Business edit access granted",
+          message: "Business re-ranking access granted",
           business_id,
-          new_status: "reprioritizing",
+          current_status: business.status,
         });
       }
 
@@ -1086,8 +1058,229 @@ class ProjectController {
     }
   }
 
+  static async checkUserAccess(req, res) {
+    try {
+      const { business_id, project_id } = req.query;
+      const user_id = req.user._id;
 
+      console.log("checkUserAccess called with:", { business_id, project_id, user_id: user_id.toString() });
 
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
+      let hasRerankAccess = false;
+      try {
+        const allowedRankingCollabs = await BusinessModel.getAllowedRankingCollaborators(business_id);
+        hasRerankAccess = isAdmin ||
+          allowedRankingCollabs.some(id => id.toString() === user_id.toString());
+      } catch (err) {
+        console.error("Error checking rerank access:", err);
+        hasRerankAccess = isAdmin;
+      }
+
+      let hasProjectEditAccess = false;
+
+      if (project_id && project_id !== 'null' && project_id !== 'undefined') {
+        try {
+          const projectObjId = new ObjectId(project_id);
+          const project = await ProjectModel.findById(projectObjId);
+
+          if (project) {
+            const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
+              project.allowed_collaborators.some(id => id.toString() === user_id.toString());
+
+            hasProjectEditAccess = isAdmin || isInAllowedCollabs;
+          }
+        } catch (err) {
+          console.error("Error checking project access for", project_id, ":", err);
+          hasProjectEditAccess = false;
+        }
+      }
+
+      const response = {
+        business_id,
+        project_id: project_id || null,
+        business_status: business.status,
+        has_rerank_access: hasRerankAccess,
+        has_project_edit_access: hasProjectEditAccess,
+      };
+      res.json(response);
+    } catch (err) {
+      console.error("CHECK ACCESS ERR:", err);
+      res.status(500).json({ error: "Server error", details: err.message });
+    }
+  }
+
+  static async getGrantedAccess(req, res) {
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const rerankingCollaboratorIds = await BusinessModel.getAllowedRankingCollaborators(business_id);
+
+      const projects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id),
+      });
+
+      const projectEditUserIds = new Set();
+      const projectAccessMap = {};
+
+      projects.forEach(project => {
+        if (Array.isArray(project.allowed_collaborators)) {
+          project.allowed_collaborators.forEach(userId => {
+            const userIdStr = userId.toString();
+            projectEditUserIds.add(userIdStr);
+
+            if (!projectAccessMap[userIdStr]) {
+              projectAccessMap[userIdStr] = [];
+            }
+            projectAccessMap[userIdStr].push({
+              project_id: project._id,
+              project_name: project.project_name,
+              status: project.status,
+            });
+          });
+        }
+      });
+
+      const allUserIds = new Set([
+        ...rerankingCollaboratorIds.map(id => id.toString()),
+        ...Array.from(projectEditUserIds)
+      ]);
+
+      const db = getDB();
+      const users = await db.collection("users").find({
+        _id: { $in: Array.from(allUserIds).map(id => new ObjectId(id)) }
+      }).toArray();
+
+      const accessList = users.map(user => {
+        const userIdStr = user._id.toString();
+        const hasRerankAccess = rerankingCollaboratorIds.some(id => id.toString() === userIdStr);
+        const projectAccess = projectAccessMap[userIdStr] || [];
+
+        return {
+          user_id: user._id,
+          user_name: user.name,
+          user_email: user.email,
+          role_name: user.role_name,
+          has_rerank_access: hasRerankAccess,
+          has_project_edit_access: projectAccess.length > 0,
+          projects_with_access: projectAccess,
+        };
+      });
+
+      res.json({
+        business_id,
+        business_name: business.business_name,
+        business_status: business.status,
+        total_users_with_access: accessList.length,
+        access_list: accessList,
+      });
+
+    } catch (err) {
+      console.error("GET GRANTED ACCESS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async revokeAccess(req, res) {
+    try {
+      const { business_id, user_id, access_type } = req.body;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      if (!ObjectId.isValid(user_id)) {
+        return res.status(400).json({ error: "Invalid user_id" });
+      }
+
+      if (!["rerank", "project_edit", "all"].includes(access_type)) {
+        return res.status(400).json({ error: "Invalid access_type. Must be 'rerank', 'project_edit', or 'all'" });
+      }
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      let revokedAccess = [];
+
+      // Revoke reranking access
+      if (access_type === "rerank" || access_type === "all") {
+        const allowedRankingCollaborators = await BusinessModel.getAllowedRankingCollaborators(business_id);
+        const filteredCollaborators = allowedRankingCollaborators.filter(
+          id => id.toString() !== user_id.toString()
+        );
+
+        await BusinessModel.collection().updateOne(
+          { _id: new ObjectId(business_id) },
+          { $set: { allowed_ranking_collaborators: filteredCollaborators } }
+        );
+
+        revokedAccess.push("rerank");
+      }
+
+      // Revoke project edit access
+      if (access_type === "project_edit" || access_type === "all") {
+        const projects = await ProjectModel.findAll({
+          business_id: new ObjectId(business_id),
+        });
+
+        const updatePromises = projects.map(project => {
+          if (Array.isArray(project.allowed_collaborators)) {
+            const filteredCollaborators = project.allowed_collaborators.filter(
+              id => id.toString() !== user_id.toString()
+            );
+
+            return ProjectModel.update(project._id.toString(), {
+              allowed_collaborators: filteredCollaborators,
+              updated_at: new Date()
+            });
+          }
+          return Promise.resolve();
+        });
+
+        await Promise.all(updatePromises);
+        revokedAccess.push("project_edit");
+      }
+
+      res.json({
+        message: "Access revoked successfully",
+        business_id,
+        user_id,
+        revoked_access: revokedAccess,
+      });
+
+    } catch (err) {
+      console.error("REVOKE ACCESS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
 }
 
 module.exports = ProjectController;
