@@ -317,7 +317,7 @@ class BusinessController {
         description: description ? description.trim() : "",
         city: city ? city.trim() : "",
         country: country ? country.trim() : "",
-        collaborators : [],
+        collaborators: [],
         status: "draft",
       };
 
@@ -428,55 +428,60 @@ class BusinessController {
       res.status(500).json({ error: "Failed to fetch collaborators" });
     }
   }
+  static async setAllowedCollaborators(req, res) {
+    try {
+      const { businessId, projectId } = req.params;
+      const { collaborator_ids } = req.body;
 
-static async setAllowedCollaborators(req, res) {
-  try {
-    const { businessId, projectId } = req.params;
-    const { collaborator_ids } = req.body;
+      if (!ObjectId.isValid(businessId) || !ObjectId.isValid(projectId)) {
+        return res.status(400).json({ error: "Invalid business or project id" });
+      }
 
-    if (!ObjectId.isValid(businessId) || !ObjectId.isValid(projectId)) {
-      return res.status(400).json({ error: "Invalid business or project id" });
+      if (!Array.isArray(collaborator_ids) || collaborator_ids.length === 0) {
+        return res.status(400).json({
+          error: "collaborator_ids must be a non-empty array of user IDs"
+        });
+      }
+
+      // Fetch business
+      const business = await BusinessModel.findById(businessId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      // Only admin can update
+      const role = req.user.role.role_name;
+      if (!["company_admin", "super_admin"].includes(role)) {
+        return res.status(403).json({ error: "Only admin can set allowed collaborators" });
+      }
+
+      // Fetch project to ensure it exists
+      const project = await ProjectModel.collection().findOne({
+        _id: new ObjectId(projectId),
+        business_id: new ObjectId(businessId),
+      });
+
+      if (!project) return res.status(404).json({ error: "Project not found in this business" });
+
+      // Get existing allowed collaborators
+      const existingAllowedIds = (project.allowed_collaborators || []).map(id => id.toString());
+
+      // Merge with new collaborator IDs (avoid duplicates)
+      const mergedIds = [...new Set([...existingAllowedIds, ...collaborator_ids])];
+      const allowedIds = mergedIds.map(id => new ObjectId(id));
+
+      await ProjectModel.collection().updateOne(
+        { _id: new ObjectId(projectId) },
+        { $set: { allowed_collaborators: allowedIds, updated_at: new Date() } }
+      );
+
+      res.json({
+        message: "Allowed collaborators updated for project",
+        allowed_collaborators: allowedIds.map(id => id.toString()),
+      });
+    } catch (err) {
+      console.error("Set allowed collaborators error:", err);
+      res.status(500).json({ error: "Failed to update allowed collaborators" });
     }
-
-    // Fetch business
-    const business = await BusinessModel.findById(businessId);
-    if (!business) return res.status(404).json({ error: "Business not found" });
-
-    // Only admin can update
-    const role = req.user.role.role_name;
-    if (!["company_admin", "super_admin"].includes(role)) {
-      return res.status(403).json({ error: "Only admin can set allowed collaborators" });
-    }
-
-    // Fetch project to ensure it exists
-    const project = await ProjectModel.collection().findOne({
-      _id: new ObjectId(projectId),
-      business_id: new ObjectId(businessId),
-    });
-
-    if (!project) return res.status(404).json({ error: "Project not found in this business" });
-
-    // No filtering needed: any collaborator from business can be allowed
-    const allowedIds = (collaborator_ids || []).map(id => new ObjectId(id));
-
-    await ProjectModel.collection().updateOne(
-      { _id: new ObjectId(projectId) },
-      { $set: { allowed_collaborators: allowedIds, updated_at: new Date() } }
-    );
-
-    res.json({
-      message: "Allowed collaborators updated for project",
-      allowed_collaborators: allowedIds.map(id => id.toString()),
-    });
-  } catch (err) {
-    console.error("Set allowed collaborators error:", err);
-    res.status(500).json({ error: "Failed to update allowed collaborators" });
   }
-}
-
-
-
-
 
   static async setAllowedRankingCollaborators(req, res) {
     try {
@@ -487,9 +492,9 @@ static async setAllowedCollaborators(req, res) {
         return res.status(400).json({ error: "Invalid business id" });
       }
 
-      if (!Array.isArray(collaborator_ids)) {
+      if (!Array.isArray(collaborator_ids) || collaborator_ids.length === 0) {
         return res.status(400).json({
-          error: "collaborator_ids must be an array of user IDs",
+          error: "collaborator_ids must be a non-empty array of user IDs",
         });
       }
 
@@ -511,19 +516,24 @@ static async setAllowedCollaborators(req, res) {
         )
       );
 
-      await BusinessModel.setAllowedRankingCollaborators(id, validIds);
+      // Get existing allowed ranking collaborators
+      const existingAllowed = business.allowed_ranking_collaborators || [];
+      const existingIds = existingAllowed.map(id => id.toString());
+
+      // Merge with new IDs (avoid duplicates)
+      const mergedIds = [...new Set([...existingIds, ...validIds])];
+
+      await BusinessModel.setAllowedRankingCollaborators(id, mergedIds);
 
       res.json({
         message: "Allowed ranking collaborators updated",
-        allowed_ranking_collaborators: validIds,
+        allowed_ranking_collaborators: mergedIds,
       });
     } catch (err) {
       console.error("SET RANKING COLLAB ERR:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
-
-
 
   static async assignCollaborator(req, res) {
     try {
@@ -652,10 +662,10 @@ static async setAllowedCollaborators(req, res) {
         await ProjectRankingModel.lockRankingByBusiness(id);
         await BusinessModel.clearAllowedRankingCollaborators(id);
 
-         await ProjectModel.collection().updateMany(
-        { business_id: new ObjectId(id) },
-        { $set: { allowed_collaborators: [], updated_at: new Date() } }
-    );
+        await ProjectModel.collection().updateMany(
+          { business_id: new ObjectId(id) },
+          { $set: { allowed_collaborators: [], updated_at: new Date() } }
+        );
       }
 
 

@@ -123,36 +123,67 @@ class BusinessModel {
     );
   }
 
- static async setAllowedRankingCollaborators(businessId, collaboratorIds) {
-  return await this.collection().updateOne(
-    { _id: new ObjectId(businessId) },
-    {
-      $set: {
-        allowed_ranking_collaborators: collaboratorIds.map(id => new ObjectId(id)),
-        updated_at: new Date(),
-      },
-    }
-  );
-}
+  static async setAllowedRankingCollaborators(businessId, collaboratorIds) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $set: {
+          allowed_ranking_collaborators: collaboratorIds.map(id => new ObjectId(id)),
+          updated_at: new Date(),
+        },
+      }
+    );
+  }
 
-static async getAllowedRankingCollaborators(businessId) {
-  const business = await this.findById(businessId);
-  return business?.allowed_ranking_collaborators || [];
-}
+  static async getAllowedRankingCollaborators(businessId) {
+    const business = await this.findById(businessId);
+    return business?.allowed_ranking_collaborators || [];
+  }
 
-static async clearAllowedRankingCollaborators(businessId) {
-  return await this.collection().updateOne(
-    { _id: new ObjectId(businessId) },
-    {
-      $set: {
-        allowed_ranking_collaborators: [],
-        updated_at: new Date(),
-      },
-    }
-  );
-}
+  static async clearAllowedRankingCollaborators(businessId) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $set: {
+          allowed_ranking_collaborators: [],
+          updated_at: new Date(),
+        },
+      }
+    );
+  }
 
+  static async saveAIRankingSession(businessId, rankingData) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $set: {
+          ai_ranking_session: {
+            generated_at: new Date(),
+            generated_by: new ObjectId(rankingData.admin_id),
+            model_version: rankingData.model_version || "v1.0",
+            total_projects: rankingData.total_projects,
+            metadata: rankingData.metadata || {}
+          },
+          updated_at: new Date(),
+        },
+      }
+    );
+  }
 
+  static async getAIRankingSession(businessId) {
+    const business = await this.findById(businessId);
+    return business?.ai_ranking_session || null;
+  }
+
+  static async clearAIRankingSession(businessId) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $unset: { ai_ranking_session: "" },
+        $set: { updated_at: new Date() },
+      }
+    );
+  }
 
 }
 

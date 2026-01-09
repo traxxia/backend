@@ -73,26 +73,65 @@ class ProjectModel {
   }
 
   static async setAllowedCollaborators(projectId, collaboratorIds) {
-  return await this.collection().updateOne(
-    { _id: new ObjectId(projectId) },
-    { $set: { allowed_collaborators: collaboratorIds.map(id => new ObjectId(id)), updated_at: new Date() } }
-  );
+    return await this.collection().updateOne(
+      { _id: new ObjectId(projectId) },
+      { $set: { allowed_collaborators: collaboratorIds.map(id => new ObjectId(id)), updated_at: new Date() } }
+    );
+  }
+
+  static async getAllowedCollaborators(projectId) {
+    const project = await this.findById(projectId);
+    return project?.allowed_collaborators || [];
+  }
+
+  static async clearAllowedCollaborators(projectId) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(projectId) },
+      { $set: { allowed_collaborators: [], updated_at: new Date() } }
+    );
+  }
+  static async updateAIRank(projectId, rankData) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(projectId) },
+      {
+        $set: {
+          ai_rank: rankData.rank,
+          ai_rank_score: rankData.score || null,
+          ai_rank_factors: rankData.factors || {},
+          updated_at: new Date(),
+        },
+      }
+    );
+  }
+
+  static async bulkUpdateAIRanks(rankingsArray) {
+    // rankingsArray format: [{ project_id, rank, score, factors }, ...]
+    const bulkOps = rankingsArray.map(ranking => ({
+      updateOne: {
+        filter: { _id: new ObjectId(ranking.project_id) },
+        update: {
+          $set: {
+            ai_rank: ranking.rank,
+            ai_rank_score: ranking.score || null,
+            ai_rank_factors: ranking.factors || {},
+            updated_at: new Date(),
+          },
+        },
+      },
+    }));
+
+    return await this.collection().bulkWrite(bulkOps);
+  }
+
+  static async getProjectsWithAIRanks(businessId) {
+    return await this.collection()
+      .find({
+        business_id: new ObjectId(businessId),
+        ai_rank: { $exists: true, $ne: null }
+      })
+      .sort({ ai_rank: 1 }) // Sort by AI rank
+      .toArray();
+  }
 }
-
-static async getAllowedCollaborators(projectId) {
-  const project = await this.findById(projectId);
-  return project?.allowed_collaborators || [];
-}
-
-static async clearAllowedCollaborators(projectId) {
-  return await this.collection().updateOne(
-    { _id: new ObjectId(projectId) },
-    { $set: { allowed_collaborators: [], updated_at: new Date() } }
-  );
-}
-}
-
-
-
 
 module.exports = ProjectModel;

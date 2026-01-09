@@ -1281,6 +1281,411 @@ class ProjectController {
       res.status(500).json({ error: "Server error" });
     }
   }
+  static async saveAIRankings(req, res) {
+    try {
+      const { business_id, ai_rankings, model_version, metadata } = req.body;
+
+      // Validate request
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      if (!Array.isArray(ai_rankings) || ai_rankings.length === 0) {
+        return res.status(400).json({
+          error: "ai_rankings must be a non-empty array"
+        });
+      }
+
+      // Verify admin access
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({
+          error: "Only admins can save AI rankings",
+        });
+      }
+
+      // Verify business exists
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Validate all projects belong to this business
+      const projectIds = ai_rankings.map(r => new ObjectId(r.project_id));
+      const projects = await ProjectModel.findAll({
+        _id: { $in: projectIds },
+        business_id: new ObjectId(business_id)
+      });
+
+      if (projects.length !== ai_rankings.length) {
+        return res.status(400).json({
+          error: "Some project IDs are invalid or don't belong to this business"
+        });
+      }
+
+      // Validate ranks are sequential and unique
+      const ranks = ai_rankings.map(r => r.rank).sort((a, b) => a - b);
+      const expectedRanks = Array.from({ length: ranks.length }, (_, i) => i + 1);
+      const ranksValid = ranks.every((rank, idx) => rank === expectedRanks[idx]);
+
+      if (!ranksValid) {
+        return res.status(400).json({
+          error: "Ranks must be sequential starting from 1 with no duplicates"
+        });
+      }
+
+      // Save AI ranking session at business level
+      await BusinessModel.saveAIRankingSession(business_id, {
+        admin_id: req.user._id,
+        model_version: model_version || "v1.0",
+        total_projects: ai_rankings.length,
+        metadata: metadata || {}
+      });
+
+      // Bulk update AI ranks on projects
+      const bulkResult = await ProjectModel.bulkUpdateAIRanks(ai_rankings);
+
+      res.json({
+        message: "AI rankings saved successfully",
+        business_id,
+        projects_updated: bulkResult.modifiedCount,
+        rankings_applied: ai_rankings.length,
+        model_version: model_version || "v1.0"
+      });
+
+    } catch (err) {
+      console.error("SAVE AI RANKINGS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async getAIRankings(req, res) {
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get AI ranking session info
+      const rankingSession = await BusinessModel.getAIRankingSession(business_id);
+
+      // Get all projects with their AI ranks
+      const projects = await ProjectModel.getProjectsWithAIRanks(business_id);
+
+      // Populate created_by field
+      const populatedProjects = await ProjectModel.populateCreatedBy(projects);
+
+      const response = {
+        business_id,
+        business_name: business.business_name,
+        ranking_session: rankingSession,
+        projects: populatedProjects.map(p => ({
+          project_id: p._id,
+          project_name: p.project_name,
+          ai_rank: p.ai_rank,
+          ai_rank_score: p.ai_rank_score || null,
+          ai_rank_factors: p.ai_rank_factors || {},
+          created_by: p.created_by,
+          status: p.status
+        }))
+      };
+
+      res.json(response);
+
+    } catch (err) {
+      console.error("GET AI RANKINGS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+  static async getConsensusAnalysis(req, res) {
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get all projects with AI rankings
+      const projects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id),
+        ai_rank: { $exists: true, $ne: null }
+      });
+
+      if (projects.length === 0) {
+        return res.json({
+          business_id,
+          consensus_data: [],
+          message: "No AI rankings found for this business"
+        });
+      }
+
+      // Get all collaborator rankings
+      const db = getDB();
+      const allRankings = await db.collection("project_rankings")
+        .find({
+          business_id: new ObjectId(business_id)
+        })
+        .toArray();
+
+      // Get all non-admin collaborators
+      const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+      const users = await db.collection("users").find({
+        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
+      }).toArray();
+
+      const nonAdminUserIds = users
+        .filter(u => !ADMIN_ROLES.includes(u.role_name))
+        .map(u => u._id.toString());
+
+      // Calculate consensus for each project
+      const consensusData = projects.map(project => {
+        const projectId = project._id.toString();
+        const aiRank = project.ai_rank;
+
+        // Get all collaborator rankings for this project (excluding admins)
+        const projectRankings = allRankings.filter(r =>
+          r.project_id.toString() === projectId &&
+          nonAdminUserIds.includes(r.user_id.toString()) &&
+          r.rank !== null &&
+          r.rank !== undefined
+        );
+
+        const totalCollaborators = projectRankings.length;
+
+        if (totalCollaborators === 0) {
+          return {
+            project_id: project._id,
+            project_name: project.project_name,
+            ai_rank: aiRank,
+            consensus_score: null,
+            consensus_level: "no_data",
+            total_collaborators: 0,
+            agreeing_collaborators: 0,
+            agreement_percentage: 0,
+            collaborator_ranks: []
+          };
+        }
+
+        // Count how many collaborators ranked within ±1 of AI rank
+        // You can adjust the tolerance (currently ±1 means exact match or 1 position difference)
+        const tolerance = 1;
+        const agreeingCollaborators = projectRankings.filter(r =>
+          Math.abs(r.rank - aiRank) <= tolerance
+        ).length;
+
+        const agreementPercentage = (agreeingCollaborators / totalCollaborators) * 100;
+
+        // Determine consensus level
+        let consensusLevel;
+        let consensusScore;
+        if (agreementPercentage >= 80) {
+          consensusLevel = "high";
+          consensusScore = "green";
+        } else if (agreementPercentage >= 50) {
+          consensusLevel = "medium";
+          consensusScore = "yellow";
+        } else {
+          consensusLevel = "low";
+          consensusScore = "red";
+        }
+
+        return {
+          project_id: project._id,
+          project_name: project.project_name,
+          ai_rank: aiRank,
+          ai_rank_score: project.ai_rank_score || null,
+          consensus_score: consensusScore,
+          consensus_level: consensusLevel,
+          total_collaborators: totalCollaborators,
+          agreeing_collaborators: agreeingCollaborators,
+          agreement_percentage: Math.round(agreementPercentage),
+          collaborator_ranks: projectRankings.map(r => ({
+            user_id: r.user_id,
+            rank: r.rank,
+            matches_ai: Math.abs(r.rank - aiRank) <= tolerance
+          }))
+        };
+      });
+
+      // Sort by AI rank
+      consensusData.sort((a, b) => a.ai_rank - b.ai_rank);
+
+      res.json({
+        business_id,
+        total_projects: consensusData.length,
+        consensus_summary: {
+          high_consensus: consensusData.filter(d => d.consensus_level === "high").length,
+          medium_consensus: consensusData.filter(d => d.consensus_level === "medium").length,
+          low_consensus: consensusData.filter(d => d.consensus_level === "low").length,
+          no_data: consensusData.filter(d => d.consensus_level === "no_data").length
+        },
+        consensus_data: consensusData
+      });
+
+    } catch (err) {
+      console.error("GET CONSENSUS ANALYSIS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+  static async getCollaboratorConsensus(req, res) {
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get all projects for this business
+      const projects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id)
+      });
+
+      if (projects.length === 0) {
+        return res.json({
+          business_id,
+          consensus_data: [],
+          message: "No projects found for this business"
+        });
+      }
+
+      // Get all collaborator rankings
+      const db = getDB();
+      const allRankings = await db.collection("project_rankings")
+        .find({
+          business_id: new ObjectId(business_id)
+        })
+        .toArray();
+
+      // Get all non-admin collaborators
+      const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+      const users = await db.collection("users").find({
+        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
+      }).toArray();
+
+      const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+      const nonAdminUserIds = nonAdminUsers.map(u => u._id.toString());
+
+      // Create user map for names
+      const userMap = {};
+      nonAdminUsers.forEach(u => {
+        userMap[u._id.toString()] = u.name;
+      });
+
+      // Calculate consensus for each project
+      const consensusData = projects.map(project => {
+        const projectId = project._id.toString();
+
+        // Get all collaborator rankings for this project (excluding admins)
+        const projectRankings = allRankings.filter(r =>
+          r.project_id.toString() === projectId &&
+          nonAdminUserIds.includes(r.user_id.toString()) &&
+          r.rank !== null &&
+          r.rank !== undefined
+        );
+
+        const totalCollaborators = projectRankings.length;
+
+        if (totalCollaborators === 0) {
+          return {
+            project_id: project._id,
+            project_name: project.project_name,
+            average_rank: null,
+            consensus_score: null,
+            consensus_level: "no_data",
+            total_collaborators: 0,
+            rank_variance: 0,
+            collaborator_rankings: []
+          };
+        }
+
+        // Calculate average rank
+        const rankSum = projectRankings.reduce((sum, r) => sum + r.rank, 0);
+        const averageRank = rankSum / totalCollaborators;
+
+        // Calculate variance to determine consensus
+        const variance = projectRankings.reduce((sum, r) => {
+          return sum + Math.pow(r.rank - averageRank, 2);
+        }, 0) / totalCollaborators;
+
+        const standardDeviation = Math.sqrt(variance);
+
+        // Determine consensus level based on standard deviation
+        let consensusLevel;
+        let consensusScore;
+
+        // Lower standard deviation = higher agreement
+        if (standardDeviation <= 2) {
+          consensusLevel = "high";
+          consensusScore = "green";
+        } else if (standardDeviation <= 4) {
+          consensusLevel = "medium";
+          consensusScore = "yellow";
+        } else {
+          consensusLevel = "low";
+          consensusScore = "red";
+        }
+
+        // Format collaborator rankings with names and rationales
+        const collaboratorRankings = projectRankings.map(r => ({
+          user_id: r.user_id,
+          user_name: userMap[r.user_id.toString()] || "Unknown",
+          rank: r.rank,
+          rationale: r.rationals || "",
+          deviation_from_average: Math.abs(r.rank - averageRank).toFixed(1)
+        })).sort((a, b) => a.rank - b.rank);
+
+        return {
+          project_id: project._id,
+          project_name: project.project_name,
+          average_rank: Math.round(averageRank * 10) / 10, // Round to 1 decimal
+          consensus_score: consensusScore,
+          consensus_level: consensusLevel,
+          total_collaborators: totalCollaborators,
+          rank_variance: Math.round(variance * 10) / 10,
+          standard_deviation: Math.round(standardDeviation * 10) / 10,
+          collaborator_rankings: collaboratorRankings
+        };
+      });
+
+      // Sort by average rank
+      consensusData.sort((a, b) => {
+        if (a.average_rank === null) return 1;
+        if (b.average_rank === null) return -1;
+        return a.average_rank - b.average_rank;
+      });
+
+      res.json({
+        business_id,
+        total_projects: consensusData.length,
+        consensus_summary: {
+          high_consensus: consensusData.filter(d => d.consensus_level === "high").length,
+          medium_consensus: consensusData.filter(d => d.consensus_level === "medium").length,
+          low_consensus: consensusData.filter(d => d.consensus_level === "low").length,
+          no_data: consensusData.filter(d => d.consensus_level === "no_data").length
+        },
+        consensus_data: consensusData
+      });
+
+    } catch (err) {
+      console.error("GET COLLABORATOR CONSENSUS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
 }
 
 module.exports = ProjectController;
