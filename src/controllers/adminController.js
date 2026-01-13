@@ -66,6 +66,12 @@ class AdminController {
         return res.status(400).json({ error: "Admin email already exists" });
       }
 
+      const normalizedCompanyName = company_name.trim().toLowerCase();
+      const existingCompany = await CompanyModel.findByName(normalizedCompanyName);
+      if(existingCompany){
+        return res.status(400).json({ error: "Company with this name already exists"})
+      }
+
       let logoUrl = null;
       if (req.file) {
         logoUrl = `${req.protocol}://${req.get("host")}/uploads/logos/${req.file.filename}`;
@@ -73,6 +79,7 @@ class AdminController {
 
       const companyId = await CompanyModel.create({
         company_name,
+        company_name_normalized: normalizedCompanyName,
         industry: industry || "",
         size: size || "",
         logo: logoUrl,
@@ -214,6 +221,49 @@ class AdminController {
       res.status(500).json({ error: "Failed to create user" });
     }
   }
+
+
+static async updateUserRole(req, res) {
+  try {
+    
+    const { user_id } = req.params;
+    const { role } = req.body;
+
+
+    if (!ObjectId.isValid(user_id)) {
+      return res.status(400).json({ error: "Invalid user ID" });
+    }
+
+    if (!role) {
+      return res.status(400).json({ error: "Role is required" });
+    }
+
+    const allowedRoles = ["user", "viewer", "collaborator"];
+
+    if (!allowedRoles.includes(role.toLowerCase())) {
+      return res.status(400).json({
+        error: `Invalid role. Allowed roles: ${allowedRoles.join(", ")}`,
+      });
+    }
+
+    const targetUser = await UserModel.findById(user_id);
+    if (!targetUser) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    await UserModel.updateRole(user_id, role.toLowerCase());
+
+    return res.json({
+      message: "User role updated successfully",
+      user_id,
+      new_role: role.toLowerCase(),
+      role: req.user.role.role_name,
+    });
+  } catch (error) {
+    console.error("Failed to update user role:", error);
+    return res.status(500).json({ error: "Failed to update user role" });
+  }
+}
 
   static async getAuditTrail(req, res) {
     try {

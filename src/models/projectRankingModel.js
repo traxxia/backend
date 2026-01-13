@@ -58,7 +58,24 @@ class ProjectRankingModel {
       .sort({ rank: 1 })
       .toArray();
   }
+
+  static async unlockRankingByBusiness(businessId) {
+  return this.collection().updateMany(
+    { business_id: new ObjectId(businessId) },
+    { $set: { locked: false } }
+  );
 }
+
+static async lockRankingByBusiness(businessId) {
+  return this.collection().updateMany(
+    { business_id: new ObjectId(businessId) },
+    { $set: { locked: true } }
+  );
+}
+
+}
+
+
 
 
 module.exports = ProjectRankingModel;

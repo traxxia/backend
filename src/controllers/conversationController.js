@@ -3,37 +3,45 @@ const ConversationModel = require("../models/conversationModel");
 const BusinessModel = require("../models/businessModel");
 const QuestionModel = require("../models/questionModel");
 const UserModel = require("../models/userModel");
+const { logAuditEvent } = require("../services/auditService");
+
+
 
 /**
  * Helper: Validate business + determine owner + access rights
  */
-
-
 async function getBusinessAndValidateAccess(business_id, currentUser) {
   const business = await BusinessModel.findById(new ObjectId(business_id));
   if (!business) return { error: "Business not found" };
 
-  const isOwner =
-    business.user_id.toString() === currentUser._id.toString();
+  const isOwner = business.user_id.toString() === currentUser._id.toString();
 
   const isCollaborator = (business.collaborators || []).some(
     (id) => id.toString() === currentUser._id.toString()
   );
 
   const isAdmin = ["super_admin", "company_admin"].includes(
-    currentUser.role.role_name
-  );
+  currentUser.role?.role_name
+);
 
-  const isViewer = currentUser.role.role_name === "viewer";
+const isViewer = currentUser.role?.role_name === "viewer";
 
-  // company boundary check
-  if ((isAdmin || isViewer) && currentUser.company_id) {
+  console.log({
+    userId: currentUser._id,
+    role: currentUser.role?.role_name,
+    company: currentUser.company_id,
+    isOwner,
+    isCollaborator,
+    isAdmin,
+    isViewer
+  });
+
+  if(isAdmin && currentUser.company_id){
     const owner = await UserModel.findById(business.user_id);
-    if (
-      owner?.company_id?.toString() !==
-      currentUser.company_id.toString()
-    ) {
-      return { error: "Business not in your company" };
+    if(
+      owner?.company_id?.toString() !== currentUser.company_id.toString()
+    ){
+      return { error: "Business not in your company" }
     }
   }
 
@@ -41,19 +49,18 @@ async function getBusinessAndValidateAccess(business_id, currentUser) {
     return { error: "Not allowed to access conversations for this business" };
   }
 
-  return {
-    business,
-    ownerId: business.user_id,
-    access: {
+  return { 
+     business,
+     ownerId: business.user_id,
+     access: {
       isOwner,
       isCollaborator,
       isAdmin,
-      isViewer,
       canWrite: isOwner || isCollaborator || isAdmin,
-    },
-  };
+     }
+          
+    };
 }
-
 
 class ConversationController {
   static async getAll(req, res) {
@@ -106,11 +113,10 @@ class ConversationController {
 
       //BUSINESS VALIDATION
       if (business_id) {
-
         const access = await getBusinessAndValidateAccess(
-  business_id,
-  req.user
-);
+          business_id,
+          req.user
+        );
 
         if (access.error) return res.status(403).json({ error: access.error });
 
@@ -267,7 +273,8 @@ class ConversationController {
           // Fallback: treat any real (non-skipped) answer as completed
           status = "complete";
         }
-
+        // if (isSkipped) status = "skipped";
+        // else if (latestUserAnswer?.metadata?.is_complete) status = "complete";
 
         return {
           question_id: question._id,
@@ -344,37 +351,148 @@ class ConversationController {
 
   static async create(req, res) {
     try {
-      const { business_id, question_id, message_text, answer_text } = req.body;
+      const {
+        business_id,
+        question_id,
+        message_text,
+        answer_text,
+        is_complete = false,
+        metadata = {},
+      } = req.body;
+
+      if (!business_id) {
+        return res.status(400).json({ error: "business_id is required" });
+      }
 
       const access = await getBusinessAndValidateAccess(
-  business_id,
-  req.user
-);
-
+        business_id,
+        req.user
+      );
       if (access.error) return res.status(403).json({ error: access.error });
-if (!access.access.canWrite) {
-  return res.status(403).json({
-    error: "Read-only access. You cannot modify conversations.",
-  });
-}
+
       const ownerId = new ObjectId(access.ownerId);
 
+      const isUserMessage = !!answer_text;
+      const isBotMessage = !!message_text && !answer_text;
+
+      if (!isUserMessage && !isBotMessage && !question_id) {
+        return res.status(400).json({
+          error:
+            "Invalid payload: must include question_id + answer_text (user) or message_text (bot)",
+        });
+      }
+
+      // === EDIT FROM BRIEF MODE ===
+      const isEdit =
+        metadata?.from_editable_brief === true || metadata?.is_edit === true;
+
+      if (isEdit) {
+        if (!question_id || !answer_text) {
+          return res
+            .status(400)
+            .json({ error: "question_id and answer_text required for edit" });
+        }
+
+        // Clean up all previous entries for this question
+        const cleanupFilter = {
+          user_id: ownerId,
+          business_id: new ObjectId(business_id),
+          question_id: new ObjectId(question_id),
+          conversation_type: "question_answer",
+        };
+
+        const deleted = await ConversationModel.deleteMany(cleanupFilter);
+        console.log(
+          `🧽 Edit cleanup: removed ${deleted.deletedCount} entries for question ${question_id}`
+        );
+
+        // Create new clean edited answer
+        const editedPayload = {
+          user_id: ownerId,
+          business_id: new ObjectId(business_id),
+          question_id: new ObjectId(question_id),
+          conversation_type: "question_answer",
+          message_type: "user",
+          message_text: "",
+          answer_text: answer_text.trim(),
+          is_followup: false,
+          metadata: {
+            ...metadata,
+            is_complete: true,
+            is_edit: true,
+            from_editable_brief: true,
+            last_edited: new Date(),
+          },
+          created_at: new Date(),
+          updated_at: new Date(),
+        };
+
+        const inserted = await ConversationModel.create(editedPayload);
+
+        // Audit log
+        await logAuditEvent(
+          req.user._id,
+          "question_edited",
+          {
+            question_id,
+            answer_preview: answer_text.substring(0, 200) + "...",
+            deleted_count: deleted.deletedCount,
+            business_id,
+          },
+          business_id
+        );
+
+        return res.json({
+          message: "Answer edited successfully — previous history cleared",
+          conversation_id: inserted._id || inserted,
+          action: "edited_and_replaced",
+          is_complete: true,
+          is_edit: true,
+        });
+      }
+
+      // === NORMAL MODE (New Answer or Bot Message) ===
       const payload = {
         user_id: ownerId,
         business_id: new ObjectId(business_id),
         question_id: question_id ? new ObjectId(question_id) : null,
+        conversation_type: "question_answer",
+        message_type: isUserMessage ? "user" : "bot",
         message_text: message_text || null,
         answer_text: answer_text || null,
-        message_type: answer_text ? "user" : "bot",
-        conversation_type: "question_answer",
+        is_followup: isBotMessage && metadata.is_followup === true,
+        metadata: {
+          ...metadata,
+          is_complete: isUserMessage ? is_complete : false,
+        },
         created_at: new Date(),
       };
 
       const result = await ConversationModel.create(payload);
 
+      // Audit logging for regular answers
+      if (isUserMessage) {
+        const eventType =
+          answer_text === "[Question Skipped]"
+            ? "question_skipped"
+            : "question_answered";
+        await logAuditEvent(
+          req.user._id,
+          eventType,
+          {
+            question_id,
+            answer_preview: answer_text?.substring(0, 200) + "...",
+            is_complete,
+            business_id,
+          },
+          business_id
+        );
+      }
+
       res.status(201).json({
         message: "Conversation entry added",
         conversation: result,
+        action: "created",
       });
     } catch (error) {
       console.error("Conversation create error:", error);
@@ -387,16 +505,11 @@ if (!access.access.canWrite) {
       const { business_id, question_id } = req.body;
 
       const access = await getBusinessAndValidateAccess(
-  business_id,
-  req.user
-);
-
+        business_id,
+        req.user
+      );
       if (access.error) return res.status(403).json({ error: access.error });
-if (!access.access.canWrite) {
-  return res.status(403).json({
-    error: "Read-only access. You cannot modify conversations.",
-  });
-}
+
       if (!question_id) {
         return res.status(400).json({ error: "question_id is required" });
       }
@@ -410,10 +523,21 @@ if (!access.access.canWrite) {
         answer_text: "[Question Skipped]",
         message_type: "user",
         conversation_type: "question_answer",
+        metadata: {
+          is_complete: true,
+          is_skipped: true,
+        },
         created_at: new Date(),
       };
 
       const result = await ConversationModel.create(payload);
+
+      await logAuditEvent(
+        req.user._id,
+        "question_skipped",
+        { question_id, business_id },
+        business_id
+      );
 
       res.json({
         message: "Question skipped",
@@ -430,15 +554,11 @@ if (!access.access.canWrite) {
       const { business_id, question_id, message_text } = req.body;
 
       const access = await getBusinessAndValidateAccess(
-  business_id,
-  req.user
-);
+        business_id,
+        req.user
+      );
       if (access.error) return res.status(403).json({ error: access.error });
-if (!access.access.canWrite) {
-  return res.status(403).json({
-    error: "Read-only access. You cannot modify conversations.",
-  });
-}
+
       if (!question_id) {
         return res.status(400).json({ error: "question_id is required" });
       }
@@ -470,44 +590,93 @@ if (!access.access.canWrite) {
 
   static async savePhaseAnalysis(req, res) {
     try {
-      const { business_id, phase, analysis_type, analysis_result } = req.body;
+      const {
+        business_id,
+        phase,
+        analysis_type,
+        analysis_name,
+        analysis_data,
+        metadata = {},
+      } = req.body;
 
+      // Validation
+      if (
+        !business_id ||
+        !phase ||
+        !analysis_type ||
+        !analysis_name ||
+        !analysis_data
+      ) {
+        return res.status(400).json({
+          error:
+            "business_id, phase, analysis_type, analysis_name, and analysis_data are required",
+        });
+      }
+
+      // Access control
       const access = await getBusinessAndValidateAccess(
-  business_id,
-  req.user
-);
+        business_id,
+        req.user
+      );
       if (access.error) return res.status(403).json({ error: access.error });
 
-      if (!access.access.canWrite) {
-  return res.status(403).json({
-    error: "Read-only access. You cannot modify conversations.",
-  });
-}
       const ownerId = new ObjectId(access.ownerId);
 
-      const payload = {
+      // Unique filter
+      const filter = {
         user_id: ownerId,
         business_id: new ObjectId(business_id),
         conversation_type: "phase_analysis",
-        metadata: { phase, analysis_type },
-        analysis_result,
-        created_at: new Date(),
+        "metadata.phase": phase,
+        "metadata.analysis_type": analysis_type,
       };
 
-      if (!phase || !analysis_type) {
-        return res
-          .status(400)
-          .json({ error: "phase and analysis_type are required" });
-      }
-      const result = await ConversationModel.create(payload);
+      const fullDocument = {
+        user_id: ownerId,
+        business_id: new ObjectId(business_id),
+        conversation_type: "phase_analysis",
+        message_type: "system",
+        message_text: analysis_name,
+        analysis_result: analysis_data,
+        metadata: {
+          phase,
+          analysis_type,
+          generated_at: new Date().toISOString(),
+          ...metadata,
+        },
+        created_at: new Date(),
+        updated_at: new Date(),
+      };
+
+      const result = await ConversationModel.replaceOne(filter, fullDocument, {
+        upsert: true,
+      });
+
+      // Audit logging
+      await logAuditEvent(
+        req.user._id,
+        "analysis_generated",
+        {
+          phase,
+          analysis_type,
+          analysis_name,
+          business_id,
+          was_update: result.modifiedCount > 0 || result.matchedCount > 0,
+          was_insert: !!result.upsertedId,
+          data_keys: Object.keys(analysis_data || {}),
+        },
+        business_id
+      );
 
       res.json({
-        message: "Phase analysis saved",
-        analysis: result,
+        message: "Phase analysis saved successfully",
+        upserted: !!result.upsertedId,
+        modified: result.modifiedCount > 0,
+        matched: result.matchedCount > 0,
       });
     } catch (error) {
-      console.error("Phase analysis error:", error);
-      res.status(500).json({ error: "Failed to save analysis" });
+      console.error("Phase analysis save error:", error);
+      res.status(500).json({ error: "Failed to save phase analysis" });
     }
   }
 
@@ -520,9 +689,9 @@ if (!access.access.canWrite) {
       }
 
       const access = await getBusinessAndValidateAccess(
-  business_id,
-  req.user
-);
+        business_id,
+        req.user
+      );
       if (access.error) {
         return res.status(403).json({ error: access.error });
       }
@@ -576,17 +745,10 @@ if (!access.access.canWrite) {
       const { business_id } = req.body;
 
       const access = await getBusinessAndValidateAccess(
-  business_id,
-  req.user
-);
+        business_id,
+        req.user
+      );
       if (access.error) return res.status(403).json({ error: access.error });
-
-
-      if (!access.access.canWrite) {
-  return res.status(403).json({
-    error: "Read-only access. You cannot modify conversations.",
-  });
-}
 
       const ownerId = new ObjectId(access.ownerId);
 

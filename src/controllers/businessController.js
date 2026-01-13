@@ -3,21 +3,54 @@ const BusinessModel = require("../models/businessModel");
 const UserModel = require("../models/userModel");
 const ConversationModel = require("../models/conversationModel");
 const QuestionModel = require("../models/questionModel");
-const ProjectModel = require("../models/projectModel")
+const ProjectModel = require("../models/projectModel");
+const ProjectRankingModel = require("../models/projectRankingModel")
 const { logAuditEvent } = require("../services/auditService");
+const { getDB } = require("../config/database")
+
 const {
   MAX_BUSINESSES_PER_USER,
   ALLOWED_PHASES,
 } = require("../config/constants");
 
-
 const VALID_ADMIN_ROLES = ["super_admin", "company_admin"];
 
+
+
 class BusinessController {
+
+
   static async getAll(req, res) {
     try {
       const { user_id } = req.query;
       let targetUserId;
+
+
+      const db = getDB();
+
+      // Fetch the role document for company_admin
+      const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
+      const companyAdminRoleId = companyAdminRole?._id;
+
+      let companyAdminIds = [];
+
+      if (req.user.company_id && companyAdminRoleId) {
+        try {
+          const companyAdmins = await UserModel.getAll({
+            company_id: req.user.company_id,
+            role_id: companyAdminRoleId
+          });
+
+          // Ensure we always have an array of string IDs
+          companyAdminIds = Array.isArray(companyAdmins)
+            ? companyAdmins.map(admin => admin._id.toString())
+            : [];
+
+        } catch (err) {
+          console.error("Failed to fetch company admins:", err);
+          companyAdminIds = [];
+        }
+      }
 
       if (user_id) {
         if (!VALID_ADMIN_ROLES.includes(req.user.role.role_name)) {
@@ -46,7 +79,6 @@ class BusinessController {
         targetUserId = new ObjectId(req.user._id);
       }
 
-
       let owned = [];
       let collabs = [];
 
@@ -54,14 +86,11 @@ class BusinessController {
         ["company_admin", "viewer"].includes(req.user.role.role_name) &&
         !user_id
       ) {
-
         const companyUsers = await UserModel.getAll({
           company_id: req.user.company_id,
         });
 
-        const companyUserIds = companyUsers.map(
-          (u) => new ObjectId(u._id)
-        );
+        const companyUserIds = companyUsers.map((u) => new ObjectId(u._id));
 
         owned = await BusinessModel.findByUserIds(companyUserIds);
         collabs = await BusinessModel.findByCollaborator(req.user._id);
@@ -70,7 +99,6 @@ class BusinessController {
         collabs = await BusinessModel.findByCollaborator(targetUserId);
       }
 
-
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
       const collaborating_businesses = collabs.filter(
         (b) => !ownedIds.has(b._id.toString())
@@ -78,14 +106,14 @@ class BusinessController {
 
       // check business with started projects
       const allBusinesses = [...owned, ...collaborating_businesses];
-      const businessIds = allBusinesses.map(
-        (b) => new ObjectId(b._id)
-      );
+      const businessIds = allBusinesses.map((b) => new ObjectId(b._id));
 
-      const businessesWithProjects = await ProjectModel.collection()
-        .distinct("business_id", {
+      const businessesWithProjects = await ProjectModel.collection().distinct(
+        "business_id",
+        {
           business_id: { $in: businessIds },
-        });
+        }
+      );
 
       const businessHasProjectSet = new Set(
         businessesWithProjects.map((id) => id.toString())
@@ -173,6 +201,7 @@ class BusinessController {
 
             return {
               ...business,
+              company_admin_id: companyAdminIds,
               city: business.city || "",
               country: business.country || "",
               location_display: [business.city, business.country]
@@ -201,9 +230,7 @@ class BusinessController {
                 included_phases: ALLOWED_PHASES,
               },
               access,
-              has_projects: businessHasProjectSet.has(
-                business._id.toString()
-              ),
+              has_projects: businessHasProjectSet.has(business._id.toString()),
             };
           })
         );
@@ -211,6 +238,11 @@ class BusinessController {
 
       const enhancedOwned = await enhance(owned);
       const enhancedCollaborating = await enhance(collaborating_businesses);
+
+      //       console.log("DEBUG companyAdminIds:", companyAdminIds);
+      // console.log("DEBUG targetUserId:", targetUserId.toString());
+      // console.log("DEBUG owned:", owned.map(b => b._id.toString()));
+      // console.log("DEBUG collaborating_businesses:", collaborating_businesses.map(b => b._id.toString()));
 
       res.json({
         businesses: enhancedOwned,
@@ -229,6 +261,7 @@ class BusinessController {
           phases_excluded: ["good"],
         },
         user_id: targetUserId.toString(),
+        company_admin_ids: companyAdminIds
       });
     } catch (error) {
       console.error("Failed to fetch businesses:", error);
@@ -285,6 +318,7 @@ class BusinessController {
         city: city ? city.trim() : "",
         country: country ? country.trim() : "",
         collaborators: [],
+        status: "draft",
       };
 
       const businessId = await BusinessModel.create(businessData);
@@ -356,6 +390,151 @@ class BusinessController {
     }
   }
 
+  static async getCollaborators(req, res) {
+    try {
+      const businessId = req.params.id;
+
+      if (!ObjectId.isValid(businessId)) {
+        return res.status(400).json({ error: "Invalid business id" });
+      }
+
+      const business = await BusinessModel.findById(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Only company_admin / super_admin can access
+      const role = req.user.role.role_name;
+      if (!["company_admin", "super_admin"].includes(role)) {
+        return res.status(403).json({
+          error: "Only company_admin or super_admin can view collaborators",
+        });
+      }
+
+      const collaboratorIds = business.collaborators || [];
+
+      const collaborators = await UserModel.getAll({
+        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
+      });
+
+      const response = collaborators.map(u => ({
+        _id: u._id,
+        name: u.name,
+      }));
+
+      res.json({ collaborators: response });
+    } catch (err) {
+      console.error("GET collaborators error:", err);
+      res.status(500).json({ error: "Failed to fetch collaborators" });
+    }
+  }
+  static async setAllowedCollaborators(req, res) {
+    try {
+      const { businessId, projectId } = req.params;
+      const { collaborator_ids } = req.body;
+
+      if (!ObjectId.isValid(businessId) || !ObjectId.isValid(projectId)) {
+        return res.status(400).json({ error: "Invalid business or project id" });
+      }
+
+      if (!Array.isArray(collaborator_ids) || collaborator_ids.length === 0) {
+        return res.status(400).json({
+          error: "collaborator_ids must be a non-empty array of user IDs"
+        });
+      }
+
+      // Fetch business
+      const business = await BusinessModel.findById(businessId);
+      if (!business) return res.status(404).json({ error: "Business not found" });
+
+      // Only admin can update
+      const role = req.user.role.role_name;
+      if (!["company_admin", "super_admin"].includes(role)) {
+        return res.status(403).json({ error: "Only admin can set allowed collaborators" });
+      }
+
+      // Fetch project to ensure it exists
+      const project = await ProjectModel.collection().findOne({
+        _id: new ObjectId(projectId),
+        business_id: new ObjectId(businessId),
+      });
+
+      if (!project) return res.status(404).json({ error: "Project not found in this business" });
+
+      // Get existing allowed collaborators
+      const existingAllowedIds = (project.allowed_collaborators || []).map(id => id.toString());
+
+      // Merge with new collaborator IDs (avoid duplicates)
+      const mergedIds = [...new Set([...existingAllowedIds, ...collaborator_ids])];
+      const allowedIds = mergedIds.map(id => new ObjectId(id));
+
+      await ProjectModel.collection().updateOne(
+        { _id: new ObjectId(projectId) },
+        { $set: { allowed_collaborators: allowedIds, updated_at: new Date() } }
+      );
+
+      res.json({
+        message: "Allowed collaborators updated for project",
+        allowed_collaborators: allowedIds.map(id => id.toString()),
+      });
+    } catch (err) {
+      console.error("Set allowed collaborators error:", err);
+      res.status(500).json({ error: "Failed to update allowed collaborators" });
+    }
+  }
+
+  static async setAllowedRankingCollaborators(req, res) {
+    try {
+      const { id } = req.params;
+      const { collaborator_ids } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: "Invalid business id" });
+      }
+
+      if (!Array.isArray(collaborator_ids) || collaborator_ids.length === 0) {
+        return res.status(400).json({
+          error: "collaborator_ids must be a non-empty array of user IDs",
+        });
+      }
+
+      if (!["company_admin", "super_admin"].includes(req.user.role.role_name)) {
+        return res.status(403).json({
+          error: "Only admin can set ranking collaborators",
+        });
+      }
+
+      const business = await BusinessModel.findById(id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // only collaborators of this business are allowed
+      const validIds = collaborator_ids.filter(cid =>
+        (business.collaborators || []).some(
+          bid => bid.toString() === cid.toString()
+        )
+      );
+
+      // Get existing allowed ranking collaborators
+      const existingAllowed = business.allowed_ranking_collaborators || [];
+      const existingIds = existingAllowed.map(id => id.toString());
+
+      // Merge with new IDs (avoid duplicates)
+      const mergedIds = [...new Set([...existingIds, ...validIds])];
+
+      await BusinessModel.setAllowedRankingCollaborators(id, mergedIds);
+
+      res.json({
+        message: "Allowed ranking collaborators updated",
+        allowed_ranking_collaborators: mergedIds,
+      });
+    } catch (err) {
+      console.error("SET RANKING COLLAB ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
   static async assignCollaborator(req, res) {
     try {
       const businessId = req.params.id;
@@ -383,16 +562,20 @@ class BusinessController {
           .status(400)
           .json({ error: "Owner cannot be added as collaborator" });
       }
+      const alreadyAssigned = (business.collaborators || []).some(
+        (id) => id.toString() === collaboratorId
+      );
+
+      if (alreadyAssigned) {
+        return res.status(400).json({
+          error: "This collaborator already assigned in this business",
+        });
+      }
 
       const addResult = await BusinessModel.addCollaborator(
         businessId,
         collaboratorId
       );
-      if (addResult.modifiedCount === 0 && addResult.matchedCount === 1) {
-        return res
-          .status(200)
-          .json({ message: "Collaborator already assigned or no change" });
-      }
 
       if (typeof logAuditEvent === "function") {
         await logAuditEvent(req.user._id, "collaborator_assigned", {
@@ -452,7 +635,7 @@ class BusinessController {
       const { id } = req.params;
       const { status } = req.body;
 
-      const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
+      const VALID_STATUS = ["prioritizing", "prioritized", "launched", "reprioritizing"];
       const ADMIN_ROLES = ["company_admin", "super_admin"];
 
       if (!VALID_STATUS.includes(status)) {
@@ -470,11 +653,50 @@ class BusinessController {
         return res.status(404).json({ error: "Business not found" });
       }
 
+      if (status === "reprioritizing") {
+        await ProjectRankingModel.unlockRankingByBusiness(id);
+        await BusinessModel.clearAllowedRankingCollaborators(id);
+      }
+
+      if (status === "launched") {
+        await ProjectRankingModel.lockRankingByBusiness(id);
+        await BusinessModel.clearAllowedRankingCollaborators(id);
+
+        await ProjectModel.collection().updateMany(
+          { business_id: new ObjectId(id) },
+          { $set: { allowed_collaborators: [], updated_at: new Date() } }
+        );
+      }
+
+
       // Update business status
       await BusinessModel.collection().updateOne(
         { _id: new ObjectId(id) },
         { $set: { status, updated_at: new Date() } }
       );
+
+      // business owner(user) to collaborator 
+      if (["prioritizing", "prioritized", "reprioritizing"].includes(status) && business.user_id) {
+        const ownerId = business.user_id.toString();
+        const ownerUser = await require("../models/userModel").findById(ownerId);
+
+        if (ownerUser) {
+          const roleDoc = await require("../config/database")
+            .getDB()
+            .collection("roles")
+            .findOne({ _id: ownerUser.role_id });
+
+          const ownerRoleName = roleDoc?.role_name;
+
+          if (["user", "viewer"].includes(ownerRoleName)) {
+            await require("../models/userModel").updateRole(ownerId, "collaborator");
+            await BusinessModel.addCollaborator(id, ownerId);
+            console.log(
+              `Owner auto-promoted to collaborator: ${ownerId} for business ${id}`
+            );
+          }
+        }
+      }
 
       // Update all projects under this business
       await ProjectModel.collection().updateMany(

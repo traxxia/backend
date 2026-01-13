@@ -65,6 +65,31 @@ class UserModel {
       { $sort: { created_at: -1 } }
     ]).toArray();
   }
+
+  static async updateRole(userId, roleName){
+    const db = getDB();
+
+    const roleDoc = await db.collection("roles").findOne({ role_name: roleName });
+
+    if(!roleDoc){
+      throw new Error(`Role ${roleName} not found`);
+    }
+
+    return await db.collection("users").updateOne(
+      { _id: new ObjectId(userId) },
+      {
+        $set: {
+          role_id: roleDoc._id,
+          updated_at: new Date(),
+        },
+      }
+    )
+  }
+
 }
+
+
+
+
 
 module.exports = UserModel;

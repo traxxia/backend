@@ -2,10 +2,14 @@ const { ObjectId } = require("mongodb");
 const ProjectModel = require("../models/projectModel");
 const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
+const UserModel = require("../models/userModel")
+const { getDB } = require("../config/database");
 
-const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched"];
+const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
-const PROJECT_TYPES = ["immediate", "short_term", "long_term"]
+const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
+const DEFAULT_PROJECT_TYPE = "immediate action";
+
 
 // Permission matrix for ALL project actions
 function getProjectPermissions({
@@ -39,12 +43,16 @@ function getProjectPermissions({
         canEdit: false,
       };
 
+    case "reprioritizing":
+      return {
+        canCreate: false,
+        canEdit: isAdmin,
+      }
+
     default:
       return { canCreate: false, canEdit: false };
   }
 }
-
-
 
 // Normalize string fields
 function normalizeString(value) {
@@ -62,6 +70,8 @@ function normalizeBudget(value) {
 
 class ProjectController {
   static async getAll(req, res) {
+    const db = getDB();
+
     try {
       const {
         business_id,
@@ -97,10 +107,49 @@ class ProjectController {
 
       const raw = await ProjectModel.findAll(filter);
       const total = await ProjectModel.count(filter);
-      const projects = await ProjectModel.populateCreatedBy(raw);
+      let projects = await ProjectModel.populateCreatedBy(raw);
+
+      projects = projects.map(project => ({
+        ...project,
+        allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
+      }));
 
 
-      res.json({ total, count: projects.length, projects });
+      let ranking_lock_summary = { locked_users_count: 0, total_users: 0 };
+
+      if (business_id && ObjectId.isValid(business_id)) {
+        const business = await BusinessModel.findById(business_id);
+        if (business) {
+          // Owner + collaborators
+          const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+
+
+          const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+
+          const users = await db.collection("users").find({
+            _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+          }).toArray();
+
+          // Filter non-admins
+          const nonAdminUserIds = users
+            .filter(u => !ADMIN_ROLES.includes(u.role_name))
+            .map(u => u._id.toString());
+
+          // Locked counts for non-admins only
+          const lockedUserIds = await ProjectRankingModel.collection().distinct("user_id", {
+            business_id: new ObjectId(business_id),
+            locked: true,
+            user_id: { $in: nonAdminUserIds.map(id => new ObjectId(id)) }
+          });
+
+          ranking_lock_summary = {
+            total_users: nonAdminUserIds.length,
+            locked_users_count: lockedUserIds.length
+          };
+        }
+      }
+
+      res.json({ total, count: projects.length, projects, ranking_lock_summary, });
     } catch (err) {
       console.error("PROJECT GET ALL ERR:", err);
       res.status(500).json({ error: "Server error" });
@@ -144,6 +193,8 @@ class ProjectController {
         success_metrics,
         estimated_timeline,
         budget_estimate,
+        project_type,
+
       } = req.body;
 
       // Required fields
@@ -153,21 +204,102 @@ class ProjectController {
         });
       }
 
-      // if (!VALID_STATUS.includes(status)) {
-      //   return res.status(400).json({ error: "Invalid status value" });
-      // }
-
       // Check business
       const business = await BusinessModel.findById(business_id);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
+
+
+      // User-collaborator
+      if (!ADMIN_ROLES.includes(req.user.role.role_name) && business.user_id) {
+        const ownerId = business.user_id.toString();
+
+
+        const ownerUser = await require("../models/userModel").findById(ownerId);
+
+        if (ownerUser) {
+
+          const db = getDB();
+
+          const roleDoc = await db.collection("roles").findOne({ _id: ownerUser.role_id });
+
+          const ownerRoleName = roleDoc?.role_name;
+
+          if (["user", "viewer"].includes(ownerRoleName)) {
+            // Update role → collaborator
+            await require("../models/userModel").updateRole(ownerId, "collaborator");
+
+            // Add owner as business collaborator
+            await BusinessModel.addCollaborator(business_id, ownerId);
+
+            console.log(
+              `Role auto-updated: userId ${ownerId} → collaborator for businessId ${business_id}`
+            );
+          }
+        }
+      }
 
       // Permission
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(
         (id) => id.toString() === req.user._id.toString()
       );
+
+
+      const ownerIdStr = business.user_id?.toString();
+
+      if (ownerIdStr) {
+        // Fetch business owner role
+        const ownerUser = await UserModel.findById(ownerIdStr);
+
+        let ownerRoleName = null;
+        if (ownerUser?.role_id) {
+          const db = getDB();
+          const roleDoc = await db
+            .collection("roles")
+            .findOne({ _id: ownerUser.role_id });
+          ownerRoleName = roleDoc?.role_name;
+        }
+
+        const ownerIsAdmin = ADMIN_ROLES.includes(ownerRoleName);
+
+        // Auto-add if owner is not admin
+        if (!ownerIsAdmin) {
+          const alreadyCollaborator = Array.isArray(business.collaborators)
+            ? business.collaborators.some((id) => id.toString() === ownerIdStr)
+            : false;
+
+          if (!alreadyCollaborator) {
+            await BusinessModel.addCollaborator(
+              business._id.toString(),
+              ownerIdStr
+            );
+
+            if (!Array.isArray(business.collaborators)) {
+              business.collaborators = [];
+            }
+
+            business.collaborators.push(new ObjectId(ownerIdStr));
+
+            console.log(
+              `Non-admin owner auto-added as collaborator: ${ownerIdStr}`
+            );
+          }
+        }
+      }
+
+
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
+
+      if (
+        isAdmin &&
+        (!Array.isArray(business.collaborators) || business.collaborators.length === 0)
+      ) {
+        return res.status(400).json({
+          error: "Please add at least one collaborator before creating a project",
+        });
+      }
 
       // NOTE: Owner alone cannot work on projects unless also collaborator
       const permissions = getProjectPermissions({
@@ -189,11 +321,25 @@ class ProjectController {
         });
       }
 
+      // Normalize project_type (allow missing → default)
+      const normalizedProjectType =
+        project_type === undefined || project_type === null || project_type === ""
+          ? DEFAULT_PROJECT_TYPE
+          : project_type;
+
+      if (!PROJECT_TYPES.includes(normalizedProjectType)) {
+        return res.status(400).json({
+          error: `project_type must be one of ${PROJECT_TYPES.join(", ")}`,
+        });
+      }
+
       // Normalize fields for MongoDB validation
       const data = {
         business_id: new ObjectId(business_id),
         user_id: new ObjectId(req.user._id),
         project_name: project_name.trim(),
+        // project_type,
+        project_type: normalizedProjectType,
         description: normalizeString(description),
         why_this_matters: normalizeString(why_this_matters),
         impact: normalizeString(impact),
@@ -208,8 +354,8 @@ class ProjectController {
         estimated_timeline: normalizeString(estimated_timeline),
         budget_estimate:
           budget_estimate === "" ||
-          budget_estimate === null ||
-          budget_estimate === undefined
+            budget_estimate === null ||
+            budget_estimate === undefined
             ? ""
             : String(Number(budget_estimate)),
         status: "draft",
@@ -218,6 +364,29 @@ class ProjectController {
       };
 
       const insertedId = await ProjectModel.create(data);
+
+      // Ensure the business owner is always a collaborator once projects exist
+      if (!isAdmin) {
+        try {
+          if (business.user_id) {
+            const ownerIdStr = business.user_id.toString();
+            const alreadyCollaborator = Array.isArray(business.collaborators)
+              ? business.collaborators.some((id) => id.toString() === ownerIdStr)
+              : false;
+
+            if (!alreadyCollaborator) {
+              await BusinessModel.addCollaborator(
+                business._id.toString(),
+                ownerIdStr
+              );
+            }
+          }
+        } catch (collabErr) {
+          console.error("Failed to auto-assign owner as collaborator:", collabErr);
+          // We do not throw here to avoid blocking project creation if this step fails
+        }
+      }
+
       const raw = await ProjectModel.findById(insertedId);
       const [project] = await ProjectModel.populateCreatedBy(raw);
 
@@ -242,10 +411,15 @@ class ProjectController {
       if (!existing) return res.status(404).json({ error: "Not found" });
 
       if (existing.status === "launched") {
-        return res.status(403).json({
-          error:
-            "This project has been launched and cannot be updated anymore.",
-        });
+        const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+        const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
+          existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
+
+        if (!isAdmin && !isInAllowedCollabs) {
+          return res.status(403).json({
+            error: "This project has been launched and cannot be updated anymore.",
+          });
+        }
       }
 
       if (req.body.status === "launched") {
@@ -254,9 +428,37 @@ class ProjectController {
             error: "Only company_admin or super_admin can launch projects",
           });
         }
+
+        const businessId = typeof existing.business_id === "string"
+          ? new ObjectId(existing.business_id)
+          : existing.business_id;
+
+        await BusinessModel.clearAllowedCollaborators(businessId);
+
+        await ProjectModel.collection().updateMany(
+          { business_id: businessId },
+          { $set: { allowed_collaborators: [], updated_at: new Date() } }
+        );
       }
 
-      // Check access
+      if (req.body.status === "reprioritizing") {
+        if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+          return res.status(403).json({
+            error: "Only company_admin or super_admin can set project to reprioritizing",
+          });
+        }
+
+        const allowedCollabs = req.body.allowed_collaborators || [];
+        if (!Array.isArray(allowedCollabs)) {
+          return res.status(400).json({ error: "allowed_collaborators must be an array of user IDs" });
+        }
+
+        await ProjectModel.update(id, {
+          allowed_collaborators: allowedCollabs,
+          updated_at: new Date()
+        });
+      }
+
       const business = await BusinessModel.findById(existing.business_id);
       if (!business)
         return res.status(404).json({ error: "Parent business not found" });
@@ -274,9 +476,28 @@ class ProjectController {
         isAdmin,
       });
 
-      if (!permissions.canEdit) {
+      let canEditProject = false;
+
+      if (existing.status === "launched") {
+        const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
+          existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
+        canEditProject = isAdmin || isInAllowedCollabs;
+      } else if (existing.status === "reprioritizing") {
+        if (isAdmin) {
+          canEditProject = true;
+        } else {
+          const allowedCollabs = existing.allowed_collaborators || [];
+          canEditProject = allowedCollabs.some(
+            (id) => id.toString() === req.user._id.toString()
+          );
+        }
+      } else {
+        canEditProject = permissions.canEdit;
+      }
+
+      if (!canEditProject) {
         return res.status(403).json({
-          error: `You cannot edit projects when business is in '${business.status}' state`,
+          error: `You cannot edit this project in its current status`,
         });
       }
 
@@ -284,12 +505,14 @@ class ProjectController {
         return res.status(400).json({ error: "Invalid status value" });
       }
 
-      // === FIXED: Normalize fields safely for strict string-only schema ===
       const updateData = {
         updated_at: new Date(),
       };
 
-      // Only include fields if they are provided and valid
+      if (Array.isArray(req.body.allowed_collaborators)) {
+        updateData.allowed_collaborators = req.body.allowed_collaborators;
+      }
+
       if (req.body.description !== undefined)
         updateData.description = normalizeString(req.body.description);
 
@@ -354,6 +577,7 @@ class ProjectController {
       delete updateData._id;
       delete updateData.business_id;
       delete updateData.created_at;
+
       await ProjectModel.update(id, updateData);
 
       const updated = await ProjectModel.findById(id);
@@ -392,12 +616,24 @@ class ProjectController {
         }
       }
 
-      // Check Business
       const business = await BusinessModel.findById(business_id);
       if (!business) return res.status(404).json({ error: "Business not found" });
 
+      const isAdmin = ["company_admin", "super_admin"].includes(req.user.role.role_name);
 
+      if (business.status === "reprioritizing") {
+        if (!isAdmin) {
+          const allowed = await BusinessModel.getAllowedRankingCollaborators(business_id);
 
+          const allowedIds = allowed.map(uid => uid.toString());
+
+          if (!allowedIds.includes(user_id.toString())) {
+            return res.status(403).json({
+              error: "You are not allowed to rank during reprioritizing",
+            });
+          }
+        }
+      }
 
       const allProjects = await ProjectModel.findAll({
         business_id: new ObjectId(business_id),
@@ -477,9 +713,6 @@ class ProjectController {
         user_id,
         business_id
       );
-
-      // get users and locking summary
-
       const business = await BusinessModel.findById(business_id);
 
       let ranking_lock_summary = {
@@ -488,24 +721,32 @@ class ProjectController {
       };
 
       if (business) {
-        // total_users should represent only collaborators eligible to rank
-        const total_users = Array.isArray(business.collaborators)
-          ? business.collaborators.length
-          : 0;
+        const businessDoc = await BusinessModel.findById(business_id);
+        const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+        const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+        const db = getDB();
+
+        const users = await db.collection("users").find({
+          _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+        }).toArray();
+
+        const nonAdminUserIds = users
+          .filter(u => !ADMIN_ROLES.includes(u.role_name))
+          .map(u => u._id.toString());
 
         const lockedUserIds = await ProjectRankingModel.collection()
           .distinct("user_id", {
             business_id: new ObjectId(business_id),
             locked: true,
+            user_id: { $in: nonAdminUserIds.map(id => new ObjectId(id)) }
           });
 
         ranking_lock_summary = {
+          total_users: nonAdminUserIds.length,
           locked_users_count: lockedUserIds.length,
-          total_users,
         };
+
       }
-
-
       if (rankings.length === 0) {
         return res.json({
           user_id,
@@ -552,6 +793,7 @@ class ProjectController {
         project_id: project._id,
         project_name: project.project_name,
         rank: ranking.rank,
+        rationals: ranking.rationals || "",
         locked: ranking.locked || false,
       }));
 
@@ -569,24 +811,22 @@ class ProjectController {
   }
 
   static async getAdminRankings(req, res) {
-
-
     try {
-      const { business_id } = req.query;
+      const { business_id, admin_user_id } = req.query;
 
       if (!ObjectId.isValid(business_id)) {
         return res.status(400).json({ error: "Invalid business_id" });
       }
 
-      const business = await BusinessModel.findById(business_id);
-      if (!business) {
-        return res.status(404).json({ error: "Business not found" });
+      if (!ObjectId.isValid(admin_user_id)) {
+        return res.status(400).json({ error: "Invalid admin_user_id" });
       }
 
-      const adminUserId = business.user_id;
+      const business = await BusinessModel.findById(business_id);
+      if (!business) return res.status(404).json({ error: "Business not found" });
 
       const rankings = await ProjectRankingModel.findByUserAndBusiness(
-        adminUserId,
+        admin_user_id,
         business_id
       );
 
@@ -605,7 +845,7 @@ class ProjectController {
       projects.forEach(p => {
         const rank = rankMap[p._id.toString()] ?? null;
         const item = {
-          admin_user_id: adminUserId,
+          admin_user_id: admin_user_id,
           business_id,
           project_id: p._id,
           rank,
@@ -627,7 +867,7 @@ class ProjectController {
       const response = [...ranked, ...unranked].map(({ created_at, ...rest }) => rest);
 
       res.json({
-        admin_user_id: adminUserId,
+        admin_user_id: admin_user_id,
         business_id,
         projects: response,
       });
@@ -652,7 +892,6 @@ class ProjectController {
         return res.status(403).json({ error: "Admins cannot lock ranks" });
       }
 
-
       const alreadyLocked = await ProjectRankingModel.isLocked(
         user_id,
         project_id
@@ -665,7 +904,6 @@ class ProjectController {
         });
       }
 
-      // Lock the rank
       await ProjectRankingModel.lockRank(user_id, project_id);
 
       res.json({ message: "Rank locked successfully", project_id });
@@ -674,7 +912,6 @@ class ProjectController {
       res.status(500).json({ error: "Server error" });
     }
   }
-
 
   static async delete(req, res) {
     try {
@@ -702,9 +939,753 @@ class ProjectController {
       console.error("PROJECT DELETE ERR:", err);
       res.status(500).json({ error: "Server error" });
     }
+  };
+
+  static async changeStatus(req, res) {
+    try {
+      const { id } = req.params;
+      const { status } = req.body;
+
+      const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
+      const ADMIN_ROLES = ["company_admin", "super_admin"];
+
+      if (!VALID_STATUS.includes(status)) {
+        return res.status(400).json({ error: "Invalid status value" });
+      }
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({
+          error: "Only company_admin or super_admin can change project status",
+        });
+      }
+
+      const project = await ProjectModel.findById(id);
+      if (!project) {
+        return res.status(404).json({ error: "Project not found" });
+      }
+
+
+      if (status === "launched") {
+        const businessId =
+          typeof project.business_id === "string"
+            ? new ObjectId(project.business_id)
+            : project.business_id;
+
+        console.log("Clearing allowed_collaborators for business:", businessId);
+
+        await ProjectModel.clearAllowedCollaborators(project._id);
+
+        await ProjectModel.collection().updateMany(
+          { business_id: businessId },
+          { $set: { allowed_collaborators: [], updated_at: new Date() } }
+        );
+      }
+
+      await ProjectModel.collection().updateOne(
+        { _id: new ObjectId(id) },
+        { $set: { status, updated_at: new Date() } }
+      );
+
+      res.json({
+        message: "Project status updated successfully",
+        project_id: id,
+        new_status: status,
+      });
+    } catch (err) {
+      console.error("PROJECT STATUS UPDATE ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+
+  static async grantEditAccess(req, res) {
+    try {
+      const { scope, business_id, project_id } = req.body;
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      if (!["projectEdit", "reRanking"].includes(scope)) {
+        return res.status(400).json({ error: "Invalid scope" });
+      }
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      if (scope === "projectEdit") {
+        if (!ObjectId.isValid(project_id)) {
+          return res.status(400).json({ error: "Invalid project_id" });
+        }
+
+        const project = await ProjectModel.findById(project_id);
+        if (!project) {
+          return res.status(404).json({ error: "Project not found" });
+        }
+
+        if (project.business_id.toString() !== business_id) {
+          return res.status(400).json({ error: "Project does not belong to business" });
+        }
+        return res.json({
+          scope: "project",
+          message: "Project edit access will be granted",
+          project_id,
+          current_status: project.status,
+        });
+      }
+
+      if (scope === "reRanking") {
+        await ProjectRankingModel.unlockRankingByBusiness(business_id);
+        await BusinessModel.clearAllowedRankingCollaborators(business_id);
+
+        return res.json({
+          scope: "business",
+          message: "Business re-ranking access granted",
+          business_id,
+          current_status: business.status,
+        });
+      }
+
+    } catch (err) {
+      console.error("EDIT MODE ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async checkUserAccess(req, res) {
+    try {
+      const { business_id, project_id } = req.query;
+      const user_id = req.user._id;
+
+      console.log("checkUserAccess called with:", { business_id, project_id, user_id: user_id.toString() });
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
+      let hasRerankAccess = false;
+      try {
+        const allowedRankingCollabs = await BusinessModel.getAllowedRankingCollaborators(business_id);
+        hasRerankAccess = isAdmin ||
+          allowedRankingCollabs.some(id => id.toString() === user_id.toString());
+      } catch (err) {
+        console.error("Error checking rerank access:", err);
+        hasRerankAccess = isAdmin;
+      }
+
+      let hasProjectEditAccess = false;
+
+      if (project_id && project_id !== 'null' && project_id !== 'undefined') {
+        try {
+          const projectObjId = new ObjectId(project_id);
+          const project = await ProjectModel.findById(projectObjId);
+
+          if (project) {
+            const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
+              project.allowed_collaborators.some(id => id.toString() === user_id.toString());
+
+            hasProjectEditAccess = isAdmin || isInAllowedCollabs;
+          }
+        } catch (err) {
+          console.error("Error checking project access for", project_id, ":", err);
+          hasProjectEditAccess = false;
+        }
+      }
+
+      const response = {
+        business_id,
+        project_id: project_id || null,
+        business_status: business.status,
+        has_rerank_access: hasRerankAccess,
+        has_project_edit_access: hasProjectEditAccess,
+      };
+      res.json(response);
+    } catch (err) {
+      console.error("CHECK ACCESS ERR:", err);
+      res.status(500).json({ error: "Server error", details: err.message });
+    }
+  }
+
+  static async getGrantedAccess(req, res) {
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const rerankingCollaboratorIds = await BusinessModel.getAllowedRankingCollaborators(business_id);
+
+      const projects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id),
+      });
+
+      const projectEditUserIds = new Set();
+      const projectAccessMap = {};
+
+      projects.forEach(project => {
+        if (Array.isArray(project.allowed_collaborators)) {
+          project.allowed_collaborators.forEach(userId => {
+            const userIdStr = userId.toString();
+            projectEditUserIds.add(userIdStr);
+
+            if (!projectAccessMap[userIdStr]) {
+              projectAccessMap[userIdStr] = [];
+            }
+            projectAccessMap[userIdStr].push({
+              project_id: project._id,
+              project_name: project.project_name,
+              status: project.status,
+            });
+          });
+        }
+      });
+
+      const allUserIds = new Set([
+        ...rerankingCollaboratorIds.map(id => id.toString()),
+        ...Array.from(projectEditUserIds)
+      ]);
+
+      const db = getDB();
+      const users = await db.collection("users").find({
+        _id: { $in: Array.from(allUserIds).map(id => new ObjectId(id)) }
+      }).toArray();
+
+      const accessList = users.map(user => {
+        const userIdStr = user._id.toString();
+        const hasRerankAccess = rerankingCollaboratorIds.some(id => id.toString() === userIdStr);
+        const projectAccess = projectAccessMap[userIdStr] || [];
+
+        return {
+          user_id: user._id,
+          user_name: user.name,
+          user_email: user.email,
+          role_name: user.role_name,
+          has_rerank_access: hasRerankAccess,
+          has_project_edit_access: projectAccess.length > 0,
+          projects_with_access: projectAccess,
+        };
+      });
+
+      res.json({
+        business_id,
+        business_name: business.business_name,
+        business_status: business.status,
+        total_users_with_access: accessList.length,
+        access_list: accessList,
+      });
+
+    } catch (err) {
+      console.error("GET GRANTED ACCESS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async revokeAccess(req, res) {
+    try {
+      const { business_id, user_id, access_type } = req.body;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      if (!ObjectId.isValid(user_id)) {
+        return res.status(400).json({ error: "Invalid user_id" });
+      }
+
+      if (!["rerank", "project_edit", "all"].includes(access_type)) {
+        return res.status(400).json({ error: "Invalid access_type. Must be 'rerank', 'project_edit', or 'all'" });
+      }
+
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({ error: "Admin access required" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      let revokedAccess = [];
+
+      // Revoke reranking access
+      if (access_type === "rerank" || access_type === "all") {
+        const allowedRankingCollaborators = await BusinessModel.getAllowedRankingCollaborators(business_id);
+        const filteredCollaborators = allowedRankingCollaborators.filter(
+          id => id.toString() !== user_id.toString()
+        );
+
+        await BusinessModel.collection().updateOne(
+          { _id: new ObjectId(business_id) },
+          { $set: { allowed_ranking_collaborators: filteredCollaborators } }
+        );
+
+        revokedAccess.push("rerank");
+      }
+
+      // Revoke project edit access
+      if (access_type === "project_edit" || access_type === "all") {
+        const projects = await ProjectModel.findAll({
+          business_id: new ObjectId(business_id),
+        });
+
+        const updatePromises = projects.map(project => {
+          if (Array.isArray(project.allowed_collaborators)) {
+            const filteredCollaborators = project.allowed_collaborators.filter(
+              id => id.toString() !== user_id.toString()
+            );
+
+            return ProjectModel.update(project._id.toString(), {
+              allowed_collaborators: filteredCollaborators,
+              updated_at: new Date()
+            });
+          }
+          return Promise.resolve();
+        });
+
+        await Promise.all(updatePromises);
+        revokedAccess.push("project_edit");
+      }
+
+      res.json({
+        message: "Access revoked successfully",
+        business_id,
+        user_id,
+        revoked_access: revokedAccess,
+      });
+
+    } catch (err) {
+      console.error("REVOKE ACCESS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+  static async saveAIRankings(req, res) {
+    try {
+      const { business_id, ai_rankings, model_version, metadata } = req.body;
+
+      // Validate request
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      if (!Array.isArray(ai_rankings) || ai_rankings.length === 0) {
+        return res.status(400).json({
+          error: "ai_rankings must be a non-empty array"
+        });
+      }
+
+      // Verify admin access
+      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+        return res.status(403).json({
+          error: "Only admins can save AI rankings",
+        });
+      }
+
+      // Verify business exists
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Validate all projects belong to this business
+      const projectIds = ai_rankings.map(r => new ObjectId(r.project_id));
+      const projects = await ProjectModel.findAll({
+        _id: { $in: projectIds },
+        business_id: new ObjectId(business_id)
+      });
+
+      if (projects.length !== ai_rankings.length) {
+        return res.status(400).json({
+          error: "Some project IDs are invalid or don't belong to this business"
+        });
+      }
+
+      // Validate ranks are sequential and unique
+      const ranks = ai_rankings.map(r => r.rank).sort((a, b) => a - b);
+      const expectedRanks = Array.from({ length: ranks.length }, (_, i) => i + 1);
+      const ranksValid = ranks.every((rank, idx) => rank === expectedRanks[idx]);
+
+      if (!ranksValid) {
+        return res.status(400).json({
+          error: "Ranks must be sequential starting from 1 with no duplicates"
+        });
+      }
+
+      // Save AI ranking session at business level
+      await BusinessModel.saveAIRankingSession(business_id, {
+        admin_id: req.user._id,
+        model_version: model_version || "v1.0",
+        total_projects: ai_rankings.length,
+        metadata: metadata || {}
+      });
+
+      // Bulk update AI ranks on projects
+      const bulkResult = await ProjectModel.bulkUpdateAIRanks(ai_rankings);
+
+      res.json({
+        message: "AI rankings saved successfully",
+        business_id,
+        projects_updated: bulkResult.modifiedCount,
+        rankings_applied: ai_rankings.length,
+        model_version: model_version || "v1.0"
+      });
+
+    } catch (err) {
+      console.error("SAVE AI RANKINGS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async getAIRankings(req, res) {
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get AI ranking session info
+      const rankingSession = await BusinessModel.getAIRankingSession(business_id);
+
+      // Get all projects with their AI ranks
+      const projects = await ProjectModel.getProjectsWithAIRanks(business_id);
+
+      // Populate created_by field
+      const populatedProjects = await ProjectModel.populateCreatedBy(projects);
+
+      const response = {
+        business_id,
+        business_name: business.business_name,
+        ranking_session: rankingSession,
+        projects: populatedProjects.map(p => ({
+          project_id: p._id,
+          project_name: p.project_name,
+          ai_rank: p.ai_rank,
+          ai_rank_score: p.ai_rank_score || null,
+          ai_rank_factors: p.ai_rank_factors || {},
+          created_by: p.created_by,
+          status: p.status
+        }))
+      };
+
+      res.json(response);
+
+    } catch (err) {
+      console.error("GET AI RANKINGS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+  static async getConsensusAnalysis(req, res) {
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get all projects with AI rankings
+      const projects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id),
+        ai_rank: { $exists: true, $ne: null }
+      });
+
+      if (projects.length === 0) {
+        return res.json({
+          business_id,
+          consensus_data: [],
+          message: "No AI rankings found for this business"
+        });
+      }
+
+      // Get all collaborator rankings
+      const db = getDB();
+      const allRankings = await db.collection("project_rankings")
+        .find({
+          business_id: new ObjectId(business_id)
+        })
+        .toArray();
+
+      // Get all non-admin collaborators
+      const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+      const users = await db.collection("users").find({
+        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
+      }).toArray();
+
+      const nonAdminUserIds = users
+        .filter(u => !ADMIN_ROLES.includes(u.role_name))
+        .map(u => u._id.toString());
+
+      // Calculate consensus for each project
+      const consensusData = projects.map(project => {
+        const projectId = project._id.toString();
+        const aiRank = project.ai_rank;
+
+        // Get all collaborator rankings for this project (excluding admins)
+        const projectRankings = allRankings.filter(r =>
+          r.project_id.toString() === projectId &&
+          nonAdminUserIds.includes(r.user_id.toString()) &&
+          r.rank !== null &&
+          r.rank !== undefined
+        );
+
+        const totalCollaborators = projectRankings.length;
+
+        if (totalCollaborators === 0) {
+          return {
+            project_id: project._id,
+            project_name: project.project_name,
+            ai_rank: aiRank,
+            consensus_score: null,
+            consensus_level: "no_data",
+            total_collaborators: 0,
+            agreeing_collaborators: 0,
+            agreement_percentage: 0,
+            collaborator_ranks: []
+          };
+        }
+
+        // Count how many collaborators ranked within ±1 of AI rank
+        // You can adjust the tolerance (currently ±1 means exact match or 1 position difference)
+        const tolerance = 1;
+        const agreeingCollaborators = projectRankings.filter(r =>
+          Math.abs(r.rank - aiRank) <= tolerance
+        ).length;
+
+        const agreementPercentage = (agreeingCollaborators / totalCollaborators) * 100;
+
+        // Determine consensus level
+        let consensusLevel;
+        let consensusScore;
+        if (agreementPercentage >= 80) {
+          consensusLevel = "high";
+          consensusScore = "green";
+        } else if (agreementPercentage >= 50) {
+          consensusLevel = "medium";
+          consensusScore = "yellow";
+        } else {
+          consensusLevel = "low";
+          consensusScore = "red";
+        }
+
+        return {
+          project_id: project._id,
+          project_name: project.project_name,
+          ai_rank: aiRank,
+          ai_rank_score: project.ai_rank_score || null,
+          consensus_score: consensusScore,
+          consensus_level: consensusLevel,
+          total_collaborators: totalCollaborators,
+          agreeing_collaborators: agreeingCollaborators,
+          agreement_percentage: Math.round(agreementPercentage),
+          collaborator_ranks: projectRankings.map(r => ({
+            user_id: r.user_id,
+            rank: r.rank,
+            matches_ai: Math.abs(r.rank - aiRank) <= tolerance
+          }))
+        };
+      });
+
+      // Sort by AI rank
+      consensusData.sort((a, b) => a.ai_rank - b.ai_rank);
+
+      res.json({
+        business_id,
+        total_projects: consensusData.length,
+        consensus_summary: {
+          high_consensus: consensusData.filter(d => d.consensus_level === "high").length,
+          medium_consensus: consensusData.filter(d => d.consensus_level === "medium").length,
+          low_consensus: consensusData.filter(d => d.consensus_level === "low").length,
+          no_data: consensusData.filter(d => d.consensus_level === "no_data").length
+        },
+        consensus_data: consensusData
+      });
+
+    } catch (err) {
+      console.error("GET CONSENSUS ANALYSIS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+  static async getCollaboratorConsensus(req, res) {
+    try {
+      const { business_id } = req.query;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Get all projects for this business
+      const projects = await ProjectModel.findAll({
+        business_id: new ObjectId(business_id)
+      });
+
+      if (projects.length === 0) {
+        return res.json({
+          business_id,
+          consensus_data: [],
+          message: "No projects found for this business"
+        });
+      }
+
+      // Get all collaborator rankings
+      const db = getDB();
+      const allRankings = await db.collection("project_rankings")
+        .find({
+          business_id: new ObjectId(business_id)
+        })
+        .toArray();
+
+      // Get all non-admin collaborators
+      const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+      const users = await db.collection("users").find({
+        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
+      }).toArray();
+
+      const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+      const nonAdminUserIds = nonAdminUsers.map(u => u._id.toString());
+
+      // Create user map for names
+      const userMap = {};
+      nonAdminUsers.forEach(u => {
+        userMap[u._id.toString()] = u.name;
+      });
+
+      // Calculate consensus for each project
+      const consensusData = projects.map(project => {
+        const projectId = project._id.toString();
+
+        // Get all collaborator rankings for this project (excluding admins)
+        const projectRankings = allRankings.filter(r =>
+          r.project_id.toString() === projectId &&
+          nonAdminUserIds.includes(r.user_id.toString()) &&
+          r.rank !== null &&
+          r.rank !== undefined
+        );
+
+        const totalCollaborators = projectRankings.length;
+
+        if (totalCollaborators === 0) {
+          return {
+            project_id: project._id,
+            project_name: project.project_name,
+            average_rank: null,
+            consensus_score: null,
+            consensus_level: "no_data",
+            total_collaborators: 0,
+            rank_variance: 0,
+            collaborator_rankings: []
+          };
+        }
+
+        // Calculate average rank
+        const rankSum = projectRankings.reduce((sum, r) => sum + r.rank, 0);
+        const averageRank = rankSum / totalCollaborators;
+
+        // Calculate variance to determine consensus
+        const variance = projectRankings.reduce((sum, r) => {
+          return sum + Math.pow(r.rank - averageRank, 2);
+        }, 0) / totalCollaborators;
+
+        const standardDeviation = Math.sqrt(variance);
+
+        // Determine consensus level based on standard deviation
+        let consensusLevel;
+        let consensusScore;
+
+        // Lower standard deviation = higher agreement
+        if (standardDeviation <= 2) {
+          consensusLevel = "high";
+          consensusScore = "green";
+        } else if (standardDeviation <= 4) {
+          consensusLevel = "medium";
+          consensusScore = "yellow";
+        } else {
+          consensusLevel = "low";
+          consensusScore = "red";
+        }
+
+        // Format collaborator rankings with names and rationales
+        const collaboratorRankings = projectRankings.map(r => ({
+          user_id: r.user_id,
+          user_name: userMap[r.user_id.toString()] || "Unknown",
+          rank: r.rank,
+          rationale: r.rationals || "",
+          deviation_from_average: Math.abs(r.rank - averageRank).toFixed(1)
+        })).sort((a, b) => a.rank - b.rank);
+
+        return {
+          project_id: project._id,
+          project_name: project.project_name,
+          average_rank: Math.round(averageRank * 10) / 10, // Round to 1 decimal
+          consensus_score: consensusScore,
+          consensus_level: consensusLevel,
+          total_collaborators: totalCollaborators,
+          rank_variance: Math.round(variance * 10) / 10,
+          standard_deviation: Math.round(standardDeviation * 10) / 10,
+          collaborator_rankings: collaboratorRankings
+        };
+      });
+
+      // Sort by average rank
+      consensusData.sort((a, b) => {
+        if (a.average_rank === null) return 1;
+        if (b.average_rank === null) return -1;
+        return a.average_rank - b.average_rank;
+      });
+
+      res.json({
+        business_id,
+        total_projects: consensusData.length,
+        consensus_summary: {
+          high_consensus: consensusData.filter(d => d.consensus_level === "high").length,
+          medium_consensus: consensusData.filter(d => d.consensus_level === "medium").length,
+          low_consensus: consensusData.filter(d => d.consensus_level === "low").length,
+          no_data: consensusData.filter(d => d.consensus_level === "no_data").length
+        },
+        consensus_data: consensusData
+      });
+
+    } catch (err) {
+      console.error("GET COLLABORATOR CONSENSUS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
   }
 }
-
-
 
 module.exports = ProjectController;
