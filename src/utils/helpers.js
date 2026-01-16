@@ -25,9 +25,19 @@ const createPaginationMeta = (total, page, limit) => {
   };
 };
 
+const isValidateRationale = (text) => {
+   if (typeof text !== 'string') return false;
+
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+
+  return /^[A-Za-z\s]+$/.test(trimmed);
+};
+
 module.exports = {
   validateObjectId,
   sanitizeInput,
   formatDate,
-  createPaginationMeta
+  createPaginationMeta,
+  isValidateRationale
 };

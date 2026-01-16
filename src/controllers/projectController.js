@@ -4,6 +4,7 @@ const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
+const { isValidateRationale } = require("../utils/helpers");
 
 const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
@@ -649,10 +650,38 @@ class ProjectController {
 
       const rankMap = {};
       const rationalMap = {};
-      projects.forEach(p => {
+
+      for (const p of projects) {
         rankMap[p.project_id] = p.rank;
-        rationalMap[p.project_id] = p.rationals || "";
-      });
+
+        const rawRationale = p.rationale ?? p.rationals ?? "";
+        const cleanedRationale = rawRationale.trim();
+
+        const rankChanged =
+          p.prevRank !== undefined
+            ? p.prevRank !== p.rank
+            : true; 
+
+        if (rankChanged) {
+          const isUserEnteredRationale =
+            cleanedRationale.length > 0 &&
+            cleanedRationale.length <= 50; 
+
+          if (isUserEnteredRationale) {
+            if (!isValidateRationale(cleanedRationale)) {
+              return res.status(400).json({
+                error: "Rationale must contain only letters and spaces"
+              });
+            }
+          }
+
+          rationalMap[p.project_id] = cleanedRationale;
+        }
+      }
+
+
+
+
 
       const rankingDocs = allProjects.map(project => {
         const projIdStr = project._id.toString();
