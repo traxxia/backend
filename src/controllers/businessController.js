@@ -403,7 +403,6 @@ class BusinessController {
         return res.status(404).json({ error: "Business not found" });
       }
 
-      // Only company_admin / super_admin can access
       const role = req.user.role.role_name;
       if (!["company_admin", "super_admin"].includes(role)) {
         return res.status(403).json({
@@ -413,8 +412,16 @@ class BusinessController {
 
       const collaboratorIds = business.collaborators || [];
 
+      const db = getDB();
+      const collaboratorRole = await db.collection("roles").findOne({ role_name: "collaborator" });
+      if (!collaboratorRole) {
+        return res.status(404).json({ error: "Collaborator role not found" });
+      }
+      const collaboratorRoleId = collaboratorRole._id;
+
       const collaborators = await UserModel.getAll({
-        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
+        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) },
+        role_id: collaboratorRoleId
       });
 
       const response = collaborators.map(u => ({
@@ -428,6 +435,7 @@ class BusinessController {
       res.status(500).json({ error: "Failed to fetch collaborators" });
     }
   }
+
   static async setAllowedCollaborators(req, res) {
     try {
       const { businessId, projectId } = req.params;
