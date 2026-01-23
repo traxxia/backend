@@ -109,21 +109,32 @@ class ProjectController {
       const total = await ProjectModel.count(filter);
       let projects = await ProjectModel.populateCreatedBy(raw);
 
+      // Get business info if business_id is provided
+      let businessStatus = null;
+      if (business_id && ObjectId.isValid(business_id)) {
+        const business = await BusinessModel.findById(business_id);
+        if (business) {
+          businessStatus = business.status;
+        }
+      }
+
       projects = projects.map(project => ({
         ...project,
         allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
+        // Remove project status, we'll use business status instead
+        status: undefined,
       }));
 
-
-      let ranking_lock_summary = { locked_users_count: 0, total_users: 0 };
+      let ranking_lock_summary = {
+        locked_users_count: 0,
+        total_users: 0,
+        locked_users: []
+      };
 
       if (business_id && ObjectId.isValid(business_id)) {
         const business = await BusinessModel.findById(business_id);
         if (business) {
-          // Owner + collaborators
           const collaboratorIds = (business.collaborators || []).map(id => id.toString());
-
-
           const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
 
           const users = await db.collection("users").find({
@@ -131,25 +142,45 @@ class ProjectController {
           }).toArray();
 
           // Filter non-admins
-          const nonAdminUserIds = users
-            .filter(u => !ADMIN_ROLES.includes(u.role_name))
-            .map(u => u._id.toString());
+          const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+          const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
-          // Locked counts for non-admins only
-          const lockedUserIds = await ProjectRankingModel.collection().distinct("user_id", {
-            business_id: new ObjectId(business_id),
-            locked: true,
-            user_id: { $in: nonAdminUserIds.map(id => new ObjectId(id)) }
-          });
+          // Get locked rankings with user info
+          const lockedRankings = await ProjectRankingModel.collection()
+            .find({
+              business_id: new ObjectId(business_id),
+              locked: true,
+              user_id: { $in: nonAdminUserIds }
+            })
+            .toArray();
+
+          // Get unique locked user IDs
+          const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
+
+          // Build locked users list with details
+          const lockedUsers = nonAdminUsers
+            .filter(u => lockedUserIds.includes(u._id.toString()))
+            .map(u => ({
+              user_id: u._id,
+              name: u.name,
+              email: u.email,
+            }));
 
           ranking_lock_summary = {
-            total_users: nonAdminUserIds.length,
-            locked_users_count: lockedUserIds.length
+            total_users: nonAdminUsers.length,
+            locked_users_count: lockedUsers.length,
+            locked_users: lockedUsers,
           };
         }
       }
 
-      res.json({ total, count: projects.length, projects, ranking_lock_summary, });
+      res.json({
+        total,
+        count: projects.length,
+        projects,
+        business_status: businessStatus, // Business status instead of project status
+        ranking_lock_summary,
+      });
     } catch (err) {
       console.error("PROJECT GET ALL ERR:", err);
       res.status(500).json({ error: "Server error" });
@@ -718,10 +749,10 @@ class ProjectController {
       let ranking_lock_summary = {
         locked_users_count: 0,
         total_users: 0,
+        locked_users: [],
       };
 
       if (business) {
-        const businessDoc = await BusinessModel.findById(business_id);
         const collaboratorIds = (business.collaborators || []).map(id => id.toString());
         const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
         const db = getDB();
@@ -730,32 +761,44 @@ class ProjectController {
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
-        const nonAdminUserIds = users
-          .filter(u => !ADMIN_ROLES.includes(u.role_name))
-          .map(u => u._id.toString());
+        const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+        const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
-        const lockedUserIds = await ProjectRankingModel.collection()
-          .distinct("user_id", {
+        const lockedRankings = await ProjectRankingModel.collection()
+          .find({
             business_id: new ObjectId(business_id),
             locked: true,
-            user_id: { $in: nonAdminUserIds.map(id => new ObjectId(id)) }
-          });
+            user_id: { $in: nonAdminUserIds }
+          })
+          .toArray();
+
+        const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
+
+        const lockedUsers = nonAdminUsers
+          .filter(u => lockedUserIds.includes(u._id.toString()))
+          .map(u => ({
+            user_id: u._id,
+            name: u.name,
+            email: u.email,
+          }));
 
         ranking_lock_summary = {
-          total_users: nonAdminUserIds.length,
-          locked_users_count: lockedUserIds.length,
+          total_users: nonAdminUsers.length,
+          locked_users_count: lockedUsers.length,
+          locked_users: lockedUsers,
         };
-
       }
+
       if (rankings.length === 0) {
         return res.json({
           user_id,
           business_id,
+          business_status: business?.status || null,
           projects: [],
+          ranking_lock_summary,
         });
       }
 
-      // Fetch project
       const projectIds = rankings.map(r => r.project_id);
       const projects = await ProjectModel.findAll({
         _id: { $in: projectIds },
@@ -765,7 +808,6 @@ class ProjectController {
       projects.forEach(p => {
         projectMap[p._id.toString()] = p;
       });
-
 
       const ranked = [];
       const unranked = [];
@@ -780,8 +822,8 @@ class ProjectController {
           unranked.push({ ranking: r, project });
         }
       });
-      ranked.sort((a, b) => a.ranking.rank - b.ranking.rank);
 
+      ranked.sort((a, b) => a.ranking.rank - b.ranking.rank);
       unranked.sort(
         (a, b) =>
           new Date(a.project.created_at) - new Date(b.project.created_at)
@@ -800,8 +842,9 @@ class ProjectController {
       res.json({
         user_id,
         business_id,
+        business_status: business?.status || null,
         projects: responseProjects,
-        ranking_lock_summary
+        ranking_lock_summary,
       });
 
     } catch (err) {
