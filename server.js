@@ -1,4 +1,10 @@
-require('dotenv').config();
+const result = require('dotenv').config();
+
+if (result.error) {
+  console.log('.env file not found. Using system environment variables.');
+} else {
+  console.log('Environment variables loaded from .env');
+}
 const app = require('./src/app');
 const { connectToMongoDB } = require('./src/config/database');
 const { createAuditIndexes } = require('./src/services/auditService');
@@ -9,9 +15,9 @@ const { PORT } = require('./src/config/constants');
 async function initializeSystem() {
   try {
     const db = getDB();
-    
+
     await createAuditIndexes();
-    
+
     // Create default roles
     const existingRoles = await db.collection('roles').countDocuments();
     if (existingRoles === 0) {
@@ -55,7 +61,7 @@ async function initializeSystem() {
         created_at: new Date()
       });
     }
-    
+
     console.log('System initialized successfully');
   } catch (error) {
     console.error('System initialization failed:', error);
