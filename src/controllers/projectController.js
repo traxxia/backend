@@ -5,7 +5,7 @@ const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
 
-const VALID_STATUS = ["Draft", "Active", "At Risk", "Paused", "Killed", "Scaled", "prioritizing", "prioritized", "launched", "reprioritizing"];
+const VALID_STATUS = ["draft", "Active", "At Risk", "Paused", "Killed", "Scaled", "prioritizing", "prioritized", "launched", "reprioritizing"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
@@ -200,7 +200,7 @@ class ProjectController {
 
       const [project] = await ProjectModel.populateCreatedBy(raw);
 
-      res.json({project});
+      res.json({ project });
     } catch (err) {
       console.error("PROJECT GET BY ID ERR:", err);
       res.status(500).json({ error: "Server error" });
@@ -390,7 +390,9 @@ class ProjectController {
         kill_criteria: normalizeString(kill_criteria),
         review_cadence: normalizeString(review_cadence),
 
-        status: normalizeString(status) || "draft",
+        // status: normalizeString(status) || "draft",
+        status: normalizeString(status).toLowerCase() || "draft",
+
         impact: normalizeString(impact),
         effort: normalizeString(effort),
         risk: normalizeString(risk),
@@ -481,7 +483,7 @@ class ProjectController {
           ? new ObjectId(existing.business_id)
           : existing.business_id;
 
-        await BusinessModel.clearAllowedCollaborators(businessId);
+        // await BusinessModel.clearAllowedCollabosrators(businessId);
 
         await ProjectModel.collection().updateMany(
           { business_id: businessId },
@@ -592,11 +594,17 @@ class ProjectController {
         updateData.review_cadence = normalizeString(req.body.review_cadence);
 
       if (req.body.status !== undefined) {
-        if (!VALID_STATUS.includes(req.body.status)) {
+        const normalizedStatus = req.body.status.trim().toLowerCase();
+
+        const allowed = VALID_STATUS.map(s => s.toLowerCase());
+
+        if (!allowed.includes(normalizedStatus)) {
           return res.status(400).json({ error: "Invalid status value" });
         }
-        updateData.status = req.body.status;
+
+        updateData.status = normalizedStatus;
       }
+
 
       if (req.body.impact !== undefined)
         updateData.impact = normalizeString(req.body.impact);
