@@ -5,10 +5,11 @@ const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
 
-const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
+const VALID_STATUS = ["Draft", "Active", "At Risk", "Paused", "Killed", "Scaled", "prioritizing", "prioritized", "launched", "reprioritizing"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
+
 
 
 // Permission matrix for ALL project actions
@@ -122,7 +123,7 @@ class ProjectController {
         ...project,
         allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
         // Remove project status, we'll use business status instead
-        status: undefined,
+        // status: undefined,
       }));
 
       let ranking_lock_summary = {
@@ -199,7 +200,7 @@ class ProjectController {
 
       const [project] = await ProjectModel.populateCreatedBy(raw);
 
-      res.json({ project });
+      res.json({project});
     } catch (err) {
       console.error("PROJECT GET BY ID ERR:", err);
       res.status(500).json({ error: "Server error" });
@@ -213,6 +214,13 @@ class ProjectController {
         project_name,
         description,
         why_this_matters,
+        strategic_decision,
+        accountable_owner,
+        key_assumptions,
+        success_criteria,
+        kill_criteria,
+        review_cadence,
+        status,
         impact,
         effort,
         risk,
@@ -373,6 +381,16 @@ class ProjectController {
         project_type: normalizedProjectType,
         description: normalizeString(description),
         why_this_matters: normalizeString(why_this_matters),
+        strategic_decision: normalizeString(strategic_decision),
+        accountable_owner: normalizeString(accountable_owner),
+        key_assumptions: Array.isArray(key_assumptions)
+          ? key_assumptions.slice(0, 3).map(normalizeString)
+          : [],
+        success_criteria: normalizeString(success_criteria),
+        kill_criteria: normalizeString(kill_criteria),
+        review_cadence: normalizeString(review_cadence),
+
+        status: normalizeString(status) || "draft",
         impact: normalizeString(impact),
         effort: normalizeString(effort),
         risk: normalizeString(risk),
@@ -389,7 +407,6 @@ class ProjectController {
             budget_estimate === undefined
             ? ""
             : String(Number(budget_estimate)),
-        status: "draft",
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -552,6 +569,35 @@ class ProjectController {
           req.body.why_this_matters
         );
 
+      if (req.body.strategic_decision !== undefined)
+        updateData.strategic_decision = normalizeString(req.body.strategic_decision);
+
+      if (req.body.accountable_owner !== undefined)
+        updateData.accountable_owner = normalizeString(req.body.accountable_owner);
+
+      if (req.body.key_assumptions !== undefined) {
+        if (!Array.isArray(req.body.key_assumptions)) {
+          return res.status(400).json({ error: "key_assumptions must be an array" });
+        }
+        updateData.key_assumptions = req.body.key_assumptions.slice(0, 3).map(normalizeString);
+      }
+
+      if (req.body.success_criteria !== undefined)
+        updateData.success_criteria = normalizeString(req.body.success_criteria);
+
+      if (req.body.kill_criteria !== undefined)
+        updateData.kill_criteria = normalizeString(req.body.kill_criteria);
+
+      if (req.body.review_cadence !== undefined)
+        updateData.review_cadence = normalizeString(req.body.review_cadence);
+
+      if (req.body.status !== undefined) {
+        if (!VALID_STATUS.includes(req.body.status)) {
+          return res.status(400).json({ error: "Invalid status value" });
+        }
+        updateData.status = req.body.status;
+      }
+
       if (req.body.impact !== undefined)
         updateData.impact = normalizeString(req.body.impact);
 
@@ -599,10 +645,6 @@ class ProjectController {
           const num = Number(budget);
           updateData.budget_estimate = isNaN(num) ? "" : String(num);
         }
-      }
-
-      if (req.body.status) {
-        updateData.status = req.body.status;
       }
 
       delete updateData._id;
