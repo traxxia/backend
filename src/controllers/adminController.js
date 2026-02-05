@@ -68,8 +68,8 @@ class AdminController {
 
       const normalizedCompanyName = company_name.trim().toLowerCase();
       const existingCompany = await CompanyModel.findByName(normalizedCompanyName);
-      if(existingCompany){
-        return res.status(400).json({ error: "Company with this name already exists"})
+      if (existingCompany) {
+        return res.status(400).json({ error: "Company with this name already exists" })
       }
 
       let logoUrl = null;
@@ -223,47 +223,47 @@ class AdminController {
   }
 
 
-static async updateUserRole(req, res) {
-  try {
-    
-    const { user_id } = req.params;
-    const { role } = req.body;
+  static async updateUserRole(req, res) {
+    try {
+
+      const { user_id } = req.params;
+      const { role } = req.body;
 
 
-    if (!ObjectId.isValid(user_id)) {
-      return res.status(400).json({ error: "Invalid user ID" });
-    }
+      if (!ObjectId.isValid(user_id)) {
+        return res.status(400).json({ error: "Invalid user ID" });
+      }
 
-    if (!role) {
-      return res.status(400).json({ error: "Role is required" });
-    }
+      if (!role) {
+        return res.status(400).json({ error: "Role is required" });
+      }
 
-    const allowedRoles = ["user", "viewer", "collaborator"];
+      const allowedRoles = ["user", "viewer", "collaborator"];
 
-    if (!allowedRoles.includes(role.toLowerCase())) {
-      return res.status(400).json({
-        error: `Invalid role. Allowed roles: ${allowedRoles.join(", ")}`,
+      if (!allowedRoles.includes(role.toLowerCase())) {
+        return res.status(400).json({
+          error: `Invalid role. Allowed roles: ${allowedRoles.join(", ")}`,
+        });
+      }
+
+      const targetUser = await UserModel.findById(user_id);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      await UserModel.updateRole(user_id, role.toLowerCase());
+
+      return res.json({
+        message: "User role updated successfully",
+        user_id,
+        new_role: role.toLowerCase(),
+        role: req.user.role.role_name,
       });
+    } catch (error) {
+      console.error("Failed to update user role:", error);
+      return res.status(500).json({ error: "Failed to update user role" });
     }
-
-    const targetUser = await UserModel.findById(user_id);
-    if (!targetUser) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    await UserModel.updateRole(user_id, role.toLowerCase());
-
-    return res.json({
-      message: "User role updated successfully",
-      user_id,
-      new_role: role.toLowerCase(),
-      role: req.user.role.role_name,
-    });
-  } catch (error) {
-    console.error("Failed to update user role:", error);
-    return res.status(500).json({ error: "Failed to update user role" });
   }
-}
 
   static async getAuditTrail(req, res) {
     try {
@@ -311,6 +311,7 @@ static async updateUserRole(req, res) {
         user_name: "$user.name",
         user_email: "$user.email",
         company_name: "$company.company_name",
+        business_name: "$business.business_name",  // Add this line
       };
 
       if (include_analysis_data === "false" || !include_analysis_data) {
@@ -324,6 +325,7 @@ static async updateUserRole(req, res) {
               data_size: "$event_data.data_size",
               analysis_summary: "$event_data.analysis_summary",
               metadata: "$event_data.metadata",
+              business_name: "$business.business_name",  // Add this line
               has_analysis_result: {
                 $ne: ["$event_data.analysis_result", null],
               },
@@ -345,6 +347,7 @@ static async updateUserRole(req, res) {
         limit: parseInt(limit),
         projection,
       });
+
       const totalCount = await AuditModel.countDocuments(filter);
       const analysisStats = await AuditModel.getAnalysisStats(filter);
 
@@ -379,38 +382,101 @@ static async updateUserRole(req, res) {
         return res.status(400).json({ error: "Invalid audit ID" });
       }
 
-      const auditEntry = await AuditModel.findById(audit_id);
+      const db = getDB();
+      const auditEntry = await db.collection('audit_trail').findOne({
+        _id: new ObjectId(audit_id)
+      });
 
-      if (!auditEntry || auditEntry.event_type !== "analysis_generated") {
-        return res
-          .status(404)
-          .json({ error: "Analysis audit entry not found" });
+      if (!auditEntry) {
+        return res.status(404).json({ error: "Audit entry not found" });
       }
 
+      if (auditEntry.event_type !== "analysis_generated") {
+        return res.status(404).json({
+          error: "This audit entry is not an analysis generation event"
+        });
+      }
+
+      // Authorization check for company_admin
       if (req.user.role.role_name === "company_admin") {
         const user = await UserModel.findById(auditEntry.user_id);
-        if (
-          !user ||
-          user.company_id.toString() !== req.user.company_id.toString()
-        ) {
+        if (!user || user.company_id.toString() !== req.user.company_id.toString()) {
           return res.status(403).json({ error: "Access denied" });
         }
+      }
+
+      const businessId = auditEntry.event_data.business_id;
+      const analysisType = auditEntry.event_data.analysis_type;
+      const phase = auditEntry.event_data.phase;
+
+      if (!businessId || !analysisType || !phase) {
+        return res.status(404).json({
+          error: "Insufficient metadata in audit entry"
+        });
+      }
+
+      // Get business using the correct collection
+      const business = await db.collection('user_businesses').findOne({
+        _id: new ObjectId(businessId)
+      });
+
+      if (!business) {
+        return res.status(404).json({
+          error: "Business not found - it may have been deleted",
+          info: {
+            business_id: businessId,
+            message: "The business associated with this analysis no longer exists in the database"
+          }
+        });
+      }
+
+      // Find the analysis in user_business_conversations collection
+      const conversation = await db.collection('user_business_conversations').findOne({
+        user_id: business.user_id,
+        business_id: new ObjectId(businessId),
+        conversation_type: 'phase_analysis',
+        'metadata.analysis_type': analysisType,
+        'metadata.phase': phase
+      }, {
+        sort: { created_at: -1 }
+      });
+
+      if (!conversation) {
+        return res.status(404).json({
+          error: "Analysis data not found",
+          info: {
+            message: "The analysis was logged but the detailed results are no longer available",
+            business_id: businessId,
+            business_name: business.business_name,
+            analysis_type: analysisType,
+            phase: phase
+          }
+        });
+      }
+
+      if (!conversation.analysis_result) {
+        return res.status(404).json({ error: "Analysis result is empty" });
       }
 
       res.json({
         audit_id: auditEntry._id,
         timestamp: auditEntry.timestamp,
-        analysis_result: auditEntry.event_data.analysis_result,
+        business_name: business.business_name,
+        business_id: business._id,
+        analysis_result: conversation.analysis_result,
         analysis_metadata: {
-          type: auditEntry.event_data.analysis_type,
-          name: auditEntry.event_data.analysis_name,
-          phase: auditEntry.event_data.phase,
-          data_size: auditEntry.event_data.data_size,
+          type: analysisType,
+          name: auditEntry.event_data.analysis_name || 'Analysis',
+          phase: phase,
+          data_size: JSON.stringify(conversation.analysis_result).length,
         },
       });
     } catch (error) {
       console.error("Failed to fetch analysis data from audit trail:", error);
-      res.status(500).json({ error: "Failed to fetch analysis data" });
+      res.status(500).json({
+        error: "Failed to fetch analysis data",
+        message: error.message
+      });
     }
   }
 
@@ -610,8 +676,8 @@ static async updateUserRole(req, res) {
           const latestStatusEntry =
             statusEntries.length > 0
               ? statusEntries.sort(
-                  (a, b) => new Date(b.created_at) - new Date(a.created_at)
-                )[0]
+                (a, b) => new Date(b.created_at) - new Date(a.created_at)
+              )[0]
               : null;
           const isComplete = latestStatusEntry?.metadata?.is_complete || false;
 
@@ -726,10 +792,10 @@ static async updateUserRole(req, res) {
           ].includes(analysisType),
           business_context: business_id
             ? {
-                business_id: business_id,
-                has_document: documentInfo?.has_document || false,
-                document_exists: documentInfo?.file_exists || false,
-              }
+              business_id: business_id,
+              has_document: documentInfo?.has_document || false,
+              document_exists: documentInfo?.file_exists || false,
+            }
             : null,
           original_phase: analysis.phase,
           generated_timestamp: analysis.created_at,
@@ -785,8 +851,8 @@ static async updateUserRole(req, res) {
           const progressPercentage =
             totalQuestions > 0
               ? Math.round(
-                  (completedQuestionsForBusiness / totalQuestions) * 100
-                )
+                (completedQuestionsForBusiness / totalQuestions) * 100
+              )
               : 0;
 
           const enhancedBusiness = {
@@ -883,11 +949,11 @@ static async updateUserRole(req, res) {
             document_upload_rate:
               enhancedBusinesses.length > 0
                 ? Math.round(
-                    (enhancedBusinesses.filter((b) => b.has_financial_document)
-                      .length /
-                      enhancedBusinesses.length) *
-                      100
-                  )
+                  (enhancedBusinesses.filter((b) => b.has_financial_document)
+                    .length /
+                    enhancedBusinesses.length) *
+                  100
+                )
                 : 0,
           },
         },

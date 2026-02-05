@@ -5,10 +5,11 @@ const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
 
-const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
+const VALID_STATUS = ["draft", "Active", "At Risk", "Paused", "Killed", "Scaled", "prioritizing", "prioritized", "launched", "reprioritizing"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
+
 
 
 // Permission matrix for ALL project actions
@@ -18,29 +19,27 @@ function getProjectPermissions({
   isCollaborator,
   isAdmin,
 }) {
-  switch (businessStatus) {
+  const status = (businessStatus || "").toLowerCase();
+  const canModify = isAdmin || isCollaborator || isOwner;
+
+  switch (status) {
     case "draft":
       return {
-        canCreate: isAdmin || isCollaborator,
-        canEdit: isAdmin || isCollaborator,
+        canCreate: canModify,
+        canEdit: canModify,
       };
     case "prioritizing":
-      return {
-        canCreate: false,
-        canEdit: isAdmin || isCollaborator,
-      };
-
     case "prioritized":
       return {
         canCreate: false,
-        canEdit: isAdmin || isCollaborator,
+        canEdit: canModify,
       };
 
-    // fully locked
+    // fully locked for non-admins by default
     case "launched":
       return {
         canCreate: false,
-        canEdit: false,
+        canEdit: isAdmin,
       };
 
     case "reprioritizing":
@@ -50,7 +49,8 @@ function getProjectPermissions({
       }
 
     default:
-      return { canCreate: false, canEdit: false };
+      // Default to allowing modification if status is unknown/active
+      return { canCreate: false, canEdit: canModify };
   }
 }
 
@@ -122,7 +122,7 @@ class ProjectController {
         ...project,
         allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
         // Remove project status, we'll use business status instead
-        status: undefined,
+        // status: undefined,
       }));
 
       let ranking_lock_summary = {
@@ -213,6 +213,13 @@ class ProjectController {
         project_name,
         description,
         why_this_matters,
+        strategic_decision,
+        accountable_owner,
+        key_assumptions,
+        success_criteria,
+        kill_criteria,
+        review_cadence,
+        status,
         impact,
         effort,
         risk,
@@ -373,6 +380,18 @@ class ProjectController {
         project_type: normalizedProjectType,
         description: normalizeString(description),
         why_this_matters: normalizeString(why_this_matters),
+        strategic_decision: normalizeString(strategic_decision),
+        accountable_owner: normalizeString(accountable_owner),
+        key_assumptions: Array.isArray(key_assumptions)
+          ? key_assumptions.slice(0, 3).map(normalizeString)
+          : [],
+        success_criteria: normalizeString(success_criteria),
+        kill_criteria: normalizeString(kill_criteria),
+        review_cadence: normalizeString(review_cadence),
+
+        // status: normalizeString(status) || "draft",
+        status: normalizeString(status).toLowerCase() || "draft",
+
         impact: normalizeString(impact),
         effort: normalizeString(effort),
         risk: normalizeString(risk),
@@ -389,7 +408,6 @@ class ProjectController {
             budget_estimate === undefined
             ? ""
             : String(Number(budget_estimate)),
-        status: "draft",
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -464,7 +482,7 @@ class ProjectController {
           ? new ObjectId(existing.business_id)
           : existing.business_id;
 
-        await BusinessModel.clearAllowedCollaborators(businessId);
+        // await BusinessModel.clearAllowedCollabosrators(businessId);
 
         await ProjectModel.collection().updateMany(
           { business_id: businessId },
@@ -494,34 +512,31 @@ class ProjectController {
       if (!business)
         return res.status(404).json({ error: "Parent business not found" });
 
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(
         (id) => id.toString() === req.user._id.toString()
       );
-      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
+      const bStatus = (business.status || "").toLowerCase();
+      const pStatus = (existing.status || "").toLowerCase();
 
       const permissions = getProjectPermissions({
-        businessStatus: business.status,
+        businessStatus: bStatus,
         isOwner,
         isCollaborator,
         isAdmin,
       });
 
+      const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
+        existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
+
       let canEditProject = false;
 
-      if (existing.status === "launched") {
-        const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
-          existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
+      if (pStatus === "launched" || bStatus === "launched") {
         canEditProject = isAdmin || isInAllowedCollabs;
-      } else if (existing.status === "reprioritizing") {
-        if (isAdmin) {
-          canEditProject = true;
-        } else {
-          const allowedCollabs = existing.allowed_collaborators || [];
-          canEditProject = allowedCollabs.some(
-            (id) => id.toString() === req.user._id.toString()
-          );
-        }
+      } else if (pStatus === "reprioritizing" || bStatus === "reprioritizing") {
+        canEditProject = isAdmin || isInAllowedCollabs;
       } else {
         canEditProject = permissions.canEdit;
       }
@@ -532,9 +547,7 @@ class ProjectController {
         });
       }
 
-      if (req.body.status && !VALID_STATUS.includes(req.body.status)) {
-        return res.status(400).json({ error: "Invalid status value" });
-      }
+      // Redundant case-sensitive check removed. Status is normalized and validated later.
 
       const updateData = {
         updated_at: new Date(),
@@ -544,6 +557,24 @@ class ProjectController {
         updateData.allowed_collaborators = req.body.allowed_collaborators;
       }
 
+      if (req.body.project_name !== undefined) {
+        const name = normalizeString(req.body.project_name).trim();
+        if (!name) {
+          return res.status(400).json({ error: "Project name cannot be empty" });
+        }
+        updateData.project_name = name;
+      }
+
+      if (req.body.project_type !== undefined) {
+        const type = normalizeString(req.body.project_type).trim();
+        if (type && !PROJECT_TYPES.includes(type)) {
+          return res.status(400).json({
+            error: `project_type must be one of ${PROJECT_TYPES.join(", ")}`,
+          });
+        }
+        updateData.project_type = type || DEFAULT_PROJECT_TYPE;
+      }
+
       if (req.body.description !== undefined)
         updateData.description = normalizeString(req.body.description);
 
@@ -551,6 +582,48 @@ class ProjectController {
         updateData.why_this_matters = normalizeString(
           req.body.why_this_matters
         );
+
+      if (req.body.strategic_decision !== undefined)
+        updateData.strategic_decision = normalizeString(req.body.strategic_decision);
+
+      if (req.body.accountable_owner !== undefined)
+        updateData.accountable_owner = normalizeString(req.body.accountable_owner);
+
+      if (req.body.key_assumptions !== undefined) {
+        if (req.body.key_assumptions === "" || req.body.key_assumptions === null) {
+          updateData.key_assumptions = [];
+        } else if (!Array.isArray(req.body.key_assumptions)) {
+          return res.status(400).json({ error: "key_assumptions must be an array" });
+        } else {
+          updateData.key_assumptions = req.body.key_assumptions.slice(0, 3).map(normalizeString);
+        }
+      }
+
+      if (req.body.success_criteria !== undefined)
+        updateData.success_criteria = normalizeString(req.body.success_criteria);
+
+      if (req.body.kill_criteria !== undefined)
+        updateData.kill_criteria = normalizeString(req.body.kill_criteria);
+
+      if (req.body.review_cadence !== undefined)
+        updateData.review_cadence = normalizeString(req.body.review_cadence);
+
+      if (req.body.status !== undefined) {
+        const val = req.body.status;
+        if (val === "" || val === null) {
+          updateData.status = existing.status;
+        } else {
+          const normalizedStatus = String(val).trim().toLowerCase();
+          const allowed = VALID_STATUS.map(s => s.toLowerCase());
+
+          if (!allowed.includes(normalizedStatus)) {
+            return res.status(400).json({ error: "Invalid status value" });
+          }
+
+          updateData.status = normalizedStatus;
+        }
+      }
+
 
       if (req.body.impact !== undefined)
         updateData.impact = normalizeString(req.body.impact);
@@ -601,8 +674,13 @@ class ProjectController {
         }
       }
 
-      if (req.body.status) {
-        updateData.status = req.body.status;
+      if (req.body.learning_state !== undefined) {
+        updateData.learning_state = normalizeString(req.body.learning_state);
+      }
+
+      if (req.body.last_reviewed !== undefined) {
+        const lr = req.body.last_reviewed;
+        updateData.last_reviewed = (lr === null || lr === "") ? null : new Date(lr);
       }
 
       delete updateData._id;
