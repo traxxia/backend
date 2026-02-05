@@ -11,7 +11,6 @@ const adminRoutes = require("./adminRoutes");
 const initiativeRoutes = require("./initiativeRoutes");
 const projectRoutes = require("./projectRoutes");
 const projectFieldLockRoutes = require("./projectFieldLockRoutes");
-const analysisRoutes = require("./analysisRoutes");
 
 router.use("/api", authRoutes);
 router.use("/api/companies", companyRoutes);
@@ -26,6 +25,5 @@ router.use("/api/admin", adminRoutes);
 router.use("/api/initiatives", initiativeRoutes);
 router.use("/api/projects", projectRoutes);
 router.use("/api/project-field-locks", projectFieldLockRoutes);
-router.use("/api/analysis", analysisRoutes);
 
 module.exports = router;
