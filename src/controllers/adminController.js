@@ -68,8 +68,8 @@ class AdminController {
 
       const normalizedCompanyName = company_name.trim().toLowerCase();
       const existingCompany = await CompanyModel.findByName(normalizedCompanyName);
-      if(existingCompany){
-        return res.status(400).json({ error: "Company with this name already exists"})
+      if (existingCompany) {
+        return res.status(400).json({ error: "Company with this name already exists" })
       }
 
       let logoUrl = null;
@@ -223,47 +223,47 @@ class AdminController {
   }
 
 
-static async updateUserRole(req, res) {
-  try {
-    
-    const { user_id } = req.params;
-    const { role } = req.body;
+  static async updateUserRole(req, res) {
+    try {
+
+      const { user_id } = req.params;
+      const { role } = req.body;
 
 
-    if (!ObjectId.isValid(user_id)) {
-      return res.status(400).json({ error: "Invalid user ID" });
-    }
+      if (!ObjectId.isValid(user_id)) {
+        return res.status(400).json({ error: "Invalid user ID" });
+      }
 
-    if (!role) {
-      return res.status(400).json({ error: "Role is required" });
-    }
+      if (!role) {
+        return res.status(400).json({ error: "Role is required" });
+      }
 
-    const allowedRoles = ["user", "viewer", "collaborator"];
+      const allowedRoles = ["user", "viewer", "collaborator"];
 
-    if (!allowedRoles.includes(role.toLowerCase())) {
-      return res.status(400).json({
-        error: `Invalid role. Allowed roles: ${allowedRoles.join(", ")}`,
+      if (!allowedRoles.includes(role.toLowerCase())) {
+        return res.status(400).json({
+          error: `Invalid role. Allowed roles: ${allowedRoles.join(", ")}`,
+        });
+      }
+
+      const targetUser = await UserModel.findById(user_id);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      await UserModel.updateRole(user_id, role.toLowerCase());
+
+      return res.json({
+        message: "User role updated successfully",
+        user_id,
+        new_role: role.toLowerCase(),
+        role: req.user.role.role_name,
       });
+    } catch (error) {
+      console.error("Failed to update user role:", error);
+      return res.status(500).json({ error: "Failed to update user role" });
     }
-
-    const targetUser = await UserModel.findById(user_id);
-    if (!targetUser) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    await UserModel.updateRole(user_id, role.toLowerCase());
-
-    return res.json({
-      message: "User role updated successfully",
-      user_id,
-      new_role: role.toLowerCase(),
-      role: req.user.role.role_name,
-    });
-  } catch (error) {
-    console.error("Failed to update user role:", error);
-    return res.status(500).json({ error: "Failed to update user role" });
   }
-}
 
   static async getAuditTrail(req, res) {
     try {
@@ -311,6 +311,7 @@ static async updateUserRole(req, res) {
         user_name: "$user.name",
         user_email: "$user.email",
         company_name: "$company.company_name",
+        business_name: "$business.business_name",  // Add this line
       };
 
       if (include_analysis_data === "false" || !include_analysis_data) {
@@ -324,6 +325,7 @@ static async updateUserRole(req, res) {
               data_size: "$event_data.data_size",
               analysis_summary: "$event_data.analysis_summary",
               metadata: "$event_data.metadata",
+              business_name: "$business.business_name",  // Add this line
               has_analysis_result: {
                 $ne: ["$event_data.analysis_result", null],
               },
@@ -345,6 +347,7 @@ static async updateUserRole(req, res) {
         limit: parseInt(limit),
         projection,
       });
+
       const totalCount = await AuditModel.countDocuments(filter);
       const analysisStats = await AuditModel.getAnalysisStats(filter);
 
@@ -380,7 +383,6 @@ static async updateUserRole(req, res) {
       }
 
       const db = getDB();
-
       const auditEntry = await db.collection('audit_trail').findOne({
         _id: new ObjectId(audit_id)
       });
@@ -445,6 +447,7 @@ static async updateUserRole(req, res) {
           info: {
             message: "The analysis was logged but the detailed results are no longer available",
             business_id: businessId,
+            business_name: business.business_name,
             analysis_type: analysisType,
             phase: phase
           }
@@ -452,14 +455,14 @@ static async updateUserRole(req, res) {
       }
 
       if (!conversation.analysis_result) {
-        return res.status(404).json({
-          error: "Analysis result is empty"
-        });
+        return res.status(404).json({ error: "Analysis result is empty" });
       }
 
       res.json({
         audit_id: auditEntry._id,
         timestamp: auditEntry.timestamp,
+        business_name: business.business_name,
+        business_id: business._id,
         analysis_result: conversation.analysis_result,
         analysis_metadata: {
           type: analysisType,
@@ -468,7 +471,6 @@ static async updateUserRole(req, res) {
           data_size: JSON.stringify(conversation.analysis_result).length,
         },
       });
-
     } catch (error) {
       console.error("Failed to fetch analysis data from audit trail:", error);
       res.status(500).json({
@@ -674,8 +676,8 @@ static async updateUserRole(req, res) {
           const latestStatusEntry =
             statusEntries.length > 0
               ? statusEntries.sort(
-                  (a, b) => new Date(b.created_at) - new Date(a.created_at)
-                )[0]
+                (a, b) => new Date(b.created_at) - new Date(a.created_at)
+              )[0]
               : null;
           const isComplete = latestStatusEntry?.metadata?.is_complete || false;
 
@@ -790,10 +792,10 @@ static async updateUserRole(req, res) {
           ].includes(analysisType),
           business_context: business_id
             ? {
-                business_id: business_id,
-                has_document: documentInfo?.has_document || false,
-                document_exists: documentInfo?.file_exists || false,
-              }
+              business_id: business_id,
+              has_document: documentInfo?.has_document || false,
+              document_exists: documentInfo?.file_exists || false,
+            }
             : null,
           original_phase: analysis.phase,
           generated_timestamp: analysis.created_at,
@@ -849,8 +851,8 @@ static async updateUserRole(req, res) {
           const progressPercentage =
             totalQuestions > 0
               ? Math.round(
-                  (completedQuestionsForBusiness / totalQuestions) * 100
-                )
+                (completedQuestionsForBusiness / totalQuestions) * 100
+              )
               : 0;
 
           const enhancedBusiness = {
@@ -947,11 +949,11 @@ static async updateUserRole(req, res) {
             document_upload_rate:
               enhancedBusinesses.length > 0
                 ? Math.round(
-                    (enhancedBusinesses.filter((b) => b.has_financial_document)
-                      .length /
-                      enhancedBusinesses.length) *
-                      100
-                  )
+                  (enhancedBusinesses.filter((b) => b.has_financial_document)
+                    .length /
+                    enhancedBusinesses.length) *
+                  100
+                )
                 : 0,
           },
         },
