@@ -265,6 +265,86 @@ class AdminController {
     }
   }
 
+  static async getCompanyBusinesses(req, res) {
+    try {
+      const { company_id } = req.query;
+      let filter = {};
+
+      if (req.user.role.role_name === "company_admin") {
+        filter.company_id = req.user.company_id;
+      } else if (req.user.role.role_name === "super_admin") {
+        if (company_id && ObjectId.isValid(company_id)) {
+          filter.company_id = new ObjectId(company_id);
+        }
+      } else {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const db = getDB();
+
+      // Find users in the company/companies to match their businesses
+      const users = await db.collection("users").find(filter).toArray();
+      const userIds = users.map(u => u._id);
+
+      const businesses = await db.collection("user_businesses").aggregate([
+        {
+          $match: {
+            $or: [
+              { user_id: { $in: userIds } },
+              { company_id: filter.company_id } // Some businesses might have company_id directly
+            ]
+          }
+        },
+        {
+          $lookup: {
+            from: "users",
+            localField: "user_id",
+            foreignField: "_id",
+            as: "owner"
+          }
+        },
+        { $unwind: { path: "$owner", preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: "users",
+            localField: "collaborators",
+            foreignField: "_id",
+            as: "collaborator_details"
+          }
+        },
+        {
+          $project: {
+            business_name: 1,
+            business_purpose: 1,
+            status: 1,
+            created_at: 1,
+            owner_name: "$owner.name",
+            owner_email: "$owner.email",
+            collaborators: {
+              $map: {
+                input: "$collaborator_details",
+                as: "collab",
+                in: {
+                  name: "$$collab.name",
+                  email: "$$collab.email"
+                }
+              }
+            }
+          }
+        },
+        { $sort: { created_at: -1 } }
+      ]).toArray();
+
+      res.json({
+        businesses,
+        total_count: businesses.length
+      });
+    } catch (error) {
+      console.error("Error fetching company businesses:", error);
+      res.status(500).json({ error: "Failed to fetch businesses" });
+    }
+  }
+
   static async getAuditTrail(req, res) {
     try {
       const {
