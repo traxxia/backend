@@ -21,10 +21,10 @@ async function getBusinessAndValidateAccess(business_id, currentUser) {
   );
 
   const isAdmin = ["super_admin", "company_admin"].includes(
-  currentUser.role?.role_name
-);
+    currentUser.role?.role_name
+  );
 
-const isViewer = currentUser.role?.role_name === "viewer";
+  const isViewer = currentUser.role?.role_name === "viewer";
 
   console.log({
     userId: currentUser._id,
@@ -36,11 +36,11 @@ const isViewer = currentUser.role?.role_name === "viewer";
     isViewer
   });
 
-  if(isAdmin && currentUser.company_id){
+  if (isAdmin && currentUser.company_id) {
     const owner = await UserModel.findById(business.user_id);
-    if(
+    if (
       owner?.company_id?.toString() !== currentUser.company_id.toString()
-    ){
+    ) {
       return { error: "Business not in your company" }
     }
   }
@@ -49,17 +49,17 @@ const isViewer = currentUser.role?.role_name === "viewer";
     return { error: "Not allowed to access conversations for this business" };
   }
 
-  return { 
-     business,
-     ownerId: business.user_id,
-     access: {
+  return {
+    business,
+    ownerId: business.user_id,
+    access: {
       isOwner,
       isCollaborator,
       isAdmin,
       canWrite: isOwner || isCollaborator || isAdmin,
-     }
-          
-    };
+    }
+
+  };
 }
 
 class ConversationController {
@@ -237,27 +237,23 @@ class ConversationController {
 
         allEntries.forEach((entry) => {
           if (entry.message_type === "bot" && entry.message_text) {
-            if (entry.message_text.trim() !== question.question_text.trim()) {
-              conversationFlow.push({
-                type: "question",
-                text: entry.message_text,
-                timestamp: entry.created_at,
-                is_followup: entry.is_followup || false,
-              });
-            }
+            conversationFlow.push({
+              type: "question",
+              text: entry.message_text,
+              timestamp: entry.created_at,
+              is_followup: entry.is_followup || false,
+            });
+          } else if (entry.message_type === "user" && entry.answer_text) {
+            conversationFlow.push({
+              type: "answer",
+              text: entry.answer_text,
+              timestamp: entry.created_at,
+              is_latest: latestUserAnswer && entry._id.toString() === latestUserAnswer._id.toString(),
+              is_followup: entry.is_followup || false,
+              is_edited: entry.metadata?.is_edit === true,
+            });
           }
         });
-
-        if (latestUserAnswer) {
-          conversationFlow.push({
-            type: "answer",
-            text: latestUserAnswer.answer_text,
-            timestamp: latestUserAnswer.created_at,
-            is_latest: true,
-            is_followup: false,
-            is_edited: latestUserAnswer.metadata?.is_edit === true,
-          });
-        }
 
         conversationFlow.sort(
           (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
@@ -551,7 +547,8 @@ class ConversationController {
 
   static async saveFollowupQuestion(req, res) {
     try {
-      const { business_id, question_id, message_text } = req.body;
+      const { business_id, question_id, message_text, followup_question_text } = req.body;
+      const textToUse = message_text || followup_question_text;
 
       const access = await getBusinessAndValidateAccess(
         business_id,
@@ -563,13 +560,17 @@ class ConversationController {
         return res.status(400).json({ error: "question_id is required" });
       }
 
+      if (!textToUse) {
+        return res.status(400).json({ error: "message_text (or followup_question_text) is required" });
+      }
+
       const ownerId = new ObjectId(access.ownerId);
 
       const payload = {
         user_id: ownerId,
         business_id: new ObjectId(business_id),
         question_id: new ObjectId(question_id),
-        message_text,
+        message_text: textToUse,
         message_type: "bot",
         is_followup: true,
         conversation_type: "question_answer",

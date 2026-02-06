@@ -632,7 +632,16 @@ class AdminController {
       const phaseAnalysis =
         await ConversationModel.findByFilter(phaseAnalysisFilter);
       const businesses = await BusinessModel.findByUserId(targetUserId);
-      const questions = await QuestionModel.findAll({ is_active: true });
+      const questionsFetch = await QuestionModel.findAll({ is_active: true });
+
+      // Explicitly sort questions by phase priority and then by order
+      const phasePriority = { initial: 1, essential: 2, advanced: 3 };
+      const questions = questionsFetch.sort((a, b) => {
+        const priorityA = phasePriority[a.phase] || 4;
+        const priorityB = phasePriority[b.phase] || 4;
+        if (priorityA !== priorityB) return priorityA - priorityB;
+        return (a.order || 0) - (b.order || 0);
+      });
 
       // Get business and document information (same as conversations endpoint)
       let businessInfo = null;
@@ -727,6 +736,11 @@ class AdminController {
             (a, b) => new Date(a.created_at) - new Date(b.created_at)
           );
 
+          const userAnswers = allEntries.filter(
+            (entry) => entry.message_type === "user" && entry.answer_text
+          );
+          const latestUserAnswer = userAnswers.length > 0 ? userAnswers[userAnswers.length - 1] : null;
+
           const conversationFlow = [];
           let finalAnswer = "";
 
@@ -738,13 +752,14 @@ class AdminController {
                 timestamp: entry.created_at,
                 is_followup: entry.is_followup || false,
               });
-            }
-            if (entry.answer_text && entry.answer_text.trim() !== "") {
+            } else if (entry.message_type === "user" && entry.answer_text && entry.answer_text.trim() !== "") {
               conversationFlow.push({
                 type: "answer",
                 text: entry.answer_text,
                 timestamp: entry.created_at,
+                is_latest: latestUserAnswer && entry._id.toString() === latestUserAnswer._id.toString(),
                 is_followup: entry.is_followup || false,
+                is_edited: entry.metadata?.is_edit === true,
               });
               finalAnswer = entry.answer_text;
             }
@@ -766,6 +781,7 @@ class AdminController {
               question: question.question_text,
               answer: finalAnswer,
               question_id: question._id,
+              order: question.order,
               conversation_flow: conversationFlow,
               is_complete: isComplete,
               last_updated:
