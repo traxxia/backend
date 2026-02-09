@@ -265,6 +265,86 @@ class AdminController {
     }
   }
 
+  static async getCompanyBusinesses(req, res) {
+    try {
+      const { company_id } = req.query;
+      let filter = {};
+
+      if (req.user.role.role_name === "company_admin") {
+        filter.company_id = req.user.company_id;
+      } else if (req.user.role.role_name === "super_admin") {
+        if (company_id && ObjectId.isValid(company_id)) {
+          filter.company_id = new ObjectId(company_id);
+        }
+      } else {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const db = getDB();
+
+      // Find users in the company/companies to match their businesses
+      const users = await db.collection("users").find(filter).toArray();
+      const userIds = users.map(u => u._id);
+
+      const businesses = await db.collection("user_businesses").aggregate([
+        {
+          $match: {
+            $or: [
+              { user_id: { $in: userIds } },
+              { company_id: filter.company_id } // Some businesses might have company_id directly
+            ]
+          }
+        },
+        {
+          $lookup: {
+            from: "users",
+            localField: "user_id",
+            foreignField: "_id",
+            as: "owner"
+          }
+        },
+        { $unwind: { path: "$owner", preserveNullAndEmptyArrays: true } },
+        {
+          $lookup: {
+            from: "users",
+            localField: "collaborators",
+            foreignField: "_id",
+            as: "collaborator_details"
+          }
+        },
+        {
+          $project: {
+            business_name: 1,
+            business_purpose: 1,
+            status: 1,
+            created_at: 1,
+            owner_name: "$owner.name",
+            owner_email: "$owner.email",
+            collaborators: {
+              $map: {
+                input: "$collaborator_details",
+                as: "collab",
+                in: {
+                  name: "$$collab.name",
+                  email: "$$collab.email"
+                }
+              }
+            }
+          }
+        },
+        { $sort: { created_at: -1 } }
+      ]).toArray();
+
+      res.json({
+        businesses,
+        total_count: businesses.length
+      });
+    } catch (error) {
+      console.error("Error fetching company businesses:", error);
+      res.status(500).json({ error: "Failed to fetch businesses" });
+    }
+  }
+
   static async getAuditTrail(req, res) {
     try {
       const {
@@ -552,7 +632,16 @@ class AdminController {
       const phaseAnalysis =
         await ConversationModel.findByFilter(phaseAnalysisFilter);
       const businesses = await BusinessModel.findByUserId(targetUserId);
-      const questions = await QuestionModel.findAll({ is_active: true });
+      const questionsFetch = await QuestionModel.findAll({ is_active: true });
+
+      // Explicitly sort questions by phase priority and then by order
+      const phasePriority = { initial: 1, essential: 2, advanced: 3 };
+      const questions = questionsFetch.sort((a, b) => {
+        const priorityA = phasePriority[a.phase] || 4;
+        const priorityB = phasePriority[b.phase] || 4;
+        if (priorityA !== priorityB) return priorityA - priorityB;
+        return (a.order || 0) - (b.order || 0);
+      });
 
       // Get business and document information (same as conversations endpoint)
       let businessInfo = null;
@@ -647,6 +736,11 @@ class AdminController {
             (a, b) => new Date(a.created_at) - new Date(b.created_at)
           );
 
+          const userAnswers = allEntries.filter(
+            (entry) => entry.message_type === "user" && entry.answer_text
+          );
+          const latestUserAnswer = userAnswers.length > 0 ? userAnswers[userAnswers.length - 1] : null;
+
           const conversationFlow = [];
           let finalAnswer = "";
 
@@ -658,13 +752,14 @@ class AdminController {
                 timestamp: entry.created_at,
                 is_followup: entry.is_followup || false,
               });
-            }
-            if (entry.answer_text && entry.answer_text.trim() !== "") {
+            } else if (entry.message_type === "user" && entry.answer_text && entry.answer_text.trim() !== "") {
               conversationFlow.push({
                 type: "answer",
                 text: entry.answer_text,
                 timestamp: entry.created_at,
+                is_latest: latestUserAnswer && entry._id.toString() === latestUserAnswer._id.toString(),
                 is_followup: entry.is_followup || false,
+                is_edited: entry.metadata?.is_edit === true,
               });
               finalAnswer = entry.answer_text;
             }
@@ -686,6 +781,7 @@ class AdminController {
               question: question.question_text,
               answer: finalAnswer,
               question_id: question._id,
+              order: question.order,
               conversation_flow: conversationFlow,
               is_complete: isComplete,
               last_updated:
