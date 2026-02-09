@@ -5,7 +5,7 @@ const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
 
-const VALID_STATUS = ["draft", "Active", "At Risk", "Paused", "Killed", "Scaled", "prioritizing", "prioritized", "launched", "reprioritizing"];
+const VALID_STATUS = ["Draft", "Active", "At Risk", "Paused", "Killed", "Scaled"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
@@ -232,7 +232,10 @@ class ProjectController {
         estimated_timeline,
         budget_estimate,
         project_type,
-
+        learning_state,
+        last_reviewed,
+        constraints_non_negotiables,
+        explicitly_out_of_scope
       } = req.body;
 
       // Required fields
@@ -389,16 +392,17 @@ class ProjectController {
         kill_criteria: normalizeString(kill_criteria),
         review_cadence: normalizeString(review_cadence),
 
-        // status: normalizeString(status) || "draft",
-        status: normalizeString(status).toLowerCase() || "draft",
+        status: status || "Draft",
+        learning_state: learning_state || "Testing",
+        last_reviewed: last_reviewed ? new Date(last_reviewed) : null,
 
         impact: normalizeString(impact),
         effort: normalizeString(effort),
         risk: normalizeString(risk),
         strategic_theme: normalizeString(strategic_theme),
         dependencies: normalizeString(dependencies),
-        high_level_requirements: normalizeString(high_level_requirements),
-        scope_definition: normalizeString(scope_definition),
+        high_level_requirements: normalizeString(constraints_non_negotiables || high_level_requirements),
+        scope_definition: normalizeString(explicitly_out_of_scope || scope_definition),
         expected_outcome: normalizeString(expected_outcome),
         success_metrics: normalizeString(success_metrics),
         estimated_timeline: normalizeString(estimated_timeline),
@@ -613,14 +617,14 @@ class ProjectController {
         if (val === "" || val === null) {
           updateData.status = existing.status;
         } else {
-          const normalizedStatus = String(val).trim().toLowerCase();
-          const allowed = VALID_STATUS.map(s => s.toLowerCase());
+          const trimmed = String(val).trim();
+          const found = VALID_STATUS.find(s => s.toLowerCase() === trimmed.toLowerCase());
 
-          if (!allowed.includes(normalizedStatus)) {
+          if (!found) {
             return res.status(400).json({ error: "Invalid status value" });
           }
 
-          updateData.status = normalizedStatus;
+          updateData.status = found;
         }
       }
 
@@ -640,14 +644,14 @@ class ProjectController {
       if (req.body.dependencies !== undefined)
         updateData.dependencies = normalizeString(req.body.dependencies);
 
-      if (req.body.high_level_requirements !== undefined)
+      if (req.body.constraints_non_negotiables !== undefined || req.body.high_level_requirements !== undefined)
         updateData.high_level_requirements = normalizeString(
-          req.body.high_level_requirements
+          req.body.constraints_non_negotiables || req.body.high_level_requirements
         );
 
-      if (req.body.scope_definition !== undefined)
+      if (req.body.explicitly_out_of_scope !== undefined || req.body.scope_definition !== undefined)
         updateData.scope_definition = normalizeString(
-          req.body.scope_definition
+          req.body.explicitly_out_of_scope || req.body.scope_definition
         );
 
       if (req.body.expected_outcome !== undefined)
