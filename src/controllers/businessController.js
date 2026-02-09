@@ -269,6 +269,133 @@ class BusinessController {
     }
   }
 
+  static async getById(req, res) {
+    try {
+      const businessId = req.params.id;
+
+      if (!ObjectId.isValid(businessId)) {
+        return res.status(400).json({ error: "Invalid business ID" });
+      }
+
+      const business = await BusinessModel.findById(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Check access permissions
+      const isOwner = business.user_id && business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = (business.collaborators || []).some(
+        (id) => id.toString() === req.user._id.toString()
+      );
+      const isAdmin = VALID_ADMIN_ROLES.includes(req.user.role.role_name);
+
+      if (!isOwner && !isCollaborator && !isAdmin) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      // Enhance business data similar to getAll
+      const totalQuestions = await QuestionModel.countDocuments({
+        is_active: true,
+        phase: { $in: ALLOWED_PHASES },
+      });
+
+      const conversations = await ConversationModel.findByFilter({
+        user_id: business.user_id,
+        business_id: business._id,
+        conversation_type: "question_answer",
+      });
+
+      const questionStats = {};
+      conversations.forEach((conv) => {
+        if (conv.question_id) {
+          const qid = conv.question_id.toString();
+          if (!questionStats[qid])
+            questionStats[qid] = {
+              hasAnswers: false,
+              isComplete: false,
+              answerCount: 0,
+            };
+          if (conv.answer_text && conv.answer_text.trim() !== "") {
+            questionStats[qid].hasAnswers = true;
+            questionStats[qid].answerCount++;
+          }
+          if (conv.metadata && conv.metadata.is_complete === true) {
+            questionStats[qid].isComplete = true;
+          }
+        }
+      });
+
+      const allowedQuestions = await QuestionModel.findAll({
+        is_active: true,
+        phase: { $in: ALLOWED_PHASES },
+      });
+      const allowedQuestionIds = new Set(
+        allowedQuestions.map((q) => q._id.toString())
+      );
+      const filteredQuestionStats = Object.entries(questionStats).filter(
+        ([qid]) => allowedQuestionIds.has(qid)
+      );
+      const completedQuestions = filteredQuestionStats.filter(
+        ([_, stat]) => stat.isComplete || stat.hasAnswers
+      ).length;
+      const pendingQuestions = totalQuestions - completedQuestions;
+      const progressPercentage =
+        totalQuestions > 0
+          ? Math.round((completedQuestions / totalQuestions) * 100)
+          : 0;
+
+      const hasProjects = await ProjectModel.collection().countDocuments({
+        business_id: new ObjectId(businessId),
+      }) > 0;
+
+      const enhancedBusiness = {
+        ...business,
+        city: business.city || "",
+        country: business.country || "",
+        location_display: [business.city, business.country]
+          .filter(Boolean)
+          .join(", "),
+        has_financial_document: business.has_financial_document || false,
+        financial_document_info:
+          business.has_financial_document && business.financial_document
+            ? {
+              filename: business.financial_document.original_name,
+              upload_date: business.financial_document.upload_date,
+              file_size: business.financial_document.file_size,
+              file_type: business.financial_document.file_type,
+            }
+            : null,
+        question_statistics: {
+          total_questions: totalQuestions,
+          completed_questions: completedQuestions,
+          pending_questions: pendingQuestions,
+          progress_percentage: progressPercentage,
+          total_answers_given: filteredQuestionStats.reduce(
+            (sum, [, stat]) => sum + stat.answerCount,
+            0
+          ),
+          excluded_phases: ["good"],
+          included_phases: ALLOWED_PHASES,
+        },
+        access: {
+          isOwner,
+          isCollaborator,
+          isAdmin,
+          canView: true,
+          canCreateProject: isCollaborator || isAdmin,
+          canEditProject: isCollaborator || isAdmin,
+          canLaunchProject: isAdmin,
+        },
+        has_projects: hasProjects,
+      };
+
+      res.json(enhancedBusiness);
+    } catch (error) {
+      console.error("Failed to fetch business:", error);
+      res.status(500).json({ error: "Failed to fetch business" });
+    }
+  }
+
   static async create(req, res) {
     try {
       const { business_name, business_purpose, description, city, country } =
@@ -355,23 +482,31 @@ class BusinessController {
       const businessId = new ObjectId(req.params.id);
       const userId = new ObjectId(req.user._id);
 
-      const business = await BusinessModel.findById(businessId, userId);
+      const business = await BusinessModel.findById(businessId);
       if (!business) {
         return res.status(404).json({ error: "Business not found" });
       }
 
+      // Check if user has permission to delete
+      const isOwner = business.user_id && business.user_id.toString() === userId.toString();
+      const isAdmin = VALID_ADMIN_ROLES.includes(req.user.role.role_name);
+
+      if (!isOwner && !isAdmin) {
+        return res.status(403).json({ error: "Access denied - only business owner or admin can delete" });
+      }
+
       const conversationCount = await ConversationModel.countDocuments({
-        user_id: userId,
+        user_id: business.user_id,
         business_id: businessId,
       });
 
-      const deleteResult = await BusinessModel.delete(businessId, userId);
+      const deleteResult = await BusinessModel.delete(businessId, business.user_id);
       if (deleteResult.deletedCount === 0) {
         return res.status(404).json({ error: "Business not found" });
       }
 
       await ConversationModel.deleteMany({
-        user_id: userId,
+        user_id: business.user_id,
         business_id: businessId,
       });
 

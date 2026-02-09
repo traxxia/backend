@@ -4,6 +4,7 @@ const BusinessController = require("../controllers/businessController");
 const { authenticateToken, requireAdmin } = require("../middleware/auth");
 
 router.get("/", authenticateToken, BusinessController.getAll);
+router.get("/:id", authenticateToken, BusinessController.getById);
 router.post("/", authenticateToken, BusinessController.create);
 router.delete("/:id", authenticateToken, BusinessController.delete);
 
