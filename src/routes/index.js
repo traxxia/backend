@@ -13,6 +13,7 @@ const projectRoutes = require("./projectRoutes");
 const projectFieldLockRoutes = require("./projectFieldLockRoutes");
 const analysisRoutes = require("./analysisRoutes");
 const planRoutes = require("./planRoutes");
+const subscriptionRoutes = require("./subscriptionRoutes");
 
 router.use("/api", authRoutes);
 router.use("/api/plans", planRoutes);
@@ -30,5 +31,6 @@ router.use("/api/initiatives", initiativeRoutes);
 router.use("/api/projects", projectRoutes);
 router.use("/api/project-field-locks", projectFieldLockRoutes);
 router.use("/api/analysis", analysisRoutes);
+router.use("/api/subscription", subscriptionRoutes);
 
 module.exports = router;

@@ -366,20 +366,41 @@ class BusinessController {
         return res.status(404).json({ error: "Business not found" });
       }
 
+      // Check if this business is already deleted
+      if (business.status === 'deleted') {
+        return res.status(400).json({ error: "This business is already deleted" });
+      }
+
+      // 30-day cooldown check
+      const lastDeleted = await BusinessModel.findLastDeleted(userId);
+      if (lastDeleted && lastDeleted.deleted_at) {
+        const cooldownDays = 30;
+        const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
+        const timeSinceLastDeleted = new Date() - new Date(lastDeleted.deleted_at);
+
+        if (timeSinceLastDeleted < cooldownMs) {
+          const remainingDays = Math.ceil((cooldownMs - timeSinceLastDeleted) / (1000 * 60 * 60 * 24));
+          return res.status(403).json({
+            error: `You cannot delete by 30 days. Please wait ${remainingDays} more day(s).`
+          });
+        }
+      }
+
       const conversationCount = await ConversationModel.countDocuments({
         user_id: userId,
         business_id: businessId,
       });
 
       const deleteResult = await BusinessModel.delete(businessId, userId);
-      if (deleteResult.deletedCount === 0) {
-        return res.status(404).json({ error: "Business not found" });
+      if (deleteResult.modifiedCount === 0) {
+        return res.status(404).json({ error: "Business not found or already deleted" });
       }
 
-      await ConversationModel.deleteMany({
-        user_id: userId,
-        business_id: businessId,
-      });
+      // We DON'T delete conversations anymore if we want to keep them for the "deleted" business
+      // Or we can mark them deleted too. For now let's keep them if the business is still "in db".
+      // However the controller previously did:
+      // await ConversationModel.deleteMany({ user_id: userId, business_id: businessId });
+      // I'll comment it out or remove it to keep the data as requested ("remains in db").
 
       await logAuditEvent(req.user._id, "business_deleted", {
         business_id: businessId,
