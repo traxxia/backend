@@ -5,6 +5,7 @@ const { SECRET_KEY } = require('../config/constants');
 const UserModel = require('../models/userModel');
 const CompanyModel = require("../models/companyModel")
 const { logAuditEvent } = require('../services/auditService');
+const TierService = require('../services/tierService');
 
 class AuthController {
   static async login(req, res) {
@@ -46,6 +47,8 @@ class AuthController {
         company: company?.company_name
       });
 
+      const planName = await TierService.getUserTier(user._id);
+
       res.json({
         token,
         user: {
@@ -53,6 +56,7 @@ class AuthController {
           name: user.name,
           email: user.email,
           role: role.role_name,
+          plan_name: planName,
           company: company ? {
             name: company.company_name,
             logo: company.logo,

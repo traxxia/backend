@@ -7,6 +7,7 @@ const AuditModel = require("../models/auditModel");
 const QuestionModel = require("../models/questionModel");
 const BusinessModel = require("../models/businessModel");
 const ConversationModel = require("../models/conversationModel");
+const TierService = require('../services/tierService');
 
 class AdminController {
   static async getCompanies(req, res) {
@@ -173,6 +174,23 @@ class AdminController {
         return res.status(403).json({ error: "Only admins can create users" });
       }
 
+      // Tier check: Check how many users (collaborators/others) this company already has
+      const db = getDB();
+      const currentUsersCount = await db.collection('users').countDocuments({ company_id: companyId });
+      const userTier = await TierService.getUserTier(req.user._id);
+      const limits = TierService.getTierLimits(userTier);
+
+      // For essential plan, max_collaborators is 0. 
+      // Total users allowed might be 1 (the owner/admin).
+      // We'll use max_collaborators + 1 (the admin) as the limit for total users if needed, 
+      // or specifically check if they are trying to add a collaborator.
+
+      if (userTier === 'essential' && currentUsersCount >= 1) {
+        return res.status(403).json({
+          error: "Your current plan doesn't support adding more users. Upgrade to Advanced to expand your team."
+        });
+      }
+
       const allowedRoles = ["user", "viewer", "collaborator"];
 
       if (
@@ -191,7 +209,30 @@ class AdminController {
           ? role.toLowerCase()
           : "user";
 
-      const db = getDB();
+      if (finalRoleName === 'collaborator', 'user', 'viewer') {
+        const currentCollaboratorsCount = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': { $in: ['collaborator', 'user', 'viewer'] } } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const count = currentCollaboratorsCount[0]?.count || 0;
+        if (count >= limits.max_collaborators) {
+          return res.status(403).json({
+            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed. Upgrade to Advanced if you need more seats.`
+          });
+        }
+      }
+
       const roleDoc = await db
         .collection("roles")
         .findOne({ role_name: finalRoleName });
@@ -249,6 +290,36 @@ class AdminController {
       const targetUser = await UserModel.findById(user_id);
       if (!targetUser) {
         return res.status(404).json({ error: "User not found" });
+      }
+
+      const db = getDB();
+      const companyId = targetUser.company_id;
+      
+      const userTier = await TierService.getUserTier(req.user._id); // Assuming the updating admin's tier is the company's tier
+      const limits = TierService.getTierLimits(userTier);
+
+      if (role.toLowerCase() === 'collaborator') {
+        const currentCollaboratorsCount = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'collaborator' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const count = currentCollaboratorsCount[0]?.count || 0;
+        if (count >= limits.max_collaborators) {
+          return res.status(403).json({
+            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed.`
+          });
+        }
       }
 
       await UserModel.updateRole(user_id, role.toLowerCase());
