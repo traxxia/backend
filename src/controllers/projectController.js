@@ -4,6 +4,7 @@ const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
+const TierService = require("../services/tierService");
 
 const VALID_STATUS = ["Draft", "Active", "At Risk", "Paused", "Killed", "Scaled"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
@@ -249,6 +250,13 @@ class ProjectController {
       const business = await BusinessModel.findById(business_id);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
+
+      const tierName = await TierService.getUserTier(req.user._id);
+      if (!await TierService.canCreateProject(tierName)) {
+        return res.status(403).json({
+          error: `Project creation is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+        });
+      }
 
 
       // User-collaborator
@@ -1053,11 +1061,14 @@ class ProjectController {
         });
       }
 
-      await ProjectModel.delete(id);
+      await ProjectModel.update(id, {
+        status: "Killed",
+        updated_at: new Date()
+      });
 
       res.json({
-        message: "Project deleted successfully",
-        deleted: { id, project_name: found.project_name },
+        message: "Project killed successfully",
+        killed: { id, project_name: found.project_name },
       });
     } catch (err) {
       console.error("PROJECT DELETE ERR:", err);

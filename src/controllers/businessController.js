@@ -7,6 +7,7 @@ const ProjectModel = require("../models/projectModel");
 const ProjectRankingModel = require("../models/projectRankingModel")
 const { logAuditEvent } = require("../services/auditService");
 const { getDB } = require("../config/database")
+const TierService = require("../services/tierService");
 
 const {
   MAX_BUSINESSES_PER_USER,
@@ -419,9 +420,14 @@ class BusinessController {
           .json({ error: "Country must be at least 2 characters long" });
       }
 
+      const tierName = await TierService.getUserTier(req.user._id);
+      const limits = TierService.getTierLimits(tierName);
       const existingCount = await BusinessModel.countByUserId(req.user._id);
-      if (existingCount >= MAX_BUSINESSES_PER_USER) {
-        return res.status(400).json({ error: "Maximum 5 businesses allowed" });
+
+      if (existingCount >= limits.max_workspaces) {
+        return res.status(403).json({
+          error: `Workspace limit reached for ${tierName} plan. Maximum ${limits.max_workspaces} workspace(s) allowed.`
+        });
       }
 
       const existingBusinesses = await BusinessModel.findByUserId(req.user._id);
@@ -487,6 +493,24 @@ class BusinessController {
         return res.status(404).json({ error: "Business not found" });
       }
 
+      // Check if this business is already deleted
+      if (business.status === 'deleted') {
+        return res.status(400).json({ error: "This business is already deleted" });
+      }
+
+      // 30-day cooldown check
+      const lastDeleted = await BusinessModel.findLastDeleted(userId);
+      if (lastDeleted && lastDeleted.deleted_at) {
+        const cooldownDays = 30;
+        const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
+        const timeSinceLastDeleted = new Date() - new Date(lastDeleted.deleted_at);
+
+        if (timeSinceLastDeleted < cooldownMs) {
+          const remainingDays = Math.ceil((cooldownMs - timeSinceLastDeleted) / (1000 * 60 * 60 * 24));
+          return res.status(403).json({
+            error: `You cannot delete by 30 days. Please wait ${remainingDays} more day(s).`
+          });
+        }
       // Check if user has permission to delete
       const isOwner = business.user_id && business.user_id.toString() === userId.toString();
       const isAdmin = VALID_ADMIN_ROLES.includes(req.user.role.role_name);
@@ -500,6 +524,16 @@ class BusinessController {
         business_id: businessId,
       });
 
+      const deleteResult = await BusinessModel.delete(businessId, userId);
+      if (deleteResult.modifiedCount === 0) {
+        return res.status(404).json({ error: "Business not found or already deleted" });
+      }
+
+      // We DON'T delete conversations anymore if we want to keep them for the "deleted" business
+      // Or we can mark them deleted too. For now let's keep them if the business is still "in db".
+      // However the controller previously did:
+      // await ConversationModel.deleteMany({ user_id: userId, business_id: businessId });
+      // I'll comment it out or remove it to keep the data as requested ("remains in db").
       const deleteResult = await BusinessModel.delete(businessId, business.user_id);
       if (deleteResult.deletedCount === 0) {
         return res.status(404).json({ error: "Business not found" });
@@ -694,9 +728,21 @@ class BusinessController {
       const requesterRole = req.user.role.role_name;
       const isAdmin = VALID_ADMIN_ROLES.includes(requesterRole);
 
+      const tierName = await TierService.getUserTier(req.user._id);
+      const limits = TierService.getTierLimits(tierName);
+      const currentCollaboratorsCount = (business.collaborators || []).length;
+
       if (!isAdmin) {
         return res.status(403).json({
           error: "Only company_admin or super_admin can assign collaborators",
+        });
+      }
+
+      if (currentCollaboratorsCount >= limits.max_collaborators) {
+        return res.status(403).json({
+          error: tierName === 'essential'
+            ? "Your current plan doesn't support collaborators. Upgrade to Advanced to add team members in the User Management panel."
+            : `Collaborator limit reached for ${tierName} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed. Manage your team in the User Management panel.`
         });
       }
 

@@ -3,7 +3,9 @@ const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 const { SECRET_KEY } = require('../config/constants');
 const UserModel = require('../models/userModel');
+const CompanyModel = require("../models/companyModel")
 const { logAuditEvent } = require('../services/auditService');
+const TierService = require('../services/tierService');
 
 class AuthController {
   static async login(req, res) {
@@ -45,6 +47,8 @@ class AuthController {
         company: company?.company_name
       });
 
+      const planName = await TierService.getUserTier(user._id);
+
       res.json({
         token,
         user: {
@@ -52,6 +56,7 @@ class AuthController {
           name: user.name,
           email: user.email,
           role: role.role_name,
+          plan_name: planName,
           company: company ? {
             name: company.company_name,
             logo: company.logo,
@@ -67,10 +72,10 @@ class AuthController {
 
   static async register(req, res) {
     try {
-      const { name, email, password, company_id, terms_accepted } = req.body;
+      const { name, email, password, company_id, company_name, plan_id, terms_accepted } = req.body;
 
-      if (!name || !email || !password || !company_id || !terms_accepted) {
-        return res.status(400).json({ error: 'All fields required including terms acceptance' });
+      if (!name || !email || !password || (!company_id && !company_name) || !terms_accepted) {
+        return res.status(400).json({ error: 'All fields required including terms acceptance and company details' });
       }
 
       const existingUser = await UserModel.findByEmail(email);
@@ -79,34 +84,62 @@ class AuthController {
       }
 
       const db = getDB();
-      const company = await db.collection('companies').findOne({
-        _id: new ObjectId(company_id),
-        status: 'active'
-      });
-      if (!company) {
-        return res.status(400).json({ error: 'Invalid company' });
+      let finalCompanyId;
+      let finalRoleId;
+
+      if (company_name) {
+        // Handle new company creation
+        const companyData = {
+          company_name,
+          company_name_normalized: company_name.toLowerCase().trim()
+        };
+
+        if (plan_id) {
+          if (!ObjectId.isValid(plan_id)) {
+            return res.status(400).json({ error: 'Invalid plan ID' });
+          }
+          companyData.plan_id = new ObjectId(plan_id);
+        }
+
+        finalCompanyId = await CompanyModel.create(companyData);
+
+        const adminRole = await db.collection('roles').findOne({ role_name: 'company_admin' });
+        finalRoleId = adminRole._id;
+      } else {
+        // Handle joining existing company
+        const company = await db.collection('companies').findOne({
+          _id: new ObjectId(company_id),
+          status: 'active'
+        });
+        if (!company) {
+          return res.status(400).json({ error: 'Invalid company' });
+        }
+        finalCompanyId = new ObjectId(company_id);
+
+        const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+        finalRoleId = userRole._id;
       }
 
-      const userRole = await db.collection('roles').findOne({ role_name: 'user' });
-      
       const userId = await UserModel.create({
         name,
         email,
         password,
-        role_id: userRole._id,
-        company_id: new ObjectId(company_id),
+        role_id: finalRoleId,
+        company_id: finalCompanyId,
         terms_accepted
       });
 
       res.json({
         message: 'Registration successful',
-        user_id: userId
+        user_id: userId,
+        company_id: finalCompanyId
       });
     } catch (error) {
       console.error('Registration error:', error);
       res.status(500).json({ error: 'Registration failed' });
     }
   }
+
 
   static async logout(req, res) {
     try {
