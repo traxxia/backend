@@ -420,6 +420,12 @@ class BusinessController {
           .json({ error: "Country must be at least 2 characters long" });
       }
 
+      if (req.user.role.role_name === "collaborator", "User") {
+        return res.status(403).json({
+          error: "Collaborators cannot create businesses. Please contact your admin."
+        });
+      }
+
       const tierName = await TierService.getUserTier(req.user._id);
       const limits = TierService.getTierLimits(tierName);
       const existingCount = await BusinessModel.countByUserId(req.user._id);
