@@ -471,6 +471,13 @@ class ProjectController {
       const existing = await ProjectModel.findById(id);
       if (!existing) return res.status(404).json({ error: "Not found" });
 
+      const tierName = await TierService.getUserTier(req.user._id);
+      if (!await TierService.canCreateProject(tierName)) {
+        return res.status(403).json({
+          error: `Project editing is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+        });
+      }
+
       if (existing.status === "launched") {
         const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
         const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
@@ -1055,6 +1062,13 @@ class ProjectController {
       const found = await ProjectModel.findById(id);
       if (!found) return res.status(404).json({ error: "Not found" });
 
+      const tierName = await TierService.getUserTier(req.user._id);
+      if (!await TierService.canCreateProject(tierName)) {
+        return res.status(403).json({
+          error: `Project deletion is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+        });
+      }
+
       if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
         return res.status(403).json({
           error: "Admin access required to delete project",
@@ -1080,6 +1094,13 @@ class ProjectController {
     try {
       const { id } = req.params;
       const { status } = req.body;
+
+      const tierName = await TierService.getUserTier(req.user._id);
+      if (!await TierService.canCreateProject(tierName)) {
+        return res.status(403).json({
+          error: `Project status change is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+        });
+      }
 
       const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
       const ADMIN_ROLES = ["company_admin", "super_admin"];

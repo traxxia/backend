@@ -35,6 +35,16 @@ class TierService {
         const limits = this.getTierLimits(tierName);
         return currentCollaboratorsCount < limits.max_collaborators;
     }
+
+    static async canConvertInitiative(tierName) {
+        const limits = this.getTierLimits(tierName);
+        return limits.can_create_projects;
+    }
+
+    static async canAccessExecution(tierName) {
+        const limits = this.getTierLimits(tierName);
+        return limits.can_create_projects;
+    }
 }
 
 module.exports = TierService;
