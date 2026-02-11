@@ -511,6 +511,7 @@ class BusinessController {
             error: `You cannot delete by 30 days. Please wait ${remainingDays} more day(s).`
           });
         }
+      }
       // Check if user has permission to delete
       const isOwner = business.user_id && business.user_id.toString() === userId.toString();
       const isAdmin = VALID_ADMIN_ROLES.includes(req.user.role.role_name);
@@ -524,7 +525,7 @@ class BusinessController {
         business_id: businessId,
       });
 
-      const deleteResult = await BusinessModel.delete(businessId, userId);
+      const deleteResult = await BusinessModel.delete(businessId, business.user_id);
       if (deleteResult.modifiedCount === 0) {
         return res.status(404).json({ error: "Business not found or already deleted" });
       }
@@ -534,10 +535,6 @@ class BusinessController {
       // However the controller previously did:
       // await ConversationModel.deleteMany({ user_id: userId, business_id: businessId });
       // I'll comment it out or remove it to keep the data as requested ("remains in db").
-      const deleteResult = await BusinessModel.delete(businessId, business.user_id);
-      if (deleteResult.deletedCount === 0) {
-        return res.status(404).json({ error: "Business not found" });
-      }
 
       await ConversationModel.deleteMany({
         user_id: business.user_id,
