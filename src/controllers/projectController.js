@@ -1062,11 +1062,14 @@ class ProjectController {
         });
       }
 
-      await ProjectModel.delete(id);
+      await ProjectModel.update(id, {
+        status: "Killed",
+        updated_at: new Date()
+      });
 
       res.json({
-        message: "Project deleted successfully",
-        deleted: { id, project_name: found.project_name },
+        message: "Project killed successfully",
+        killed: { id, project_name: found.project_name },
       });
     } catch (err) {
       console.error("PROJECT DELETE ERR:", err);
