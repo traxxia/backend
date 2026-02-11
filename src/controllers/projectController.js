@@ -240,9 +240,9 @@ class ProjectController {
       } = req.body;
 
       // Required fields
-      if (!business_id || !project_name) {
+      if (!business_id || !project_name || !status) {
         return res.status(400).json({
-          error: "business_id and project_name required",
+          error: "business_id, project_name and status are required",
         });
       }
 
@@ -400,7 +400,7 @@ class ProjectController {
         kill_criteria: normalizeString(kill_criteria),
         review_cadence: normalizeString(review_cadence),
 
-        status: status || "Draft",
+        status: status,
         learning_state: learning_state || "Testing",
         last_reviewed: last_reviewed ? new Date(last_reviewed) : null,
 
@@ -419,7 +419,7 @@ class ProjectController {
             budget_estimate === null ||
             budget_estimate === undefined
             ? ""
-            : String(Number(budget_estimate)),
+            : String(budget_estimate).trim(),
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -679,10 +679,9 @@ class ProjectController {
       if (req.body.budget_estimate !== undefined) {
         const budget = req.body.budget_estimate;
         if (budget === "" || budget === null || budget === undefined) {
-          updateData.budget_estimate = ""; // empty string is acceptable as "no budget set"
+          updateData.budget_estimate = "";
         } else {
-          const num = Number(budget);
-          updateData.budget_estimate = isNaN(num) ? "" : String(num);
+          updateData.budget_estimate = String(budget).trim();
         }
       }
 
