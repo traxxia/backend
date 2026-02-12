@@ -571,6 +571,15 @@ class SubscriptionController {
                 }
             );
 
+            // Record in billing history
+            await db.collection('billing_history').insertOne({
+                company_id: user.company_id,
+                plan_name: newPlan.name,
+                amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
+                date: new Date(),
+                type: 'reactivation'
+            });
+
             // Return updated details
             return SubscriptionController.getDetails(req, res);
 
