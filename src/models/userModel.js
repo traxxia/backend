@@ -16,13 +16,13 @@ class UserModel {
   static async create(userData) {
     const db = getDB();
     const hashedPassword = await bcrypt.hash(userData.password, 12);
-    
+
     const result = await db.collection('users').insertOne({
       ...userData,
       password: hashedPassword,
       created_at: new Date()
     });
-    
+
     return result.insertedId;
   }
 
@@ -57,6 +57,10 @@ class UserModel {
           name: 1,
           email: 1,
           created_at: 1,
+          status: 1,
+          access_mode: 1,
+          inactive_reason: 1,
+          inactive_at: 1,
           role_name: '$role.role_name',
           company_name: '$company.company_name',
           company_id: 1
@@ -66,12 +70,12 @@ class UserModel {
     ]).toArray();
   }
 
-  static async updateRole(userId, roleName){
+  static async updateRole(userId, roleName) {
     const db = getDB();
 
     const roleDoc = await db.collection("roles").findOne({ role_name: roleName });
 
-    if(!roleDoc){
+    if (!roleDoc) {
       throw new Error(`Role ${roleName} not found`);
     }
 

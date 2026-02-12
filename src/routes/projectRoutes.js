@@ -2,9 +2,10 @@ const express = require("express");
 const router = express.Router();
 const ProjectController = require("../controllers/projectController");
 const { authenticateToken, requireAdmin } = require("../middleware/auth");
+const { checkWriteAccess, checkProjectCreation } = require("../middleware/subscriptionMiddleware");
 
 router.get("/", authenticateToken, ProjectController.getAll);
-router.post("/", authenticateToken, ProjectController.create);
+router.post("/", authenticateToken, checkProjectCreation, ProjectController.create);
 
 router.put("/rank", authenticateToken, ProjectController.rankProjects);
 router.get("/rank/:user_id", authenticateToken, ProjectController.getRankings);
@@ -29,8 +30,8 @@ router.get("/consensus-analysis", authenticateToken, ProjectController.getConsen
 router.get("/collaborator-consensus", authenticateToken, ProjectController.getCollaboratorConsensus);
 // Project-specific routes (keep these AFTER the more specific routes above)
 router.get("/:id", authenticateToken, ProjectController.getById);
-router.patch("/:id", authenticateToken, ProjectController.update);
-router.patch("/:id/status", authenticateToken, ProjectController.changeStatus);
+router.patch("/:id", authenticateToken, checkWriteAccess, ProjectController.update);
+router.patch("/:id/status", authenticateToken, checkWriteAccess, ProjectController.changeStatus);
 router.put("/edit-access", authenticateToken, ProjectController.grantEditAccess);
 
 router.delete(

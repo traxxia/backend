@@ -5,7 +5,21 @@ module.exports = {
   VALID_TEMPLATE_TYPES: ['simple', 'medium'],
   VALID_SEVERITIES: ['mandatory', 'optional'],
   VALID_PHASES: ['initial', 'essential', 'good', 'advanced', 'excellent'],
-  MAX_BUSINESSES_PER_USER: 5,
+  TIER_LIMITS: {
+    essential: {
+      max_workspaces: 1,
+      can_create_projects: false,
+      max_collaborators: 0,
+      price_usd: 29.00
+    },
+    advanced: {
+      max_workspaces: 3,
+      can_create_projects: true,
+      max_collaborators: 3,
+      price_usd: 89.00
+    }
+  },
+  MAX_BUSINESSES_PER_USER: 5, // Default/Legacy fallback
   FILE_SIZE_LIMITS: {
     LOGO: 5 * 1024 * 1024, // 5MB
     DOCUMENT: 10 * 1024 * 1024 // 10MB

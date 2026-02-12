@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const BusinessController = require("../controllers/businessController");
 const { authenticateToken, requireAdmin } = require("../middleware/auth");
+const { checkCollaboratorAccess } = require("../middleware/subscriptionMiddleware");
 
 router.get("/", authenticateToken, BusinessController.getAll);
 router.get("/:id", authenticateToken, BusinessController.getById);
@@ -31,6 +32,7 @@ router.patch(
 router.post(
   "/:id/collaborators",
   authenticateToken,
+  checkCollaboratorAccess,
   BusinessController.assignCollaborator
 );
 router.delete(

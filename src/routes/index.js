@@ -12,9 +12,13 @@ const initiativeRoutes = require("./initiativeRoutes");
 const projectRoutes = require("./projectRoutes");
 const projectFieldLockRoutes = require("./projectFieldLockRoutes");
 const analysisRoutes = require("./analysisRoutes");
+const planRoutes = require("./planRoutes");
+const subscriptionRoutes = require("./subscriptionRoutes");
 
 router.use("/api", authRoutes);
+router.use("/api/plans", planRoutes);
 router.use("/api/companies", companyRoutes);
+
 router.use("/api/businesses", businessRoutes);
 // Alias singular path to the same business routes to support
 // clients calling /api/business/... as well as /api/businesses/...
@@ -27,5 +31,6 @@ router.use("/api/initiatives", initiativeRoutes);
 router.use("/api/projects", projectRoutes);
 router.use("/api/project-field-locks", projectFieldLockRoutes);
 router.use("/api/analysis", analysisRoutes);
+router.use("/api/subscription", subscriptionRoutes);
 
 module.exports = router;
