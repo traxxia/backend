@@ -62,14 +62,31 @@ class BusinessModel {
   static async countByUserId(userId) {
     return await this.collection().countDocuments({
       user_id: new ObjectId(userId),
+      status: { $ne: 'deleted' }
     });
   }
 
+  static async findLastDeleted(userId) {
+    return await this.collection().findOne(
+      { user_id: new ObjectId(userId), status: 'deleted' },
+      { sort: { deleted_at: -1 } }
+    );
+  }
+
   static async delete(businessId, userId) {
-    return await this.collection().deleteOne({
-      _id: new ObjectId(businessId),
-      user_id: new ObjectId(userId),
-    });
+    return await this.collection().updateOne(
+      {
+        _id: new ObjectId(businessId),
+        user_id: new ObjectId(userId),
+      },
+      {
+        $set: {
+          status: 'deleted',
+          deleted_at: new Date(),
+          updated_at: new Date()
+        }
+      }
+    );
   }
 
   static async updateDocument(businessId, documentData) {

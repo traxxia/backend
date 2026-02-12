@@ -4,21 +4,26 @@ const { getDB } = require('../config/database');
 class CompanyModel {
   static async create(companyData) {
     const db = getDB();
+    const createdAt = new Date();
+    const expiresAt = new Date(createdAt);
+    expiresAt.setMonth(expiresAt.getMonth() + 1);
+
     const result = await db.collection('companies').insertOne({
       ...companyData,
       status: 'active',
-      created_at: new Date()
+      created_at: createdAt,
+      expires_at: expiresAt
     });
     return result.insertedId;
   }
 
   static async findByName(normalizedName) {
-  const db = getDB();
-  return await db.collection('companies').findOne({
-    company_name_normalized: normalizedName,
-    // status: { $ne: 'inactive' } 
-  });
-}
+    const db = getDB();
+    return await db.collection('companies').findOne({
+      company_name_normalized: normalizedName,
+      // status: { $ne: 'inactive' } 
+    });
+  }
 
   static async findAll(filter = {}) {
     const db = getDB();

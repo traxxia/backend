@@ -4,6 +4,7 @@ const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
+const TierService = require("../services/tierService");
 
 const VALID_STATUS = ["Draft", "Active", "At Risk", "Paused", "Killed", "Scaled"];
 const ADMIN_ROLES = ["company_admin", "super_admin"];
@@ -109,12 +110,13 @@ class ProjectController {
       const total = await ProjectModel.count(filter);
       let projects = await ProjectModel.populateCreatedBy(raw);
 
-      // Get business info if business_id is provided
       let businessStatus = null;
+      let businessAccessMode = null;
       if (business_id && ObjectId.isValid(business_id)) {
         const business = await BusinessModel.findById(business_id);
         if (business) {
           businessStatus = business.status;
+          businessAccessMode = business.access_mode;
         }
       }
 
@@ -179,6 +181,7 @@ class ProjectController {
         count: projects.length,
         projects,
         business_status: businessStatus, // Business status instead of project status
+        business_access_mode: businessAccessMode,
         ranking_lock_summary,
       });
     } catch (err) {
@@ -249,6 +252,13 @@ class ProjectController {
       const business = await BusinessModel.findById(business_id);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
+
+      const tierName = await TierService.getUserTier(req.user._id);
+      if (!await TierService.canCreateProject(tierName)) {
+        return res.status(403).json({
+          error: `Project creation is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+        });
+      }
 
 
       // User-collaborator
@@ -462,6 +472,13 @@ class ProjectController {
 
       const existing = await ProjectModel.findById(id);
       if (!existing) return res.status(404).json({ error: "Not found" });
+
+      const tierName = await TierService.getUserTier(req.user._id);
+      if (!await TierService.canCreateProject(tierName)) {
+        return res.status(403).json({
+          error: `Project editing is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+        });
+      }
 
       if (existing.status === "launched") {
         const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
@@ -875,6 +892,7 @@ class ProjectController {
           user_id,
           business_id,
           business_status: business?.status || null,
+          business_access_mode: business?.access_mode || null,
           projects: [],
           ranking_lock_summary,
         });
@@ -924,6 +942,7 @@ class ProjectController {
         user_id,
         business_id,
         business_status: business?.status || null,
+        business_access_mode: business?.access_mode || null,
         projects: responseProjects,
         ranking_lock_summary,
       });
@@ -1047,17 +1066,27 @@ class ProjectController {
       const found = await ProjectModel.findById(id);
       if (!found) return res.status(404).json({ error: "Not found" });
 
+      const tierName = await TierService.getUserTier(req.user._id);
+      if (!await TierService.canCreateProject(tierName)) {
+        return res.status(403).json({
+          error: `Project deletion is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+        });
+      }
+
       if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
         return res.status(403).json({
           error: "Admin access required to delete project",
         });
       }
 
-      await ProjectModel.delete(id);
+      await ProjectModel.update(id, {
+        status: "Killed",
+        updated_at: new Date()
+      });
 
       res.json({
-        message: "Project deleted successfully",
-        deleted: { id, project_name: found.project_name },
+        message: "Project killed successfully",
+        killed: { id, project_name: found.project_name },
       });
     } catch (err) {
       console.error("PROJECT DELETE ERR:", err);
@@ -1069,6 +1098,13 @@ class ProjectController {
     try {
       const { id } = req.params;
       const { status } = req.body;
+
+      const tierName = await TierService.getUserTier(req.user._id);
+      if (!await TierService.canCreateProject(tierName)) {
+        return res.status(403).json({
+          error: `Project status change is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+        });
+      }
 
       const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
       const ADMIN_ROLES = ["company_admin", "super_admin"];

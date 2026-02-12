@@ -25,7 +25,7 @@ const authenticateToken = (req, res, next) => {
 
     const db = getDB();
     const user = await db.collection('users').findOne({ _id: new ObjectId(decoded.id) });
-    
+
     if (!user) {
       console.log('❌ User not found in database');
       return res.status(403).json({ error: 'User not found' });
