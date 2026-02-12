@@ -24,6 +24,16 @@ class AuthController {
         return res.status(400).json({ error: 'Invalid credentials' });
       }
 
+      if (
+        (user.status === 'inactive' && user.inactive_reason === 'plan_downgrade') ||
+        user.access_mode === 'archived'
+      ) {
+        return res.status(403).json({
+          error: 'Your plan is expired contact your admin for more',
+          code: 'PLAN_EXPIRED'
+        });
+      }
+
       const db = getDB();
       const role = await db.collection('roles').findOne({ _id: user.role_id });
 

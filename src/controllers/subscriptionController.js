@@ -1,6 +1,7 @@
 const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 const TierService = require('../services/tierService');
+const { TIER_LIMITS } = require('../config/constants');
 
 class SubscriptionController {
     static async getDetails(req, res) {
@@ -15,7 +16,9 @@ class SubscriptionController {
                     start_date: user?.created_at || new Date(),
                     end_date: null,
                     expires_at: null,
-                    status: 'active'
+                    status: 'active',
+                    available_plans: [],
+                    billing_history: []
                 });
             }
 
@@ -45,6 +48,15 @@ class SubscriptionController {
             const currentProjects = await db.collection('projects').countDocuments({
                 business_id: { $in: businessIds }
             });
+
+            // Available Plans
+            const availablePlans = await db.collection('plans').find({ status: 'active' }).toArray();
+
+            // Billing History
+            const billingHistory = await db.collection('billing_history')
+                .find({ company_id: user.company_id })
+                .sort({ date: -1 })
+                .toArray();
 
             // Expiration Logic
             let expiresAt = company?.expires_at;
@@ -76,6 +88,17 @@ class SubscriptionController {
                 end_date: expiresAt,
                 expires_at: expiresAt,
                 status: status,
+                available_plans: availablePlans.map(p => ({
+                    _id: p._id,
+                    name: p.name,
+                    price: p.price_usd || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
+                    features: p.features || []
+                })),
+                billing_history: billingHistory.map(bh => ({
+                    date: bh.date,
+                    plan_name: bh.plan_name,
+                    amount: bh.amount
+                })),
                 usage: {
                     workspaces: {
                         current: currentWorkspaces,
@@ -87,7 +110,7 @@ class SubscriptionController {
                     },
                     projects: {
                         current: currentProjects,
-                        limit: limits.can_create_projects ? 'unlimited' : 0
+                        limit: limits.can_create_projects ? (limits.max_projects || 'unlimited') : 0
                     }
                 }
             });
@@ -184,6 +207,61 @@ class SubscriptionController {
                 }
             }
 
+            // 5. Detect if reactivation selection is required (Moving to Advanced)
+            const isReactivationPossible = (
+                newPlan.name.toLowerCase() === 'advanced' &&
+                (currentPlan?.name?.toLowerCase() === 'essential' || !currentPlan)
+            );
+
+            if (isReactivationPossible) {
+                // Find all users in this company to get their businesses
+                const companyUsers = await db.collection('users')
+                    .find({ company_id: user.company_id })
+                    .project({ _id: 1 })
+                    .toArray();
+                const companyUserIds = companyUsers.map(u => u._id);
+
+                const archivedBusinesses = await db.collection('user_businesses')
+                    .find({
+                        user_id: { $in: companyUserIds },
+                        access_mode: 'archived'
+                    })
+                    .toArray();
+
+                const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
+                const inactiveCollaborators = await db.collection('users')
+                    .find({
+                        company_id: user.company_id,
+                        role_id: collabRole?._id,
+                        status: 'inactive',
+                        inactive_reason: 'plan_downgrade'
+                    })
+                    .toArray();
+
+                if (archivedBusinesses.length > 0 || inactiveCollaborators.length > 0) {
+                    return res.status(200).json({
+                        requires_reactivation_selection: true,
+                        action: 'upgrade_reactivation',
+                        archived_businesses: archivedBusinesses.map(b => ({
+                            _id: b._id.toString(),
+                            business_name: b.business_name,
+                            collaborators: b.collaborators?.map(id => id.toString()) || []
+                        })),
+                        inactive_collaborators: inactiveCollaborators.map(u => ({
+                            _id: u._id.toString(),
+                            email: u.email,
+                            name: u.name,
+                            // Find archived businesses this collaborator belongs to
+                            associated_business_ids: archivedBusinesses
+                                .filter(b => b.collaborators?.some(cid => cid.toString() === u._id.toString()))
+                                .map(b => b._id.toString())
+                        })),
+                        limits: TIER_LIMITS.advanced,
+                        plan_id: plan_id
+                    });
+                }
+            }
+
             // Normal upgrade/downgrade (no selection needed)
             const now = new Date();
             const expiresAt = new Date(now);
@@ -204,6 +282,15 @@ class SubscriptionController {
             if (result.matchedCount === 0) {
                 return res.status(404).json({ error: 'Company not found' });
             }
+
+            // Record in billing history
+            await db.collection('billing_history').insertOne({
+                company_id: user.company_id,
+                plan_name: newPlan.name,
+                amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
+                date: new Date(),
+                type: 'upgrade'
+            });
 
             // Return updated details
             return SubscriptionController.getDetails(req, res);
@@ -276,32 +363,46 @@ class SubscriptionController {
                 { $set: { access_mode: 'active' } }
             );
 
-            // 4. Archive collaborator access (don't delete from DB)
-            const activeBusiness = await db.collection('user_businesses').findOne({
-                _id: new ObjectId(active_business_id)
-            });
+            // 4. Archive ALL collaborator access for current company if downgrading to essential
+            // In essential plan, collaborators are not allowed.
+            if (newPlan.name.toLowerCase() === 'essential') {
+                const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
+                const collabsToArchive = await db.collection('users').find({
+                    company_id: user.company_id,
+                    role_id: collabRole?._id
+                }).toArray();
 
-            let archivedCollabCount = 0;
-            if (activeBusiness && activeBusiness.collaborators && activeBusiness.collaborators.length > 0) {
-                const allCollaboratorIds = activeBusiness.collaborators.map(id => id.toString());
-                const activeCollabIds = active_collaborator_ids.map(id => id.toString());
-                const collabsToArchive = allCollaboratorIds.filter(id => !activeCollabIds.includes(id));
-                archivedCollabCount = collabsToArchive.length;
+                var archivedCollabCount = collabsToArchive.length;
 
-                // Create archived_collaborators field to track who had access
+                await db.collection('users').updateMany(
+                    {
+                        company_id: user.company_id,
+                        role_id: collabRole?._id
+                    },
+                    {
+                        $set: {
+                            status: 'inactive',
+                            access_mode: 'archived',
+                            inactive_reason: 'plan_downgrade',
+                            inactive_at: new Date()
+                        }
+                    }
+                );
+
+                // Also clear collaborators array from the active business
                 await db.collection('user_businesses').updateOne(
                     { _id: new ObjectId(active_business_id) },
                     {
                         $set: {
-                            collaborators: active_collaborator_ids.map(id => new ObjectId(id)),
-                            archived_collaborators: collabsToArchive.map(id => ({
-                                user_id: new ObjectId(id),
-                                archived_at: new Date(),
-                                reason: 'plan_downgrade'
-                            }))
+                            collaborators: [],
+                            archived_collaborators: selectedBusiness.collaborators || []
                         }
                     }
                 );
+            } else {
+                // Handle non-essential downgrades if any (currently only Essential and Advanced exist)
+                // For now, if it's not essential, we follow the previous logic or keep it as is.
+                // But the request specifically mentioned essential and collaborators.
             }
 
             // 5. Lock all projects in archived businesses to read-only
@@ -335,6 +436,15 @@ class SubscriptionController {
                 }
             );
 
+            // Record in billing history
+            await db.collection('billing_history').insertOne({
+                company_id: user.company_id,
+                plan_name: newPlan.name,
+                amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
+                date: new Date(),
+                type: 'downgrade'
+            });
+
             // 7. Audit log
             const { logAuditEvent } = require('../services/auditService');
             await logAuditEvent(userId, 'plan_downgraded', {
@@ -342,21 +452,131 @@ class SubscriptionController {
                 to_plan: newPlan.name,
                 active_business_id,
                 archived_businesses: businessesToArchive.length,
-                active_collaborators: active_collaborator_ids.length,
-                archived_collaborators: archivedCollabCount
+                active_collaborators: (active_collaborator_ids || []).length,
+                archived_collaborators: typeof archivedCollabCount !== 'undefined' ? archivedCollabCount : 0
             });
 
-            res.json({
-                message: 'Downgrade processed successfully',
-                active_business_id,
-                archived_businesses_count: businessesToArchive.length,
-                active_collaborators_count: active_collaborator_ids.length,
-                archived_collaborators_count: archivedCollabCount
-            });
+            // 8. Return updated details
+            return SubscriptionController.getDetails(req, res);
 
         } catch (error) {
             console.error('Downgrade processing error:', error);
             res.status(500).json({ error: 'Failed to process downgrade' });
+        }
+    }
+
+    static async processReactivation(req, res) {
+        try {
+            const {
+                plan_id,
+                reactivate_business_ids = [],
+                reactivate_collaborator_ids = []
+            } = req.body;
+
+            const db = getDB();
+            const userId = req.user._id;
+            console.log('DEBUG: processReactivation selection:', {
+                plan_id,
+                reactivate_business_ids,
+                reactivate_collaborator_ids
+            });
+            const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+
+            if (!user.company_id) {
+                return res.status(403).json({ error: 'User not associated with a company' });
+            }
+
+            const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
+            if (!newPlan) return res.status(404).json({ error: 'Plan not found' });
+
+
+            const limits = TIER_LIMITS[newPlan.name.toLowerCase()] || TIER_LIMITS.essential;
+
+            // 1. Validate limits
+            const companyUsers = await db.collection('users')
+                .find({ company_id: user.company_id })
+                .project({ _id: 1 })
+                .toArray();
+            const companyUserIds = companyUsers.map(u => u._id);
+
+            const activeBusinessesCount = await db.collection('user_businesses').countDocuments({
+                user_id: { $in: companyUserIds },
+                access_mode: 'active'
+            });
+
+            if (activeBusinessesCount + reactivate_business_ids.length > limits.max_workspaces) {
+                return res.status(400).json({ error: `You can only have ${limits.max_workspaces} active workspaces.` });
+            }
+
+            // 2. Reactivate Businesses
+            if (reactivate_business_ids.length > 0) {
+                await db.collection('user_businesses').updateMany(
+                    {
+                        _id: { $in: reactivate_business_ids.map(id => new ObjectId(id)) }
+                    },
+                    { $set: { access_mode: 'active', updated_at: new Date() } }
+                );
+
+                // Unlock projects in these businesses
+                await db.collection('projects').updateMany(
+                    { business_id: { $in: reactivate_business_ids.map(id => new ObjectId(id)) } },
+                    {
+                        $set: {
+                            is_readonly: false,
+                            updated_at: new Date()
+                        },
+                        $unset: {
+                            locked_at: "",
+                            lock_reason: ""
+                        }
+                    }
+                );
+            }
+
+            // 3. Reactivate Collaborators
+            if (reactivate_collaborator_ids.length > 0) {
+                await db.collection('users').updateMany(
+                    {
+                        _id: { $in: reactivate_collaborator_ids.map(id => new ObjectId(id)) },
+                        company_id: user.company_id
+                    },
+                    {
+                        $set: {
+                            status: 'active',
+                            access_mode: 'active',
+                            updated_at: new Date()
+                        },
+                        $unset: {
+                            inactive_reason: "",
+                            inactive_at: ""
+                        }
+                    }
+                );
+            }
+
+            // 4. Finally update the plan
+            const now = new Date();
+            const expiresAt = new Date(now);
+            expiresAt.setMonth(expiresAt.getMonth() + 1);
+
+            await db.collection('companies').updateOne(
+                { _id: user.company_id },
+                {
+                    $set: {
+                        plan_id: new ObjectId(plan_id),
+                        updatedAt: now,
+                        expires_at: expiresAt,
+                        status: 'active'
+                    }
+                }
+            );
+
+            // Return updated details
+            return SubscriptionController.getDetails(req, res);
+
+        } catch (error) {
+            console.error('Reactivation error:', error);
+            res.status(500).json({ error: error.message });
         }
     }
 }

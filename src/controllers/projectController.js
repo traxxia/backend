@@ -110,12 +110,13 @@ class ProjectController {
       const total = await ProjectModel.count(filter);
       let projects = await ProjectModel.populateCreatedBy(raw);
 
-      // Get business info if business_id is provided
       let businessStatus = null;
+      let businessAccessMode = null;
       if (business_id && ObjectId.isValid(business_id)) {
         const business = await BusinessModel.findById(business_id);
         if (business) {
           businessStatus = business.status;
+          businessAccessMode = business.access_mode;
         }
       }
 
@@ -180,6 +181,7 @@ class ProjectController {
         count: projects.length,
         projects,
         business_status: businessStatus, // Business status instead of project status
+        business_access_mode: businessAccessMode,
         ranking_lock_summary,
       });
     } catch (err) {
@@ -890,6 +892,7 @@ class ProjectController {
           user_id,
           business_id,
           business_status: business?.status || null,
+          business_access_mode: business?.access_mode || null,
           projects: [],
           ranking_lock_summary,
         });
@@ -939,6 +942,7 @@ class ProjectController {
         user_id,
         business_id,
         business_status: business?.status || null,
+        business_access_mode: business?.access_mode || null,
         projects: responseProjects,
         ranking_lock_summary,
       });
