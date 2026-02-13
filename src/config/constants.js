@@ -17,6 +17,12 @@ module.exports = {
       can_create_projects: true,
       max_collaborators: 3,
       price_usd: 89.00
+    },
+    unlimited: {
+      max_workspaces: 1000,
+      can_create_projects: true,
+      max_collaborators: 1000,
+      price_usd: 0
     }
   },
   MAX_BUSINESSES_PER_USER: 5, // Default/Legacy fallback

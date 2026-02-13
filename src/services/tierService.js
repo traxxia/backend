@@ -10,7 +10,10 @@ class TierService {
         if (!user || !user.company_id) return 'essential';
 
         const company = await db.collection('companies').findOne({ _id: user.company_id });
-        if (!company || !company.plan_id) return 'essential';
+        if (!company) return 'essential';
+
+        // Legacy companies created without a plan have unlimited access
+        if (!company.plan_id) return 'unlimited';
 
         const plan = await db.collection('plans').findOne({ _id: company.plan_id });
         return plan?.name?.toLowerCase() || 'essential';
