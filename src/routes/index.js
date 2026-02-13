@@ -33,4 +33,8 @@ router.use("/api/project-field-locks", projectFieldLockRoutes);
 router.use("/api/analysis", analysisRoutes);
 router.use("/api/subscription", subscriptionRoutes);
 
+const aiChatRoutes = require('./aiChatRoutes');
+
+router.use('/ai-chat', aiChatRoutes);
+
 module.exports = router;
