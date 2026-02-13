@@ -8,6 +8,7 @@ router.get("/", authenticateToken, ProjectController.getAll);
 router.post("/", authenticateToken, checkProjectCreation, ProjectController.create);
 
 router.put("/rank", authenticateToken, ProjectController.rankProjects);
+router.post("/launch", authenticateToken, requireAdmin, ProjectController.launchProjects);
 router.get("/rank/:user_id", authenticateToken, ProjectController.getRankings);
 router.get("/admin-rank", authenticateToken, ProjectController.getAdminRankings);
 router.post("/lock-rank", authenticateToken, ProjectController.lockRank);

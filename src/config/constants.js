@@ -5,6 +5,18 @@ module.exports = {
   VALID_TEMPLATE_TYPES: ['simple', 'medium'],
   VALID_SEVERITIES: ['mandatory', 'optional'],
   VALID_PHASES: ['initial', 'essential', 'good', 'advanced', 'excellent'],
+  PROJECT_LAUNCH_STATUS: {
+    UNLAUNCHED: 'unlaunched',
+    LAUNCHED: 'launched'
+  },
+  PROJECT_STATES: {
+    DRAFT: 'draft',
+    KILLED: 'killed',
+    ACTIVE: 'active',
+    AT_RISK: 'at_risk',
+    PAUSED: 'paused',
+    COMPLETED: 'completed'
+  },
   TIER_LIMITS: {
     essential: {
       max_workspaces: 1,

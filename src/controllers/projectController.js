@@ -6,7 +6,13 @@ const UserModel = require("../models/userModel")
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
 
-const VALID_STATUS = ["Draft", "Active", "At Risk", "Paused", "Killed", "Scaled"];
+const {
+  PROJECT_STATES,
+  PROJECT_LAUNCH_STATUS,
+  ALLOWED_PHASES,
+} = require("../config/constants");
+
+const VALID_STATUS = Object.values(PROJECT_STATES);
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
@@ -15,42 +21,37 @@ const DEFAULT_PROJECT_TYPE = "immediate action";
 
 // Permission matrix for ALL project actions
 function getProjectPermissions({
-  businessStatus,
+  projectStatus,
   isOwner,
   isCollaborator,
   isAdmin,
+  isAllowedCollaborator,
 }) {
-  const status = (businessStatus || "").toLowerCase();
+  const status = (projectStatus || "").toLowerCase();
   const canModify = isAdmin || isCollaborator || isOwner;
 
   switch (status) {
-    case "draft":
+    case PROJECT_STATES.DRAFT:
       return {
         canCreate: canModify,
         canEdit: canModify,
       };
-    case "prioritizing":
-    case "prioritized":
+    case PROJECT_STATES.ACTIVE:
+    case PROJECT_STATES.AT_RISK:
+    case PROJECT_STATES.PAUSED:
       return {
         canCreate: false,
-        canEdit: canModify,
+        canEdit: isAdmin || isAllowedCollaborator, // Strictly admins or allowed collaborators
       };
 
-    // fully locked for non-admins by default
-    case "launched":
+    case PROJECT_STATES.COMPLETED:
+    case PROJECT_STATES.KILLED:
       return {
         canCreate: false,
-        canEdit: isAdmin,
+        canEdit: false, // Terminal states are locked for EVERYONE (including admins)
       };
-
-    case "reprioritizing":
-      return {
-        canCreate: false,
-        canEdit: isAdmin,
-      }
 
     default:
-      // Default to allowing modification if status is unknown/active
       return { canCreate: false, canEdit: canModify };
   }
 }
@@ -83,6 +84,7 @@ class ProjectController {
         strategic_theme,
         q,
         status,
+        launch_status,
       } = req.query;
 
       const filter = {};
@@ -97,7 +99,16 @@ class ProjectController {
       if (effort) filter.effort = effort;
       if (risk) filter.risk = risk;
       if (strategic_theme) filter.strategic_theme = strategic_theme;
-      if (status) filter.status = status;
+
+      if (status) {
+        if (status === "launched") {
+          filter.launch_status = PROJECT_LAUNCH_STATUS.LAUNCHED;
+        } else {
+          filter.status = status;
+        }
+      }
+
+      if (launch_status) filter.launch_status = launch_status;
 
       if (q) {
         filter.$or = [
@@ -123,8 +134,7 @@ class ProjectController {
       projects = projects.map(project => ({
         ...project,
         allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
-        // Remove project status, we'll use business status instead
-        // status: undefined,
+        status: project.status, // Ensure status is returned
       }));
 
       let ranking_lock_summary = {
@@ -180,7 +190,7 @@ class ProjectController {
         total,
         count: projects.length,
         projects,
-        business_status: businessStatus, // Business status instead of project status
+        business_status: businessStatus,
         business_access_mode: businessAccessMode,
         ranking_lock_summary,
       });
@@ -242,9 +252,9 @@ class ProjectController {
       } = req.body;
 
       // Required fields
-      if (!business_id || !project_name || !status) {
+      if (!business_id || !project_name) {
         return res.status(400).json({
-          error: "business_id, project_name and status are required",
+          error: "business_id and project_name are required",
         });
       }
 
@@ -352,9 +362,9 @@ class ProjectController {
         });
       }
 
-      // NOTE: Owner alone cannot work on projects unless also collaborator
+      // Permission
       const permissions = getProjectPermissions({
-        businessStatus: business.status,
+        projectStatus: PROJECT_STATES.DRAFT,
         isOwner,
         isCollaborator,
         isAdmin,
@@ -402,7 +412,8 @@ class ProjectController {
         kill_criteria: normalizeString(kill_criteria),
         review_cadence: normalizeString(review_cadence),
 
-        status: status,
+        status: status || PROJECT_STATES.DRAFT,
+        launch_status: PROJECT_LAUNCH_STATUS.UNLAUNCHED,
         learning_state: learning_state || "Testing",
         last_reviewed: last_reviewed ? new Date(last_reviewed) : null,
 
@@ -473,6 +484,13 @@ class ProjectController {
       const existing = await ProjectModel.findById(id);
       if (!existing) return res.status(404).json({ error: "Not found" });
 
+      // Block ANY updates to terminal states
+      if (existing.status === PROJECT_STATES.KILLED || existing.status === PROJECT_STATES.COMPLETED) {
+        return res.status(403).json({
+          error: `This project is in a terminal state (${existing.status}) and cannot be modified.`
+        });
+      }
+
       const tierName = await TierService.getUserTier(req.user._id);
       if (!await TierService.canCreateProject(tierName)) {
         return res.status(403).json({
@@ -538,33 +556,20 @@ class ProjectController {
       const isCollaborator = business.collaborators?.some(
         (id) => id.toString() === req.user._id.toString()
       );
-
-      const bStatus = (business.status || "").toLowerCase();
-      const pStatus = (existing.status || "").toLowerCase();
+      const isAllowedCollaborator = Array.isArray(existing.allowed_collaborators) &&
+        existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
 
       const permissions = getProjectPermissions({
-        businessStatus: bStatus,
+        projectStatus: existing.status,
         isOwner,
         isCollaborator,
         isAdmin,
+        isAllowedCollaborator,
       });
 
-      const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
-        existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
-
-      let canEditProject = false;
-
-      if (pStatus === "launched" || bStatus === "launched") {
-        canEditProject = isAdmin || isInAllowedCollabs;
-      } else if (pStatus === "reprioritizing" || bStatus === "reprioritizing") {
-        canEditProject = isAdmin || isInAllowedCollabs;
-      } else {
-        canEditProject = permissions.canEdit;
-      }
-
-      if (!canEditProject) {
+      if (!permissions.canEdit) {
         return res.status(403).json({
-          error: `You cannot edit this project in its current status`,
+          error: `You cannot edit this project in its current status. Special access from an admin may be required for launched projects.`,
         });
       }
 
@@ -722,6 +727,73 @@ class ProjectController {
     }
   }
 
+  static async launchProjects(req, res) {
+    try {
+      const { project_ids } = req.body;
+
+      if (!Array.isArray(project_ids) || project_ids.length === 0) {
+        return res.status(400).json({ error: "project_ids must be a non-empty array" });
+      }
+
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+      if (!isAdmin) {
+        return res.status(403).json({ error: "Only admins can launch projects" });
+      }
+
+      const results = [];
+      for (const id of project_ids) {
+        if (!ObjectId.isValid(id)) continue;
+
+        const project = await ProjectModel.findById(id);
+        if (!project) continue;
+
+        // Check if project is already launched
+        if (project.launch_status === PROJECT_LAUNCH_STATUS.LAUNCHED) {
+          results.push({ id, status: "already_launched" });
+          continue;
+        }
+
+        // Check if project is ranked
+        const rankings = await ProjectRankingModel.collection().find({
+          project_id: new ObjectId(id),
+          rank: { $ne: null }
+        }).toArray();
+
+        if (rankings.length === 0) {
+          return res.status(400).json({ error: "Your projects are not ranked" });
+        }
+
+        // Check if project has been edited AFTER the latest ranking
+        const latestRankingDate = new Date(Math.max(...rankings.map(r => r.updated_at || r.created_at)));
+        const projectUpdatedAt = project.updated_at ? new Date(project.updated_at) : new Date(project.created_at || 0);
+
+        if (projectUpdatedAt > latestRankingDate) {
+          return res.status(400).json({
+            error: "your projects were edited, so rerank it or keep it as same",
+            project_id: id
+          });
+        }
+
+        // Perform launch
+        await ProjectModel.update(id, {
+          status: PROJECT_STATES.ACTIVE,
+          launch_status: PROJECT_LAUNCH_STATUS.LAUNCHED,
+          updated_at: new Date()
+        });
+
+        results.push({ id, status: "launched" });
+      }
+
+      res.json({
+        message: "Project(s) launched successfully",
+        results
+      });
+    } catch (err) {
+      console.error("PROJECT LAUNCH ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
   static async rankProjects(req, res) {
     try {
       const { business_id, projects } = req.body;
@@ -750,15 +822,21 @@ class ProjectController {
 
       const isAdmin = ["company_admin", "super_admin"].includes(req.user.role.role_name);
 
-      if (business.status === "reprioritizing") {
+      // Check if business has ANY launched projects
+      const hasLaunchedProjects = await ProjectModel.collection().findOne({
+        business_id: new ObjectId(business_id),
+        launch_status: "launched"
+      });
+
+      if (hasLaunchedProjects || business.status === "reprioritizing") {
         if (!isAdmin) {
           const allowed = await BusinessModel.getAllowedRankingCollaborators(business_id);
-
           const allowedIds = allowed.map(uid => uid.toString());
 
           if (!allowedIds.includes(user_id.toString())) {
+            const reason = hasLaunchedProjects ? "it has launched projects" : "it is in reprioritizing state";
             return res.status(403).json({
-              error: "You are not allowed to rank during reprioritizing",
+              error: `You are not allowed to rank projects for this business as ${reason}. Admin permission required.`,
             });
           }
         }
@@ -1079,8 +1157,14 @@ class ProjectController {
         });
       }
 
+      if (found.status === PROJECT_STATES.KILLED || found.status === PROJECT_STATES.COMPLETED) {
+        return res.status(403).json({
+          error: `Project is already in a terminal state (${found.status})`
+        });
+      }
+
       await ProjectModel.update(id, {
-        status: "Killed",
+        status: PROJECT_STATES.KILLED,
         updated_at: new Date()
       });
 
@@ -1106,7 +1190,7 @@ class ProjectController {
         });
       }
 
-      const VALID_STATUS = ["draft", "prioritizing", "prioritized", "launched", "reprioritizing"];
+      const VALID_STATUS = Object.values(PROJECT_STATES);
       const ADMIN_ROLES = ["company_admin", "super_admin"];
 
       if (!VALID_STATUS.includes(status)) {
@@ -1124,6 +1208,12 @@ class ProjectController {
         return res.status(404).json({ error: "Project not found" });
       }
 
+      // Prevent changing from terminal states
+      if (project.status === PROJECT_STATES.KILLED || project.status === PROJECT_STATES.COMPLETED) {
+        return res.status(403).json({
+          error: "Cannot change status of a project that is already Killed or Completed."
+        });
+      }
 
       if (status === "launched") {
         const businessId =
