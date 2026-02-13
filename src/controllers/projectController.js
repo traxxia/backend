@@ -745,11 +745,8 @@ class ProjectController {
         if (!ObjectId.isValid(id)) continue;
 
         const project = await ProjectModel.findById(id);
-        if (!project) continue;
-
-        // Check if project is already launched
-        if (project.launch_status === PROJECT_LAUNCH_STATUS.LAUNCHED) {
-          results.push({ id, status: "already_launched" });
+        if (!project) {
+          results.push({ id, status: "error", error: "Project not found", is_ranked: false });
           continue;
         }
 
@@ -759,8 +756,17 @@ class ProjectController {
           rank: { $ne: null }
         }).toArray();
 
-        if (rankings.length === 0) {
-          return res.status(400).json({ error: "Your projects are not ranked" });
+        const isRanked = rankings.length > 0;
+
+        // Check if project is already launched
+        if (project.launch_status === PROJECT_LAUNCH_STATUS.LAUNCHED) {
+          results.push({ id, status: "already_launched", is_ranked: isRanked });
+          continue;
+        }
+
+        if (!isRanked) {
+          results.push({ id, status: "failed", error: "Your projects are not ranked", is_ranked: false });
+          continue;
         }
 
         // Check if project has been edited AFTER the latest ranking
@@ -768,10 +774,13 @@ class ProjectController {
         const projectUpdatedAt = project.updated_at ? new Date(project.updated_at) : new Date(project.created_at || 0);
 
         if (projectUpdatedAt > latestRankingDate) {
-          return res.status(400).json({
+          results.push({
+            id,
+            status: "failed",
             error: "your projects were edited, so rerank it or keep it as same",
-            project_id: id
+            is_ranked: true
           });
+          continue;
         }
 
         // Perform launch
@@ -781,11 +790,11 @@ class ProjectController {
           updated_at: new Date()
         });
 
-        results.push({ id, status: "launched" });
+        results.push({ id, status: "launched", is_ranked: true });
       }
 
       res.json({
-        message: "Project(s) launched successfully",
+        message: "Project launch check complete",
         results
       });
     } catch (err) {

@@ -13,7 +13,7 @@ module.exports = {
     DRAFT: 'draft',
     KILLED: 'killed',
     ACTIVE: 'active',
-    AT_RISK: 'at_risk',
+    AT_RISK: 'at risk',
     PAUSED: 'paused',
     COMPLETED: 'completed'
   },
