@@ -15,7 +15,8 @@ module.exports = {
     ACTIVE: 'active',
     AT_RISK: 'at risk',
     PAUSED: 'paused',
-    COMPLETED: 'completed'
+    COMPLETED: 'completed',
+    SCALED: 'scaled'
   },
   TIER_LIMITS: {
     essential: {

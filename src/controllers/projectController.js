@@ -828,7 +828,7 @@ class ProjectController {
         if (!ObjectId.isValid(p.project_id)) {
           return res.status(400).json({ error: "Invalid project_id" });
         }
-        if (typeof p.rank !== "number" || p.rank < 1) {
+        if (p.rank !== null && (typeof p.rank !== "number" || p.rank < 1)) {
           return res.status(400).json({ error: "Invalid rank value" });
         }
       }
