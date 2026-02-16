@@ -999,6 +999,7 @@ class ProjectController {
       });
 
       const responseProjects = ordered.map(({ ranking, project }) => ({
+        ...project,
         project_id: project._id,
         project_name: project.project_name,
         rank: ranking.rank,
@@ -1055,6 +1056,7 @@ class ProjectController {
       projects.forEach(p => {
         const rank = rankMap[p._id.toString()] ?? null;
         const item = {
+          ...p,
           admin_user_id: admin_user_id,
           business_id,
           project_id: p._id,
