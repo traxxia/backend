@@ -116,8 +116,20 @@ class BusinessController {
         }
       );
 
+      const businessesWithLaunchedProjects = await ProjectModel.collection().distinct(
+        "business_id",
+        {
+          business_id: { $in: businessIds },
+          launch_status: "launched"
+        }
+      );
+
       const businessHasProjectSet = new Set(
         businessesWithProjects.map((id) => id.toString())
+      );
+
+      const businessHasLaunchedProjectSet = new Set(
+        businessesWithLaunchedProjects.map((id) => id.toString())
       );
 
       const totalQuestions = await QuestionModel.countDocuments({
@@ -232,6 +244,7 @@ class BusinessController {
               },
               access,
               has_projects: businessHasProjectSet.has(business._id.toString()),
+              has_launched_projects: businessHasLaunchedProjectSet.has(business._id.toString()),
             };
           })
         );
@@ -457,7 +470,6 @@ class BusinessController {
         city: city ? city.trim() : "",
         country: country ? country.trim() : "",
         collaborators: [],
-        status: "draft",
       };
 
       const businessId = await BusinessModel.create(businessData);
@@ -890,11 +902,8 @@ class BusinessController {
         }
       }
 
-      // Update all projects under this business
-      await ProjectModel.collection().updateMany(
-        { business_id: new ObjectId(id) },
-        { $set: { status, updated_at: new Date() } }
-      );
+      // Business status is independent of projects. 
+      // Individual projects maintain their own status (e.g., draft, active, killed).
 
       return res.json({
         message: "Business status updated successfully",
