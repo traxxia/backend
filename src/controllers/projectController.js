@@ -895,21 +895,16 @@ class ProjectController {
 
       const isAdmin = ["company_admin", "super_admin"].includes(req.user.role.role_name);
 
-      // Check if business has ANY launched projects
-      const hasLaunchedProjects = await ProjectModel.collection().findOne({
-        business_id: new ObjectId(business_id),
-        launch_status: "launched"
-      });
-
-      if (hasLaunchedProjects || business.status === "reprioritizing") {
+      // Only restrict collaborators during reprioritizing state
+      // Allow collaborators to rank even when there are launched projects (admins can add new projects)
+      if (business.status === "reprioritizing") {
         if (!isAdmin) {
           const allowed = await BusinessModel.getAllowedRankingCollaborators(business_id);
           const allowedIds = allowed.map(uid => uid.toString());
 
           if (!allowedIds.includes(user_id.toString())) {
-            const reason = hasLaunchedProjects ? "it has launched projects" : "it is in reprioritizing state";
             return res.status(403).json({
-              error: `You are not allowed to rank projects for this business as ${reason}. Admin permission required.`,
+              error: `You are not allowed to rank projects for this business as it is in reprioritizing state. Admin permission required.`,
             });
           }
         }
@@ -922,20 +917,21 @@ class ProjectController {
         })
         .toArray();
 
-      const rankingDocs = projects.map(p => {
-        const projIdStr = p.project_id;
-        const existing = existingRankings.find(r => r.project_id.toString() === projIdStr);
-        const isLocked = existing?.locked || false;
+      const rankingDocs = projects
+        .filter(p => p.rank !== null && p.rank !== undefined) // Only process projects with valid ranks
+        .map(p => {
+          const projIdStr = p.project_id;
+          const existing = existingRankings.find(r => r.project_id.toString() === projIdStr);
 
-        return {
-          user_id: new ObjectId(user_id),
-          business_id: new ObjectId(business_id),
-          project_id: new ObjectId(projIdStr),
-          rank: isLocked ? existing.rank : p.rank,
-          rationals: isLocked ? existing.rationals : p.rationals || "",
-          locked: existing?.locked || false,
-        };
-      });
+          return {
+            user_id: new ObjectId(user_id),
+            business_id: new ObjectId(business_id),
+            project_id: new ObjectId(projIdStr),
+            rank: p.rank, // Always use the new rank value
+            rationals: p.rationals || "",
+            locked: existing?.locked || false,
+          };
+        });
 
       await ProjectRankingModel.bulkUpsert(rankingDocs);
 
