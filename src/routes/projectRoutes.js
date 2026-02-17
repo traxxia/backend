@@ -20,6 +20,7 @@ router.post("/revoke-access", authenticateToken, ProjectController.revokeAccess)
 // AI Ranking routes - FIXED: Use authenticateToken instead of authenticate
 router.post("/ai-rankings",
   authenticateToken,
+  requireAdmin,
   ProjectController.saveAIRankings
 );
 

@@ -741,15 +741,99 @@ class ProjectController {
         return res.status(403).json({ error: "Only admins can launch projects" });
       }
 
-      const results = [];
+      // 1. Basic project check and get business_id
+      const projectsToLaunch = [];
+      let businessId = null;
+
       for (const id of project_ids) {
         if (!ObjectId.isValid(id)) continue;
-
         const project = await ProjectModel.findById(id);
-        if (!project) {
-          results.push({ id, status: "error", error: "Project not found", is_ranked: false });
-          continue;
+        if (!project) continue;
+
+        if (!businessId) businessId = project.business_id;
+        projectsToLaunch.push(project);
+      }
+
+      if (projectsToLaunch.length === 0) {
+        return res.status(404).json({ error: "No valid projects found to launch" });
+      }
+
+      // 2. Persist the selection: Mark selected as PENDING_LAUNCH, reset others (if not already LAUNCHED)
+      await ProjectModel.collection().updateMany(
+        {
+          business_id: new ObjectId(businessId),
+          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED }
+        },
+        { $set: { launch_status: PROJECT_LAUNCH_STATUS.UNLAUNCHED, updated_at: new Date() } }
+      );
+
+      await ProjectModel.collection().updateMany(
+        { _id: { $in: project_ids.map(id => new ObjectId(id)) } },
+        { $set: { launch_status: PROJECT_LAUNCH_STATUS.PENDING_LAUNCH, updated_at: new Date() } }
+      );
+
+      // 3. Admin Ranking Check: Admin must have ranked all selected projects
+      const adminRankings = await ProjectRankingModel.collection().find({
+        user_id: new ObjectId(req.user._id),
+        project_id: { $in: project_ids.map(id => new ObjectId(id)) },
+        rank: { $ne: null }
+      }).toArray();
+
+      if (adminRankings.length < project_ids.length) {
+        return res.status(400).json({
+          error: "Your projects are not ranked. Please rank them before launching."
+        });
+      }
+
+      // 4. Consensus check: All non-admin collaborators must have a rank for ALL launched/pending projects
+      const business = await BusinessModel.findById(businessId);
+      if (business) {
+        const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+        const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+        const db = getDB();
+
+        const users = await db.collection("users").find({
+          _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+        }).toArray();
+
+        const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+
+        // Find all projects that have AI ranks
+        const mandatoryProjects = await ProjectModel.collection().find({
+          business_id: new ObjectId(businessId),
+          ai_rank: { $exists: true, $ne: null }
+        }).toArray();
+
+        const mandatoryProjectIds = mandatoryProjects.map(p => p._id);
+
+        let consensusReached = true;
+        const incompleteUsers = [];
+
+        for (const user of nonAdminUsers) {
+          const userRankings = await ProjectRankingModel.collection().find({
+            business_id: new ObjectId(businessId),
+            user_id: user._id,
+            project_id: { $in: mandatoryProjectIds },
+            rank: { $ne: null }
+          }).toArray();
+
+          if (userRankings.length < mandatoryProjectIds.length) {
+            consensusReached = false;
+            incompleteUsers.push(user.name || user.email);
+          }
         }
+
+        if (!consensusReached) {
+          return res.status(403).json({
+            error: "Waiting for all collaborators to save their rankings before launching.",
+            incomplete_users: incompleteUsers
+          });
+        }
+      }
+
+      const results = [];
+      for (const project of projectsToLaunch) {
+        const id = project._id;
 
         // Check if project is killed
         if (project.status === PROJECT_STATES.KILLED) {
@@ -757,38 +841,11 @@ class ProjectController {
           continue;
         }
 
-        // Check if project is ranked
-        const rankings = await ProjectRankingModel.collection().find({
-          project_id: new ObjectId(id),
-          rank: { $ne: null }
-        }).toArray();
-
-        const isRanked = rankings.length > 0;
-
         // Check if project is already launched
         if (project.launch_status === PROJECT_LAUNCH_STATUS.LAUNCHED) {
-          results.push({ id, status: "already_launched", is_ranked: isRanked });
+          results.push({ id, status: "already_launched", is_ranked: true });
           continue;
         }
-
-        if (!isRanked) {
-          results.push({ id, status: "failed", error: "Your projects are not ranked", is_ranked: false });
-          continue;
-        }
-
-        // // Check if project has been edited AFTER the latest ranking
-        // const latestRankingDate = new Date(Math.max(...rankings.map(r => r.updated_at || r.created_at)));
-        // const projectUpdatedAt = project.updated_at ? new Date(project.updated_at) : new Date(project.created_at || 0);
-
-        // if (projectUpdatedAt > latestRankingDate) {
-        //   results.push({
-        //     id,
-        //     status: "failed",
-        //     error: "your projects were edited, so rerank it or keep it as same",
-        //     is_ranked: true
-        //   });
-        //   continue;
-        // }
 
         // Perform launch
         await ProjectModel.update(id, {
@@ -936,36 +993,46 @@ class ProjectController {
         const collaboratorIds = (business.collaborators || []).map(id => id.toString());
         const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
         const db = getDB();
-
         const users = await db.collection("users").find({
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
+        const adminUsers = users.filter(u => ADMIN_ROLES.includes(u.role_name));
         const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
-        const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
-        const lockedRankings = await ProjectRankingModel.collection()
-          .find({
+        // Mandatory projects are those with an AI rank
+        const mandatoryProjects = await ProjectModel.collection().find({
+          business_id: new ObjectId(business_id),
+          ai_rank: { $exists: true, $ne: null }
+        }).toArray();
+        const mandatoryProjectIds = mandatoryProjects.map(p => p._id);
+        const mandatoryProjectIdStrs = mandatoryProjectIds.map(id => id.toString());
+
+        const lockedUsers = [];
+
+        for (const user of nonAdminUsers) {
+          const userRankings = await ProjectRankingModel.collection().find({
             business_id: new ObjectId(business_id),
-            locked: true,
-            user_id: { $in: nonAdminUserIds }
-          })
-          .toArray();
+            user_id: user._id,
+            project_id: { $in: mandatoryProjectIds },
+            rank: { $ne: null }
+          }).toArray();
 
-        const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
-
-        const lockedUsers = nonAdminUsers
-          .filter(u => lockedUserIds.includes(u._id.toString()))
-          .map(u => ({
-            user_id: u._id,
-            name: u.name,
-            email: u.email,
-          }));
+          // A user is considered "done" if they have ranked all projects with AI ranks
+          if (mandatoryProjectIds.length > 0 && userRankings.length >= mandatoryProjectIds.length) {
+            lockedUsers.push({
+              user_id: user._id,
+              name: user.name,
+              email: user.email,
+            });
+          }
+        }
 
         ranking_lock_summary = {
           total_users: nonAdminUsers.length,
           locked_users_count: lockedUsers.length,
           locked_users: lockedUsers,
+          mandatory_project_ids: mandatoryProjectIdStrs
         };
       }
 
@@ -998,14 +1065,18 @@ class ProjectController {
         return new Date(a.project.created_at) - new Date(b.project.created_at);
       });
 
-      const responseProjects = ordered.map(({ ranking, project }) => ({
-        ...project,
-        project_id: project._id,
-        project_name: project.project_name,
-        rank: ranking.rank,
-        rationals: ranking.rationals || "",
-        locked: ranking.locked || false,
-      }));
+      const responseProjects = ordered.map(({ ranking, project }) => {
+        return {
+          ...project,
+          project_id: project._id,
+          project_name: project.project_name,
+          rank: ranking.rank,
+          rationals: ranking.rationals || "",
+          locked: ranking.locked || false,
+          ai_rank: project.ai_rank || null,
+          ai_rank_score: project.ai_rank_score || null,
+        };
+      });
 
       res.json({
         user_id,
@@ -1547,8 +1618,8 @@ class ProjectController {
         });
       }
 
-      // Verify admin access
-      if (!ADMIN_ROLES.includes(req.user.role.role_name)) {
+      // Verify admin access (redundant if using requireAdmin middleware but good for safety)
+      if (!req.user || !req.user.role || !ADMIN_ROLES.includes(req.user.role.role_name)) {
         return res.status(403).json({
           error: "Only admins can save AI rankings",
         });
@@ -1610,7 +1681,21 @@ class ProjectController {
         }
       );
 
-      // Bulk update AI ranks on projects
+      // Bulk update AI ranks on projects 
+      // FIRST: Reset all existing AI ranks for this business to ensure exclusivity
+      await ProjectModel.collection().updateMany(
+        { business_id: new ObjectId(business_id) },
+        {
+          $set: {
+            ai_rank: null,
+            ai_rank_score: null,
+            ai_rank_factors: {},
+            updated_at: new Date()
+          }
+        }
+      );
+
+      // SECOND: Apply the new rankings
       const bulkResult = await ProjectModel.bulkUpdateAIRanks(ai_rankings);
 
       res.json({

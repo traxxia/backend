@@ -7,6 +7,7 @@ module.exports = {
   VALID_PHASES: ['initial', 'essential', 'good', 'advanced', 'excellent'],
   PROJECT_LAUNCH_STATUS: {
     UNLAUNCHED: 'unlaunched',
+    PENDING_LAUNCH: 'pending_launch',
     LAUNCHED: 'launched'
   },
   PROJECT_STATES: {
