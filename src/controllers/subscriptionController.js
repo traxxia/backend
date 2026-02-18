@@ -1,6 +1,7 @@
 const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 const TierService = require('../services/tierService');
+const StripeService = require('../services/stripeService');
 const { TIER_LIMITS } = require('../config/constants');
 
 class SubscriptionController {
@@ -81,6 +82,27 @@ class SubscriptionController {
 
             const startDate = company?.created_at || user.created_at || new Date();
 
+            // Fetch Payment Method Details if available
+            let paymentMethods = [];
+            let defaultPaymentMethodId = null;
+
+            if (company?.stripe_customer_id) {
+                try {
+                    const methods = await StripeService.listPaymentMethods(company.stripe_customer_id);
+                    paymentMethods = methods.map(pm => ({
+                        id: pm.id,
+                        brand: pm.card.brand,
+                        last4: pm.card.last4,
+                        exp_month: pm.card.exp_month,
+                        exp_year: pm.card.exp_year
+                    }));
+                    defaultPaymentMethodId = company.stripe_payment_method_id;
+
+                } catch (stripeError) {
+                    console.error('Failed to retrieve payment methods:', stripeError);
+                }
+            }
+
             res.json({
                 plan: planName,
                 company_name: company?.company_name,
@@ -88,6 +110,8 @@ class SubscriptionController {
                 end_date: expiresAt,
                 expires_at: expiresAt,
                 status: status,
+                payment_methods: paymentMethods,
+                default_payment_method_id: defaultPaymentMethodId,
                 available_plans: availablePlans.map(p => ({
                     _id: p._id,
                     name: p.name,
@@ -124,7 +148,7 @@ class SubscriptionController {
         try {
             const db = getDB();
             const userId = req.user._id;
-            const { plan_id } = req.body;
+            const { plan_id, paymentMethodId, saveCard } = req.body;
 
             if (!plan_id) {
                 return res.status(400).json({ error: 'plan_id is required' });
@@ -136,6 +160,63 @@ class SubscriptionController {
             }
 
             const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            // Handle Payment Method Update if provided
+            if (paymentMethodId) {
+                try {
+                    let customerId = company.stripe_customer_id;
+                    let shouldSetDefault = saveCard !== false;
+
+                    if (customerId) {
+                        // Check if already attached
+                        const pm = await StripeService.retrievePaymentMethod(paymentMethodId);
+
+                        if (pm.customer !== customerId) {
+                            // Attach new payment method to existing customer
+                            await StripeService.attachPaymentMethod(paymentMethodId, customerId);
+                        }
+
+                        // Set as default if requested
+                        if (shouldSetDefault) {
+                            await StripeService.updateCustomer(customerId, {
+                                invoice_settings: { default_payment_method: paymentMethodId }
+                            });
+                            // Update local record
+                            await db.collection('companies').updateOne(
+                                { _id: user.company_id },
+                                { $set: { stripe_payment_method_id: paymentMethodId } }
+                            );
+                        }
+                    } else {
+                        // Create new customer if missing
+                        const customer = await StripeService.createCustomer(
+                            user.email,
+                            user.name,
+                            paymentMethodId,
+                            shouldSetDefault // Use the flag
+                        );
+                        customerId = customer.id;
+
+                        // Update company with customer ID
+                        await db.collection('companies').updateOne(
+                            { _id: user.company_id },
+                            { $set: { stripe_customer_id: customerId } }
+                        );
+
+                        if (shouldSetDefault) {
+                            await db.collection('companies').updateOne(
+                                { _id: user.company_id },
+                                { $set: { stripe_payment_method_id: paymentMethodId } }
+                            );
+                        }
+                    }
+
+                } catch (stripeError) {
+                    console.error('Stripe payment update failed:', stripeError);
+                    return res.status(400).json({ error: 'Failed to update payment method: ' + stripeError.message });
+                }
+            }
+
             const currentPlan = await db.collection('plans').findOne({ _id: company?.plan_id });
             const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
 

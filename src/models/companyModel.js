@@ -11,6 +11,10 @@ class CompanyModel {
     const result = await db.collection('companies').insertOne({
       ...companyData,
       status: 'active',
+      subscription_status: 'active',
+      stripe_customer_id: companyData.stripe_customer_id || null,
+      stripe_subscription_id: companyData.stripe_subscription_id || null,
+      stripe_payment_method_id: companyData.stripe_payment_method_id || null,
       created_at: createdAt,
       expires_at: expiresAt
     });
