@@ -294,7 +294,7 @@ class AdminController {
 
       const db = getDB();
       const companyId = targetUser.company_id;
-      
+
       const userTier = await TierService.getUserTier(req.user._id); // Assuming the updating admin's tier is the company's tier
       const limits = TierService.getTierLimits(userTier);
 
@@ -423,12 +423,28 @@ class AdminController {
         event_type,
         start_date,
         end_date,
+        search_term,
         limit = 100,
         page = 1,
         include_analysis_data = false,
       } = req.query;
 
       let filter = {};
+      let searchFilter = {};
+
+      if (search_term) {
+        searchFilter = {
+          $or: [
+            { event_type: { $regex: search_term, $options: "i" } },
+            { user_name: { $regex: search_term, $options: "i" } },
+            { user_email: { $regex: search_term, $options: "i" } },
+            { company_name: { $regex: search_term, $options: "i" } },
+            { business_name: { $regex: search_term, $options: "i" } },
+            { "event_data.analysis_name": { $regex: search_term, $options: "i" } },
+            { "event_data.business_name": { $regex: search_term, $options: "i" } },
+          ]
+        };
+      }
 
       if (req.user.role.role_name === "company_admin") {
         const companyUsers = await UserModel.getAll({
@@ -497,10 +513,11 @@ class AdminController {
         skip,
         limit: parseInt(limit),
         projection,
+        searchFilter
       });
 
-      const totalCount = await AuditModel.countDocuments(filter);
-      const analysisStats = await AuditModel.getAnalysisStats(filter);
+      const totalCount = await AuditModel.countDocuments(filter, searchFilter);
+      const analysisStats = await AuditModel.getAnalysisStats(filter, searchFilter);
 
       res.json({
         audit_entries: auditEntries,
