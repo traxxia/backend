@@ -1,7 +1,11 @@
 const Stripe = require('stripe');
 const { STRIPE_SECRET_KEY } = require('../config/constants');
 
-const stripe = new Stripe(STRIPE_SECRET_KEY);
+if (!STRIPE_SECRET_KEY) {
+    console.error('STRIPE_SECRET_KEY is missing in environment variables.');
+}
+
+const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 class StripeService {
     static async createCustomer(email, name, paymentMethodId, setAsDefault = true) {
