@@ -7,6 +7,8 @@ const CompanyModel = require("../models/companyModel")
 const { logAuditEvent } = require('../services/auditService');
 const TierService = require('../services/tierService');
 
+const StripeService = require('../services/stripeService');
+
 class AuthController {
   static async login(req, res) {
     try {
@@ -82,7 +84,7 @@ class AuthController {
 
   static async register(req, res) {
     try {
-      const { name, email, password, company_id, company_name, plan_id, terms_accepted } = req.body;
+      const { name, email, password, company_id, company_name, plan_id, terms_accepted, paymentMethodId } = req.body;
 
       if (!name || !email || !password || (!company_id && !company_name) || !terms_accepted) {
         return res.status(400).json({ error: 'All fields required including terms acceptance and company details' });
@@ -109,6 +111,27 @@ class AuthController {
             return res.status(400).json({ error: 'Invalid plan ID' });
           }
           companyData.plan_id = new ObjectId(plan_id);
+
+          // Payment Processing
+          if (paymentMethodId) { // Check if payment method is provided
+            try {
+              const planDoc = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
+              if (planDoc && planDoc.stripe_price_id) {
+                const customer = await StripeService.createCustomer(email, name, paymentMethodId);
+                const subscription = await StripeService.createSubscription(customer.id, planDoc.stripe_price_id);
+
+                companyData.stripe_customer_id = customer.id;
+                companyData.stripe_subscription_id = subscription.id;
+                companyData.stripe_payment_method_id = paymentMethodId;
+                companyData.subscription_status = subscription.status;
+              } else {
+                console.warn('Plan does not have a stripe_price_id, skipping Stripe subscription creation.');
+              }
+            } catch (stripeError) {
+              console.error('Stripe payment failed:', stripeError);
+              return res.status(400).json({ error: 'Payment failed: ' + stripeError.message });
+            }
+          }
         }
 
         finalCompanyId = await CompanyModel.create(companyData);

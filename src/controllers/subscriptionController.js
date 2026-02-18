@@ -1,6 +1,7 @@
 const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 const TierService = require('../services/tierService');
+const StripeService = require('../services/stripeService');
 const { TIER_LIMITS } = require('../config/constants');
 
 class SubscriptionController {
@@ -81,6 +82,23 @@ class SubscriptionController {
 
             const startDate = company?.created_at || user.created_at || new Date();
 
+            // Fetch Payment Method Details if available
+            let paymentMethodDetails = null;
+            if (company?.stripe_payment_method_id) {
+                try {
+                    const pm = await StripeService.retrievePaymentMethod(company.stripe_payment_method_id);
+                    if (pm && pm.card) {
+                        paymentMethodDetails = {
+                            brand: pm.card.brand,
+                            last4: pm.card.last4
+                        };
+                    }
+                } catch (stripeError) {
+                    console.error('Failed to retrieve payment method:', stripeError);
+                    // Continue without payment details
+                }
+            }
+
             res.json({
                 plan: planName,
                 company_name: company?.company_name,
@@ -88,6 +106,7 @@ class SubscriptionController {
                 end_date: expiresAt,
                 expires_at: expiresAt,
                 status: status,
+                payment_method: paymentMethodDetails,
                 available_plans: availablePlans.map(p => ({
                     _id: p._id,
                     name: p.name,

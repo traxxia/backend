@@ -35,14 +35,15 @@
     "jsonwebtoken": "^9.0.2",
     "mongodb": "^6.3.0",
     "multer": "^1.4.5-lts.1",
+    "stripe": "^20.3.1",
     "winston": "^3.11.0"
   },
   "devDependencies": {
-    "nodemon": "^3.0.1",
     "eslint": "^8.57.0",
     "eslint-config-prettier": "^9.1.0",
-    "prettier": "^3.2.5",
     "jest": "^29.7.0",
+    "nodemon": "^3.0.1",
+    "prettier": "^3.2.5",
     "supertest": "^6.3.4"
   },
   "engines": {
@@ -50,7 +51,11 @@
     "npm": ">=9.0.0"
   },
   "nodemonConfig": {
-    "ignore": ["uploads/*", "*.test.js", "node_modules/"],
+    "ignore": [
+      "uploads/*",
+      "*.test.js",
+      "node_modules/"
+    ],
     "delay": "1000",
     "env": {
       "NODE_ENV": "development"
