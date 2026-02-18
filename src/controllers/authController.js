@@ -117,8 +117,17 @@ class AuthController {
             try {
               const planDoc = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
               if (planDoc && planDoc.stripe_price_id) {
-                const customer = await StripeService.createCustomer(email, name, paymentMethodId);
-                const subscription = await StripeService.createSubscription(customer.id, planDoc.stripe_price_id);
+                // Always save card and set as default for subscriptions
+                const shouldSaveCard = true;
+
+                const customer = await StripeService.createCustomer(email, name, paymentMethodId, shouldSaveCard);
+
+                // Pass paymentMethodId explicitly to subscription if it's not saved as default
+                const subscription = await StripeService.createSubscription(
+                  customer.id,
+                  planDoc.stripe_price_id,
+                  null // Default payment method is already set on customer
+                );
 
                 companyData.stripe_customer_id = customer.id;
                 companyData.stripe_subscription_id = subscription.id;

@@ -4,16 +4,21 @@ const { STRIPE_SECRET_KEY } = require('../config/constants');
 const stripe = new Stripe(STRIPE_SECRET_KEY);
 
 class StripeService {
-    static async createCustomer(email, name, paymentMethodId) {
+    static async createCustomer(email, name, paymentMethodId, setAsDefault = true) {
         try {
-            const customer = await stripe.customers.create({
+            const customerData = {
                 email,
                 name,
                 payment_method: paymentMethodId,
-                invoice_settings: {
+            };
+
+            if (setAsDefault && paymentMethodId) {
+                customerData.invoice_settings = {
                     default_payment_method: paymentMethodId,
-                },
-            });
+                };
+            }
+
+            const customer = await stripe.customers.create(customerData);
             return customer;
         } catch (error) {
             console.error('Error creating Stripe customer:', error);
@@ -21,13 +26,19 @@ class StripeService {
         }
     }
 
-    static async createSubscription(customerId, priceId) {
+    static async createSubscription(customerId, priceId, paymentMethodId = null) {
         try {
-            const subscription = await stripe.subscriptions.create({
+            const subscriptionData = {
                 customer: customerId,
                 items: [{ price: priceId }],
                 expand: ['latest_invoice.payment_intent'],
-            });
+            };
+
+            if (paymentMethodId) {
+                subscriptionData.default_payment_method = paymentMethodId;
+            }
+
+            const subscription = await stripe.subscriptions.create(subscriptionData);
             return subscription;
         } catch (error) {
             console.error('Error creating Stripe subscription:', error);
@@ -40,6 +51,39 @@ class StripeService {
             return await stripe.paymentMethods.retrieve(paymentMethodId);
         } catch (error) {
             console.error("Error retrieving payment method:", error);
+            throw error;
+        }
+    }
+
+    static async attachPaymentMethod(paymentMethodId, customerId) {
+        try {
+            return await stripe.paymentMethods.attach(paymentMethodId, {
+                customer: customerId,
+            });
+        } catch (error) {
+            console.error("Error attaching payment method:", error);
+            throw error;
+        }
+    }
+
+    static async updateCustomer(customerId, updateData) {
+        try {
+            return await stripe.customers.update(customerId, updateData);
+        } catch (error) {
+            console.error("Error updating customer:", error);
+            throw error;
+        }
+    }
+
+    static async listPaymentMethods(customerId) {
+        try {
+            const paymentMethods = await stripe.paymentMethods.list({
+                customer: customerId,
+                type: 'card',
+            });
+            return paymentMethods.data;
+        } catch (error) {
+            console.error("Error listing payment methods:", error);
             throw error;
         }
     }
