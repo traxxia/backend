@@ -4,8 +4,10 @@ const ProjectModel = require('../models/projectModel');
 const BusinessModel = require('../models/businessModel');
 
 class AiHistoryController {
+
     /**
-     * Helper: Validate project access
+     * Helper: Validate project access.
+     * Admins are NOT allowed to access chat history — only the message owner can.
      */
     static async validateProjectAccess(projectId, currentUser) {
         const project = await ProjectModel.findById(projectId);
@@ -18,32 +20,40 @@ class AiHistoryController {
         const isCollaborator = (business.collaborators || []).some(
             (id) => id.toString() === currentUser._id.toString()
         );
-        const isAdmin = ['super_admin', 'company_admin'].includes(currentUser.role?.role_name);
 
-        if (!isOwner && !isCollaborator && !isAdmin) {
+        // Admins are explicitly blocked from accessing chat history
+        // Chat history is strictly personal — only the user who created it can see it
+        if (!isOwner && !isCollaborator) {
             return { error: 'Not allowed to access history for this project' };
         }
 
         return { project, business };
     }
 
+    /**
+     * Store a chat message.
+     * project_id is optional — if not provided, message is stored as global (user-scoped only).
+     */
     static async storeChat(req, res) {
         try {
             const { project_id, role, text } = req.body;
             const userId = req.user._id;
 
-            if (!project_id || !role || !text) {
-                return res.status(400).json({ error: 'project_id, role, and text are required' });
+            if (!role || !text) {
+                return res.status(400).json({ error: 'role and text are required' });
             }
 
-            const access = await AiHistoryController.validateProjectAccess(project_id, req.user);
-            if (access.error) return res.status(403).json({ error: access.error });
+            // If project_id is provided, validate access to that project
+            if (project_id) {
+                const access = await AiHistoryController.validateProjectAccess(project_id, req.user);
+                if (access.error) return res.status(403).json({ error: access.error });
+            }
 
             const chatEntry = {
-                project_id,
                 user_id: userId,
                 role, // 'user' or 'assistant'
-                text
+                text,
+                ...(project_id ? { project_id } : {})
             };
 
             const insertedId = await AiHistoryModel.create(chatEntry);
@@ -54,18 +64,24 @@ class AiHistoryController {
         }
     }
 
+    /**
+     * Get chat history.
+     * Always scoped to the requesting user's own messages.
+     * projectId param is optional — if omitted, returns global (non-project) history.
+     */
     static async getChatHistory(req, res) {
         try {
             const { projectId } = req.params;
+            const userId = req.user._id;
 
-            if (!projectId) {
-                return res.status(400).json({ error: 'projectId is required' });
+            // If projectId is provided and not "global", validate project access
+            if (projectId && projectId !== 'global') {
+                const access = await AiHistoryController.validateProjectAccess(projectId, req.user);
+                if (access.error) return res.status(403).json({ error: access.error });
             }
 
-            const access = await AiHistoryController.validateProjectAccess(projectId, req.user);
-            if (access.error) return res.status(403).json({ error: access.error });
-
-            const history = await AiHistoryModel.findByProjectAndUser(projectId, req.user._id);
+            const resolvedProjectId = (projectId && projectId !== 'global') ? projectId : null;
+            const history = await AiHistoryModel.findByUser(userId, resolvedProjectId);
             res.json({ history });
         } catch (error) {
             console.error('Error fetching chat history:', error);
