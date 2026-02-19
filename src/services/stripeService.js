@@ -13,16 +13,25 @@ class StripeService {
             const customerData = {
                 email,
                 name,
-                payment_method: paymentMethodId,
             };
 
-            if (setAsDefault && paymentMethodId) {
-                customerData.invoice_settings = {
-                    default_payment_method: paymentMethodId,
-                };
+            // 1. Create Customer
+            const customer = await stripe.customers.create(customerData);
+
+            // 2. Attach Payment Method if provided
+            if (paymentMethodId) {
+                await stripe.paymentMethods.attach(paymentMethodId, {
+                    customer: customer.id,
+                });
+
+                // 3. Set as default if requested
+                if (setAsDefault) {
+                    await stripe.customers.update(customer.id, {
+                        invoice_settings: { default_payment_method: paymentMethodId },
+                    });
+                }
             }
 
-            const customer = await stripe.customers.create(customerData);
             return customer;
         } catch (error) {
             console.error('Error creating Stripe customer:', error);
