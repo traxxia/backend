@@ -262,7 +262,7 @@ class BusinessController {
         businesses: enhancedOwned,
         collaborating_businesses: enhancedCollaborating,
         overall_stats: {
-          total_businesses: owned.length,
+          total_businesses: owned.filter(b => b.status !== 'deleted').length,
           total_questions_in_system: totalQuestions,
           businesses_with_location: enhancedOwned.filter(
             (b) => b.city || b.country
@@ -444,9 +444,28 @@ class BusinessController {
       const existingCount = await BusinessModel.countByUserId(req.user._id);
 
       if (existingCount >= limits.max_workspaces) {
+        const upgradeMsg = tierName === 'essential' ? ' Upgrade to Advanced for more workspaces.' : '';
         return res.status(403).json({
-          error: `Workspace limit reached for ${tierName} plan. Maximum ${limits.max_workspaces} workspace(s) allowed.`
+          error: `Workspace limit reached for ${tierName} plan. Maximum ${limits.max_workspaces} workspace(s) allowed.${upgradeMsg}`
         });
+      }
+
+      // Deletion cooldown check for creation (Rate-limiting replacements)
+      const lastDeleted = await BusinessModel.findLastDeleted(req.user._id);
+      if (lastDeleted && lastDeleted.deleted_at) {
+        const cooldownDays = 30;
+        const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
+        const timeSinceLastDeleted = new Date() - new Date(lastDeleted.deleted_at);
+
+        if (timeSinceLastDeleted < cooldownMs) {
+          const createdAfterCount = await BusinessModel.countCreatedAfter(req.user._id, lastDeleted.deleted_at);
+          if (createdAfterCount >= 1) {
+            const remainingDays = Math.ceil((cooldownMs - timeSinceLastDeleted) / (1000 * 60 * 60 * 24));
+            return res.status(403).json({
+              error: `You cannot create more than one business within 30 days of a deletion. Please wait ${remainingDays} more day(s).`
+            });
+          }
+        }
       }
 
       const existingBusinesses = await BusinessModel.findByUserId(req.user._id);
@@ -518,15 +537,19 @@ class BusinessController {
 
       // 30-day cooldown check
       const lastDeleted = await BusinessModel.findLastDeleted(userId);
+
       if (lastDeleted && lastDeleted.deleted_at) {
         const cooldownDays = 30;
         const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
-        const timeSinceLastDeleted = new Date() - new Date(lastDeleted.deleted_at);
+        const lastDeletedDate = new Date(lastDeleted.deleted_at);
+        const now = new Date();
+        const timeSinceLastDeleted = now - lastDeletedDate;
 
         if (timeSinceLastDeleted < cooldownMs) {
-          const remainingDays = Math.ceil((cooldownMs - timeSinceLastDeleted) / (1000 * 60 * 60 * 24));
+          const remainingMs = cooldownMs - timeSinceLastDeleted;
+          const remainingDays = Math.ceil(remainingMs / (1000 * 60 * 60 * 24));
           return res.status(403).json({
-            error: `You cannot delete by 30 days. Please wait ${remainingDays} more day(s).`
+            error: `You cannot delete a business within 30 days of your last deletion. Please wait ${remainingDays} more day(s).`
           });
         }
       }
