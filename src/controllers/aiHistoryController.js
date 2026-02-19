@@ -20,10 +20,10 @@ class AiHistoryController {
         const isCollaborator = (business.collaborators || []).some(
             (id) => id.toString() === currentUser._id.toString()
         );
+        const isSuperAdmin = currentUser.role?.role_name === 'super_admin';
 
-        // Admins are explicitly blocked from accessing chat history
-        // Chat history is strictly personal — only the user who created it can see it
-        if (!isOwner && !isCollaborator) {
+        // Allow access if owner, collaborator, or super admin
+        if (!isOwner && !isCollaborator && !isSuperAdmin) {
             return { error: 'Not allowed to access history for this project' };
         }
 
@@ -74,8 +74,8 @@ class AiHistoryController {
             const { projectId } = req.params;
             const userId = req.user._id;
 
-            // If projectId is provided and not "global", validate project access
-            if (projectId && projectId !== 'global') {
+            // If projectId is provided and is a specific ID (not "global" or "all"), validate project access
+            if (projectId && !['global', 'all'].includes(projectId)) {
                 const access = await AiHistoryController.validateProjectAccess(projectId, req.user);
                 if (access.error) return res.status(403).json({ error: access.error });
             }
