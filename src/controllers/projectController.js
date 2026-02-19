@@ -780,8 +780,14 @@ class ProjectController {
       }).toArray();
 
       if (adminRankings.length < project_ids.length) {
+        const rankedIds = new Set(adminRankings.map(r => r.project_id.toString()));
+        const unrankedProjectNames = projectsToLaunch
+          .filter(p => !rankedIds.has(p._id.toString()))
+          .map(p => p.project_name);
+
+        const bulletedList = unrankedProjectNames.map(name => `• ${name}`).join("\n");
         return res.status(400).json({
-          error: "Your projects are not ranked. Please rank them before launching."
+          error: `The following projects chosen for launch are not ranked:\n${bulletedList}\n\nPlease rank them before launching.`
         });
       }
 
