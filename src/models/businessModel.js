@@ -67,10 +67,19 @@ class BusinessModel {
   }
 
   static async findLastDeleted(userId) {
-    return await this.collection().findOne(
-      { user_id: new ObjectId(userId), status: 'deleted' },
-      { sort: { deleted_at: -1 } }
-    );
+    return await this.collection()
+      .find({ user_id: new ObjectId(userId), status: 'deleted' })
+      .sort({ deleted_at: -1 })
+      .limit(1)
+      .next();
+  }
+
+  static async countCreatedAfter(userId, date) {
+    return await this.collection().countDocuments({
+      user_id: new ObjectId(userId),
+      created_at: { $gt: date },
+      status: { $ne: 'deleted' }
+    });
   }
 
   static async delete(businessId, userId) {

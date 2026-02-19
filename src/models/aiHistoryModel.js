@@ -34,7 +34,9 @@ class AiHistoryModel {
         const coll = this.collection();
         const query = { user_id: new ObjectId(userId) };
 
-        if (projectId) {
+        if (projectId === 'all') {
+            // Return all messages for the user, regardless of project_id
+        } else if (projectId) {
             query.project_id = new ObjectId(projectId);
         } else {
             // Only return messages that have NO project_id (global chat)
