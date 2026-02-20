@@ -1,16 +1,17 @@
+require('dotenv').config();
 const { MongoClient } = require('mongodb');
 
-const uri = "mongodb+srv://kavitha:Piquota1234@cluster0.yxi1t.mongodb.net/traxxia-development?retryWrites=true&w=majority&appName=Cluster0";
-const dbName = "traxxia-development";
+const uri = process.env.MONGO_URI
 
 async function listPlans() {
     const client = new MongoClient(uri);
 
     try {
         await client.connect();
-        console.log("Connected to database:", dbName);
-        const db = client.db(dbName);
+        console.log("Connected to database");
+        console.log("Using URI:", uri.replace(/:([^:@]+)@/, ':****@')); // mask password
 
+        const db = client.db();
         const plans = await db.collection('plans').find({}).toArray();
 
         console.log("\n--- Plans in Database ---");
