@@ -245,7 +245,7 @@ class ProjectController {
         estimated_timeline,
         budget_estimate,
         project_type,
-        assumptions,
+        learning_state,
         last_reviewed,
         constraints_non_negotiables,
         explicitly_out_of_scope
@@ -408,14 +408,14 @@ class ProjectController {
         key_assumptions: Array.isArray(key_assumptions)
           ? key_assumptions.slice(0, 3).map(normalizeString)
           : [],
-        assumptions: "testing",
+        learning_state: "testing",
         success_criteria: normalizeString(success_criteria),
         kill_criteria: normalizeString(kill_criteria),
         review_cadence: normalizeString(review_cadence),
 
         status: status || PROJECT_STATES.DRAFT,
         launch_status: PROJECT_LAUNCH_STATUS.UNLAUNCHED,
-        assumptions: assumptions || "Testing",
+        learning_state: learning_state || "Testing",
         last_reviewed: last_reviewed ? new Date(last_reviewed) : null,
 
         impact: normalizeString(impact),
@@ -700,8 +700,8 @@ class ProjectController {
         }
       }
 
-      if (req.body.assumptions !== undefined) {
-        updateData.assumptions = normalizeString(req.body.assumptions);
+      if (req.body.learning_state !== undefined) {
+        updateData.learning_state = normalizeString(req.body.learning_state);
       }
 
       if (req.body.last_reviewed !== undefined) {
@@ -1677,7 +1677,7 @@ class ProjectController {
         {
           $set: {
             status: PROJECT_STATES.DRAFT,
-            assumptions: "testing",
+            learning_state: "testing",
             updated_at: new Date()
           }
         }
