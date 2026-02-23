@@ -14,6 +14,7 @@ const projectFieldLockRoutes = require("./projectFieldLockRoutes");
 const analysisRoutes = require("./analysisRoutes");
 const planRoutes = require("./planRoutes");
 const subscriptionRoutes = require("./subscriptionRoutes");
+const pmfAnalysisRoutes = require("./pmfAnalysisRoutes")
 
 router.use("/api", authRoutes);
 router.use("/api/plans", planRoutes);
@@ -31,6 +32,7 @@ router.use("/api/initiatives", initiativeRoutes);
 router.use("/api/projects", projectRoutes);
 router.use("/api/project-field-locks", projectFieldLockRoutes);
 router.use("/api/analysis", analysisRoutes);
+router.use("/api/pmf-analysis", pmfAnalysisRoutes);
 router.use("/api/subscription", subscriptionRoutes);
 
 const aiChatRoutes = require('./aiChatRoutes');
