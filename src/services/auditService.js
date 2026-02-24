@@ -30,6 +30,52 @@ const logAuditEvent = async (userId, eventType, eventData = {}, businessId = nul
   }
 };
 
+const runAuditTrailMigration = async () => {
+  try {
+    const db = getDB();
+    const auditTrail = db.collection('audit_trail');
+    const conversations = db.collection('user_business_conversations');
+
+    const entriesToUpdate = await auditTrail.find({
+      event_type: { $in: ['question_answered', 'question_edited'] },
+      'event_data.answer_preview': { $regex: /\.\.\.$/ }
+    }).toArray();
+
+    if (entriesToUpdate.length === 0) {
+      console.log('ℹ️ No truncated audit entries found for migration.');
+      return;
+    }
+
+    console.log(`🚀 Starting migration for ${entriesToUpdate.length} truncated audit entries...`);
+
+    let updatedCount = 0;
+
+    for (const entry of entriesToUpdate) {
+      const { business_id, question_id } = entry.event_data;
+
+      if (!business_id || !question_id) continue;
+
+      const conversation = await conversations.findOne({
+        business_id: new ObjectId(business_id),
+        question_id: new ObjectId(question_id),
+        answer_text: { $exists: true, $ne: null, $ne: "[Question Skipped]" }
+      }, { sort: { created_at: -1 } });
+
+      if (conversation && conversation.answer_text) {
+        await auditTrail.updateOne(
+          { _id: entry._id },
+          { $set: { 'event_data.answer_preview': conversation.answer_text } }
+        );
+        updatedCount++;
+      }
+    }
+
+    console.log(`✅ Migration complete. Updated ${updatedCount} audit entries.`);
+  } catch (error) {
+    console.error('❌ Audit trail migration failed:', error);
+  }
+};
+
 const createAuditIndexes = async () => {
   try {
     const db = getDB();
@@ -47,4 +93,4 @@ const createAuditIndexes = async () => {
   }
 };
 
-module.exports = { logAuditEvent, createAuditIndexes };
+module.exports = { logAuditEvent, createAuditIndexes, runAuditTrailMigration };

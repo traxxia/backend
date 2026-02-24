@@ -28,9 +28,36 @@ class AuditModel {
       { $unwind: { path: '$company', preserveNullAndEmptyArrays: true } },
       {
         $addFields: {
+          temp_business_id: {
+            $cond: {
+              if: { $ne: ["$event_data.business_id", null] },
+              then: { $toObjectId: "$event_data.business_id" },
+              else: {
+                $cond: {
+                  if: { $ne: ["$additional_info.business_id", null] },
+                  then: { $toObjectId: "$additional_info.business_id" },
+                  else: null
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        $lookup: {
+          from: 'businesses',
+          localField: 'temp_business_id',
+          foreignField: '_id',
+          as: 'business'
+        }
+      },
+      { $unwind: { path: '$business', preserveNullAndEmptyArrays: true } },
+      {
+        $addFields: {
           user_name: "$user.name",
           user_email: "$user.email",
-          company_name: "$company.company_name"
+          company_name: "$company.company_name",
+          business_name: "$business.business_name"
         }
       },
       { $match: searchFilter },
@@ -102,28 +129,37 @@ class AuditModel {
     if (Object.keys(searchFilter).length > 0) {
       pipeline.push(
         {
-          $lookup: {
-            from: 'users',
-            localField: 'user_id',
-            foreignField: '_id',
-            as: 'user'
+          $addFields: {
+            temp_business_id: {
+              $cond: {
+                if: { $ne: ["$event_data.business_id", null] },
+                then: { $toObjectId: "$event_data.business_id" },
+                else: {
+                  $cond: {
+                    if: { $ne: ["$additional_info.business_id", null] },
+                    then: { $toObjectId: "$additional_info.business_id" },
+                    else: null
+                  }
+                }
+              }
+            }
           }
         },
         {
           $lookup: {
-            from: 'companies',
-            localField: 'user.company_id',
+            from: 'businesses',
+            localField: 'temp_business_id',
             foreignField: '_id',
-            as: 'company'
+            as: 'business'
           }
         },
-        { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
-        { $unwind: { path: '$company', preserveNullAndEmptyArrays: true } },
+        { $unwind: { path: '$business', preserveNullAndEmptyArrays: true } },
         {
           $addFields: {
             user_name: "$user.name",
             user_email: "$user.email",
-            company_name: "$company.company_name"
+            company_name: "$company.company_name",
+            business_name: "$business.business_name"
           }
         },
         { $match: searchFilter }
