@@ -431,7 +431,7 @@ class ConversationController {
           "question_edited",
           {
             question_id,
-            answer_preview: answer_text.substring(0, 200) + "...",
+            answer_preview: answer_text,
             deleted_count: deleted.deletedCount,
             business_id,
           },
@@ -477,7 +477,7 @@ class ConversationController {
           eventType,
           {
             question_id,
-            answer_preview: answer_text?.substring(0, 200) + "...",
+            answer_preview: answer_text,
             is_complete,
             business_id,
           },
