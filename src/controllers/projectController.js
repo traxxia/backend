@@ -131,11 +131,21 @@ class ProjectController {
         }
       }
 
-      projects = projects.map(project => ({
-        ...project,
-        allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
-        status: project.status, // Ensure status is returned
-      }));
+      projects = projects.map(project => {
+        let cleanDesc = project.description || "";
+        if (cleanDesc.startsWith("PMF Tactical Action:")) {
+          cleanDesc = cleanDesc
+            .replace(/^PMF Tactical Action: /, '')
+            .split('\n')[0];
+        }
+
+        return {
+          ...project,
+          description: cleanDesc,
+          allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
+          status: project.status, // Ensure status is returned
+        };
+      });
 
       let ranking_lock_summary = {
         locked_users_count: 0,
@@ -804,10 +814,13 @@ class ProjectController {
 
         const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
 
-        // Find all projects that have AI ranks
+        // Find all projects that have AI ranks OR are being launched now
         const mandatoryProjects = await ProjectModel.collection().find({
           business_id: new ObjectId(businessId),
-          ai_rank: { $exists: true, $ne: null }
+          $or: [
+            { ai_rank: { $exists: true, $ne: null } },
+            { _id: { $in: project_ids.map(id => new ObjectId(id)) } }
+          ]
         }).toArray();
 
         const mandatoryProjectIds = mandatoryProjects.map(p => p._id);
@@ -1671,9 +1684,13 @@ class ProjectController {
         { $set: { status: "prioritizing", updated_at: new Date() } }
       );
 
-      // Kickstart: set all projects to Draft and assumptions to "testing"
+      // Kickstart: set non-launched projects to Draft and assumptions to "testing"
+      // Projects that are already launched (active) must NOT be reset to draft
       await ProjectModel.collection().updateMany(
-        { business_id: new ObjectId(business_id) },
+        {
+          business_id: new ObjectId(business_id),
+          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED }
+        },
         {
           $set: {
             status: PROJECT_STATES.DRAFT,
@@ -1771,10 +1788,13 @@ class ProjectController {
         return res.status(404).json({ error: "Business not found" });
       }
 
-      // Get all projects with AI rankings
+      // Get all projects with AI rankings OR projects targeted for launch
       const projects = await ProjectModel.findAll({
         business_id: new ObjectId(business_id),
-        ai_rank: { $exists: true, $ne: null }
+        $or: [
+          { ai_rank: { $exists: true, $ne: null } },
+          { launch_status: { $in: [PROJECT_LAUNCH_STATUS.LAUNCHED, PROJECT_LAUNCH_STATUS.PENDING_LAUNCH] } }
+        ]
       });
 
       if (projects.length === 0) {

@@ -7,16 +7,27 @@ class TierService {
         const db = getDB();
 
         const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
-        if (!user || !user.company_id) return 'essential';
+        if (!user || !user.company_id) return 'unlimited';
 
         const company = await db.collection('companies').findOne({ _id: user.company_id });
-        if (!company) return 'essential';
+        if (!company) return 'unlimited';
+
+        // If all Stripe IDs are null/missing, give unlimited access
+        if (this.isStripeAccountNull(company)) {
+            return 'unlimited';
+        }
 
         // Legacy companies created without a plan have unlimited access
         if (!company.plan_id) return 'unlimited';
 
         const plan = await db.collection('plans').findOne({ _id: company.plan_id });
         return plan?.name?.toLowerCase() || 'essential';
+    }
+
+    static isStripeAccountNull(company) {
+        return !company.stripe_customer_id &&
+            !company.stripe_subscription_id &&
+            !company.stripe_payment_method_id;
     }
 
     static getTierLimits(tierName) {
