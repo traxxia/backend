@@ -7,7 +7,7 @@ if (result.error) {
 }
 const app = require('./src/app');
 const { connectToMongoDB } = require('./src/config/database');
-const { createAuditIndexes } = require('./src/services/auditService');
+const { createAuditIndexes, runAuditTrailMigration } = require('./src/services/auditService');
 const { getDB } = require('./src/config/database');
 const bcrypt = require('bcryptjs');
 const { PORT } = require('./src/config/constants');
@@ -17,6 +17,7 @@ async function initializeSystem() {
     const db = getDB();
 
     await createAuditIndexes();
+    await runAuditTrailMigration();
 
     // Create default roles
     const existingRoles = await db.collection('roles').countDocuments();
