@@ -15,6 +15,9 @@ class CompanyModel {
       stripe_customer_id: companyData.stripe_customer_id || null,
       stripe_subscription_id: companyData.stripe_subscription_id || null,
       stripe_payment_method_id: companyData.stripe_payment_method_id || null,
+      ai_token_usage: 0,
+      quotaExceed: false,
+      quotaResetAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       created_at: createdAt,
       expires_at: expiresAt
     });
@@ -123,6 +126,89 @@ class CompanyModel {
         }
       }
     );
+  }
+
+  static async getAITokenUsage(companyId) {
+    const db = getDB();
+    const company = await db.collection('companies').findOne({ _id: new ObjectId(companyId) });
+    
+    if (!company) {
+      throw new Error('Company not found');
+    }
+
+    const now = new Date();
+    let currentUsage = company.ai_token_usage || 0;
+    let resetAt = company.quotaResetAt;
+    let quotaExceed = company.quotaExceed || false;
+    let updated = false;
+
+    // If quotaResetAt is missing or has passed, reset the cycle
+    if (!resetAt || now > new Date(resetAt)) {
+      currentUsage = 0;
+      resetAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+      quotaExceed = false;
+      updated = true;
+    }
+
+    if (updated) {
+      await db.collection('companies').updateOne(
+        { _id: new ObjectId(companyId) },
+        {
+          $set: {
+            ai_token_usage: currentUsage,
+            quotaExceed,
+            quotaResetAt: resetAt,
+            updated_at: now
+          }
+        }
+      );
+    }
+
+    return {
+      ai_token_usage: currentUsage,
+      quotaExceed,
+      quotaResetAt: resetAt
+    };
+  }
+
+  static async updateAITokenUsage(companyId, tokensUsed) {
+    const db = getDB();
+    const company = await db.collection('companies').findOne({ _id: new ObjectId(companyId) });
+    
+    if (!company) {
+      throw new Error('Company not found');
+    }
+
+    const now = new Date();
+    let currentUsage = company.ai_token_usage || 0;
+    let resetAt = company.quotaResetAt;
+
+    // If quotaResetAt is missing or has passed, reset the cycle
+    if (!resetAt || now > new Date(resetAt)) {
+      currentUsage = 0;
+      resetAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+    }
+
+    currentUsage += tokensUsed;
+    const limit = 3000000;
+    const quotaExceed = currentUsage >= limit;
+
+    await db.collection('companies').updateOne(
+      { _id: new ObjectId(companyId) },
+      {
+        $set: {
+          ai_token_usage: currentUsage,
+          quotaExceed,
+          quotaResetAt: resetAt,
+          updated_at: now
+        }
+      }
+    );
+
+    return {
+      quotaExceed,
+      quotaResetAt: resetAt
+    };
   }
 }
 
