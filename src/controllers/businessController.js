@@ -452,7 +452,13 @@ class BusinessController {
 
       // Deletion cooldown check for creation (Rate-limiting replacements)
       const lastDeleted = await BusinessModel.findLastDeleted(req.user._id);
-      if (lastDeleted && lastDeleted.deleted_at) {
+
+      // Fetch company to check Stripe IDs for bypass
+      const db = getDB();
+      const company = req.user.company_id ? await db.collection('companies').findOne({ _id: req.user.company_id }) : null;
+      const isStripeNull = company ? TierService.isStripeAccountNull(company) : true;
+
+      if (lastDeleted && lastDeleted.deleted_at && !isStripeNull) {
         const cooldownDays = 30;
         const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
         const timeSinceLastDeleted = new Date() - new Date(lastDeleted.deleted_at);
@@ -538,7 +544,12 @@ class BusinessController {
       // 30-day cooldown check
       const lastDeleted = await BusinessModel.findLastDeleted(userId);
 
-      if (lastDeleted && lastDeleted.deleted_at) {
+      // Fetch company to check Stripe IDs for bypass
+      const dbInstance = getDB();
+      const companyInstance = req.user.company_id ? await dbInstance.collection('companies').findOne({ _id: req.user.company_id }) : null;
+      const isStripeNullDelete = companyInstance ? TierService.isStripeAccountNull(companyInstance) : true;
+
+      if (lastDeleted && lastDeleted.deleted_at && !isStripeNullDelete) {
         const cooldownDays = 30;
         const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
         const lastDeletedDate = new Date(lastDeleted.deleted_at);

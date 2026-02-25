@@ -70,14 +70,17 @@ class SubscriptionController {
                 expiresAt.setMonth(expiresAt.getMonth() + 1);
             }
 
-            // Check if expired
-            if (new Date() > new Date(expiresAt) && status !== 'expired') {
+            // Check if expired - Bypass if plan is 'unlimited' (e.g. Stripe IDs are null)
+            if (planName !== 'unlimited' && new Date() > new Date(expiresAt) && status !== 'expired') {
                 status = 'expired';
                 // Update specific company status to expired
                 await db.collection('companies').updateOne(
                     { _id: user.company_id },
                     { $set: { status: 'expired' } }
                 );
+            } else if (planName === 'unlimited') {
+                // Ensure status is active for unlimited plans if it was somehow marked expired
+                status = 'active';
             }
 
             const startDate = company?.created_at || user.created_at || new Date();
