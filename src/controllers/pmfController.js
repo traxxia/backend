@@ -208,9 +208,9 @@ class PMFController {
                     user_id: new ObjectId(userId),
                     project_name: actionText.trim(),
                     project_type: DEFAULT_PROJECT_TYPE,
-                    description: typeof actionObj === 'object'
-                        ? `PMF Tactical Action: ${actionText}\nImpact: ${actionObj.impact || 'N/A'}\nStatus: ${actionObj.status || 'N/A'}`
-                        : `PMF Tactical Action: ${actionText}`,
+                    description: typeof actionObj === 'object' && actionObj.description
+                        ? actionObj.description
+                        : actionText,
                     why_this_matters: `Strategic priority: ${priorityTitle}`,
                     strategic_decision: "",
                     accountable_owner: "",

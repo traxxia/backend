@@ -131,11 +131,21 @@ class ProjectController {
         }
       }
 
-      projects = projects.map(project => ({
-        ...project,
-        allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
-        status: project.status, // Ensure status is returned
-      }));
+      projects = projects.map(project => {
+        let cleanDesc = project.description || "";
+        if (cleanDesc.startsWith("PMF Tactical Action:")) {
+          cleanDesc = cleanDesc
+            .replace(/^PMF Tactical Action: /, '')
+            .split('\n')[0];
+        }
+
+        return {
+          ...project,
+          description: cleanDesc,
+          allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
+          status: project.status, // Ensure status is returned
+        };
+      });
 
       let ranking_lock_summary = {
         locked_users_count: 0,
