@@ -1,7 +1,41 @@
 const { ObjectId } = require("mongodb");
 const PMFExecutiveSummaryModel = require("../models/pmfExecutiveSummaryModel");
 const ProjectModel = require("../models/projectModel");
+const BusinessModel = require("../models/businessModel");
+const UserModel = require("../models/userModel");
+const TierService = require("../services/tierService");
+const { getDB } = require("../config/database");
 const { PROJECT_STATES, PROJECT_LAUNCH_STATUS } = require("../config/constants");
+
+const ADMIN_ROLES = ["company_admin", "super_admin"];
+const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
+const DEFAULT_PROJECT_TYPE = "immediate action";
+
+// Permission matrix for project actions
+function getProjectPermissions({
+    projectStatus,
+    isOwner,
+    isCollaborator,
+    isAdmin,
+}) {
+    const status = (projectStatus || "").toLowerCase();
+    const canModify = isAdmin || isCollaborator || isOwner;
+
+    switch (status) {
+        case PROJECT_STATES.DRAFT:
+            return {
+                canCreate: canModify,
+                canEdit: canModify,
+            };
+        default:
+            return { canCreate: false, canEdit: canModify };
+    }
+}
+
+// Normalize string fields
+function normalizeString(value) {
+    return typeof value === "string" ? value : "";
+}
 
 class PMFController {
     static async getKickstartData(req, res) {
@@ -62,6 +96,42 @@ class PMFController {
                 return res.status(400).json({ error: "businessId and priority are required" });
             }
 
+            if (!ObjectId.isValid(businessId)) {
+                return res.status(400).json({ error: "Invalid business ID" });
+            }
+
+            // Check business
+            const business = await BusinessModel.findById(businessId);
+            if (!business) {
+                return res.status(404).json({ error: "Business not found" });
+            }
+
+            // Tier check
+            const tierName = await TierService.getUserTier(req.user._id);
+            if (!await TierService.canCreateProject(tierName)) {
+                return res.status(403).json({
+                    error: `Project creation is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+                });
+            }
+
+            // User-collaborator auto-assignment (matching ProjectController)
+            if (!ADMIN_ROLES.includes(req.user.role.role_name) && business.user_id) {
+                const ownerId = business.user_id.toString();
+                const ownerUser = await UserModel.findById(ownerId);
+
+                if (ownerUser) {
+                    const db = getDB();
+                    const roleDoc = await db.collection("roles").findOne({ _id: ownerUser.role_id });
+                    const ownerRoleName = roleDoc?.role_name;
+
+                    if (["user", "viewer"].includes(ownerRoleName)) {
+                        await UserModel.updateRole(ownerId, "collaborator");
+                        await BusinessModel.addCollaborator(businessId, ownerId);
+                        console.log(`Role auto-updated: userId ${ownerId} → collaborator for businessId ${businessId}`);
+                    }
+                }
+            }
+
             const priorityTitle = priority.title || priority.action || priority.Action || priority.Title;
             const actions = priority.actions || priority.Actions || [];
 
@@ -71,6 +141,59 @@ class PMFController {
 
             if (!Array.isArray(actions) || actions.length === 0) {
                 return res.status(400).json({ error: "Priority must have at least one action to kickstart projects" });
+            }
+
+            // Permission check
+            const isOwner = business.user_id.toString() === req.user._id.toString();
+            const isCollaborator = business.collaborators?.some(
+                (id) => id.toString() === req.user._id.toString()
+            );
+            const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
+            // Auto-add non-admin owner as collaborator if missing
+            const ownerIdStr = business.user_id?.toString();
+            if (ownerIdStr) {
+                const ownerUser = await UserModel.findById(ownerIdStr);
+                let ownerRoleName = null;
+                if (ownerUser?.role_id) {
+                    const db = getDB();
+                    const roleDoc = await db.collection("roles").findOne({ _id: ownerUser.role_id });
+                    ownerRoleName = roleDoc?.role_name;
+                }
+
+                if (!ADMIN_ROLES.includes(ownerRoleName)) {
+                    const alreadyCollaborator = business.collaborators?.some(id => id.toString() === ownerIdStr);
+                    if (!alreadyCollaborator) {
+                        await BusinessModel.addCollaborator(businessId, ownerIdStr);
+                        if (!Array.isArray(business.collaborators)) business.collaborators = [];
+                        business.collaborators.push(new ObjectId(ownerIdStr));
+                    }
+                }
+            }
+
+            if (isAdmin && (!Array.isArray(business.collaborators) || business.collaborators.length === 0)) {
+                return res.status(400).json({
+                    error: "Please add at least one collaborator before creating a project",
+                });
+            }
+
+            const permissions = getProjectPermissions({
+                projectStatus: PROJECT_STATES.DRAFT,
+                isOwner,
+                isCollaborator,
+                isAdmin,
+            });
+
+            if (!permissions.canCreate) {
+                return res.status(403).json({
+                    error: `You cannot create a project when business is in '${business.status}' state`,
+                });
+            }
+
+            if (!(isAdmin || isCollaborator)) {
+                return res.status(403).json({
+                    error: "Only collaborators or admins can create or edit projects",
+                });
             }
 
             const createdProjectIds = [];
@@ -84,7 +207,7 @@ class PMFController {
                     business_id: new ObjectId(businessId),
                     user_id: new ObjectId(userId),
                     project_name: actionText.trim(),
-                    project_type: "short term initiative",
+                    project_type: DEFAULT_PROJECT_TYPE,
                     description: typeof actionObj === 'object'
                         ? `PMF Tactical Action: ${actionText}\nImpact: ${actionObj.impact || 'N/A'}\nStatus: ${actionObj.status || 'N/A'}`
                         : `PMF Tactical Action: ${actionText}`,
@@ -98,17 +221,19 @@ class PMFController {
                     review_cadence: "",
                     status: PROJECT_STATES.DRAFT,
                     launch_status: PROJECT_LAUNCH_STATUS.UNLAUNCHED,
-                    impact: typeof actionObj === 'object' ? (actionObj.impact || "") : "",
+                    impact: normalizeString(typeof actionObj === 'object' ? (actionObj.impact || "") : ""),
                     effort: "",
                     risk: "",
-                    strategic_theme: priorityTitle,
+                    strategic_theme: normalizeString(priorityTitle),
                     dependencies: "",
                     high_level_requirements: "",
                     scope_definition: "",
-                    expected_outcome: priority.expected_impact || "",
+                    expected_outcome: normalizeString(priority.expected_impact || ""),
                     success_metrics: "",
-                    estimated_timeline: priority.timeline || "",
-                    budget_estimate: ""
+                    estimated_timeline: normalizeString(priority.timeline || ""),
+                    budget_estimate: "",
+                    created_at: new Date(),
+                    updated_at: new Date(),
                 };
 
                 const insertedId = await ProjectModel.create(projectData);
