@@ -1684,9 +1684,13 @@ class ProjectController {
         { $set: { status: "prioritizing", updated_at: new Date() } }
       );
 
-      // Kickstart: set all projects to Draft and assumptions to "testing"
+      // Kickstart: set non-launched projects to Draft and assumptions to "testing"
+      // Projects that are already launched (active) must NOT be reset to draft
       await ProjectModel.collection().updateMany(
-        { business_id: new ObjectId(business_id) },
+        {
+          business_id: new ObjectId(business_id),
+          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED }
+        },
         {
           $set: {
             status: PROJECT_STATES.DRAFT,
