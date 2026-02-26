@@ -723,7 +723,17 @@ class ProjectController {
       delete updateData.business_id;
       delete updateData.created_at;
 
+      if (updateData.status === PROJECT_STATES.KILLED) {
+        updateData.ai_rank = null;
+        updateData.ai_rank_score = null;
+        updateData.ai_rank_factors = {};
+      }
+
       await ProjectModel.update(id, updateData);
+
+      if (updateData.status === PROJECT_STATES.KILLED) {
+        await ProjectRankingModel.clearRankingsForProject(id);
+      }
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -1242,11 +1252,16 @@ class ProjectController {
 
       await ProjectModel.update(id, {
         status: PROJECT_STATES.KILLED,
+        ai_rank: null,
+        ai_rank_score: null,
+        ai_rank_factors: {},
         updated_at: new Date()
       });
 
+      await ProjectRankingModel.clearRankingsForProject(id);
+
       res.json({
-        message: "Project killed successfully",
+        message: "Project killed successfully and rankings cleared",
         killed: { id, project_name: found.project_name },
       });
     } catch (err) {
@@ -1320,10 +1335,22 @@ class ProjectController {
         );
       }
 
+      const updateUpdate = { status, updated_at: new Date() };
+
+      if (status === PROJECT_STATES.KILLED) {
+        updateUpdate.ai_rank = null;
+        updateUpdate.ai_rank_score = null;
+        updateUpdate.ai_rank_factors = {};
+      }
+
       await ProjectModel.collection().updateOne(
         { _id: new ObjectId(id) },
-        { $set: { status, updated_at: new Date() } }
+        { $set: updateUpdate }
       );
+
+      if (status === PROJECT_STATES.KILLED) {
+        await ProjectRankingModel.clearRankingsForProject(id);
+      }
 
       res.json({
         message: "Project status updated successfully",
