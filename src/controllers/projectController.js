@@ -1712,11 +1712,12 @@ class ProjectController {
       );
 
       // Kickstart: set non-launched projects to Draft and assumptions to "testing"
-      // Projects that are already launched (active) must NOT be reset to draft
+      // Projects that are already launched (active) or in terminal states (killed/completed) must NOT be reset to draft
       await ProjectModel.collection().updateMany(
         {
           business_id: new ObjectId(business_id),
-          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED }
+          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED },
+          status: { $nin: [PROJECT_STATES.KILLED, PROJECT_STATES.COMPLETED] }
         },
         {
           $set: {
