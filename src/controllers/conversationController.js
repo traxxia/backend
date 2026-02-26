@@ -496,6 +496,83 @@ class ConversationController {
     }
   }
 
+  static async bulkCreate(req, res) {
+    try {
+      const { business_id, answers } = req.body;
+
+      if (!business_id || !answers || !Array.isArray(answers)) {
+        return res.status(400).json({ error: "business_id and answers array are required" });
+      }
+
+      const access = await getBusinessAndValidateAccess(business_id, req.user);
+      if (access.error) return res.status(403).json({ error: access.error });
+
+      const ownerId = new ObjectId(access.ownerId);
+      const businessObjectId = new ObjectId(business_id);
+      const now = new Date();
+
+      const results = [];
+      for (const answer of answers) {
+        const { question_id, answer_text } = answer;
+
+        if (!question_id || !answer_text) continue;
+
+        const questionObjectId = new ObjectId(question_id);
+
+        // Clean up previous entries for this question
+        await ConversationModel.deleteMany({
+          user_id: ownerId,
+          business_id: businessObjectId,
+          question_id: questionObjectId,
+          conversation_type: "question_answer",
+        });
+
+        // Insert new clean answer
+        const payload = {
+          user_id: ownerId,
+          business_id: businessObjectId,
+          question_id: questionObjectId,
+          conversation_type: "question_answer",
+          message_type: "user",
+          message_text: "",
+          answer_text: answer_text.trim(),
+          is_followup: false,
+          metadata: {
+            from_editable_brief: true,
+            is_complete: true,
+            is_edit: true,
+            is_enriched: true,
+            last_edited: now,
+          },
+          created_at: now,
+          updated_at: now,
+        };
+
+        const result = await ConversationModel.create(payload);
+        results.push(result);
+      }
+
+      // Audit log for the bulk operation
+      await logAuditEvent(
+        req.user._id,
+        "questions_bulk_enriched",
+        {
+          business_id,
+          answers_count: results.length,
+        },
+        business_id
+      );
+
+      res.status(201).json({
+        message: `${results.length} answers enriched and saved successfully`,
+        count: results.length,
+      });
+    } catch (error) {
+      console.error("Conversation bulkCreate error:", error);
+      res.status(500).json({ error: "Failed to save enriched conversations" });
+    }
+  }
+
   static async skip(req, res) {
     try {
       const { business_id, question_id } = req.body;
