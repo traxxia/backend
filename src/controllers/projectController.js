@@ -924,16 +924,15 @@ class ProjectController {
 
       const isAdmin = ["company_admin", "super_admin"].includes(req.user.role.role_name);
 
-      // Only restrict collaborators during reprioritizing state
-      // Allow collaborators to rank even when there are launched projects (admins can add new projects)
-      if (business.status === "reprioritizing") {
+      // Enforce reranking access for collaborators during launched or reprioritizing states
+      if (business.status === "launched" || business.status === "reprioritizing") {
         if (!isAdmin) {
           const allowed = await BusinessModel.getAllowedRankingCollaborators(business_id);
           const allowedIds = allowed.map(uid => uid.toString());
 
           if (!allowedIds.includes(user_id.toString())) {
             return res.status(403).json({
-              error: `You are not allowed to rank projects for this business as it is in reprioritizing state. Admin permission required.`,
+              error: `You are not allowed to rank projects for this business as it is in ${business.status} state. Admin permission required.`,
             });
           }
         }
@@ -1712,12 +1711,11 @@ class ProjectController {
       );
 
       // Kickstart: set non-launched projects to Draft and assumptions to "testing"
-      // Projects that are already launched (active) or in terminal states (killed/completed) must NOT be reset to draft
+      // Projects that are already launched (active) must NOT be reset to draft
       await ProjectModel.collection().updateMany(
         {
           business_id: new ObjectId(business_id),
-          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED },
-          status: { $nin: [PROJECT_STATES.KILLED, PROJECT_STATES.COMPLETED] }
+          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED }
         },
         {
           $set: {
