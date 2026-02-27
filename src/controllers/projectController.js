@@ -723,17 +723,7 @@ class ProjectController {
       delete updateData.business_id;
       delete updateData.created_at;
 
-      if (updateData.status === PROJECT_STATES.KILLED) {
-        updateData.ai_rank = null;
-        updateData.ai_rank_score = null;
-        updateData.ai_rank_factors = {};
-      }
-
       await ProjectModel.update(id, updateData);
-
-      if (updateData.status === PROJECT_STATES.KILLED) {
-        await ProjectRankingModel.clearRankingsForProject(id);
-      }
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -945,17 +935,50 @@ class ProjectController {
         })
         .toArray();
 
-      const rankingDocs = projects
-        .filter(p => p.rank !== null && p.rank !== undefined) // Only process projects with valid ranks
+      const allBusinessProjects = await ProjectModel.collection().find({
+        business_id: new ObjectId(business_id)
+      }).toArray();
+
+      const killedProjectIds = allBusinessProjects
+        .filter(p => p.status === PROJECT_STATES.KILLED)
+        .map(p => p._id.toString());
+
+      const incomingRankMap = {};
+      projects.forEach(p => {
+        incomingRankMap[p.project_id.toString()] = p;
+      });
+
+      const finalProjectsToProcess = [...projects];
+      const processedIds = new Set(projects.map(p => p.project_id.toString()));
+
+      killedProjectIds.forEach(killedId => {
+        if (!processedIds.has(killedId)) {
+          finalProjectsToProcess.push({
+            project_id: killedId,
+            rank: null,
+            rationals: ""
+          });
+        }
+      });
+
+      const projectStatusMap = {};
+      allBusinessProjects.forEach(p => {
+        projectStatusMap[p._id.toString()] = p.status;
+      });
+
+      const rankingDocs = finalProjectsToProcess
         .map(p => {
           const projIdStr = p.project_id;
+          const projectStatus = projectStatusMap[projIdStr];
           const existing = existingRankings.find(r => r.project_id.toString() === projIdStr);
+
+          const rank = projectStatus === PROJECT_STATES.KILLED ? null : p.rank;
 
           return {
             user_id: new ObjectId(user_id),
             business_id: new ObjectId(business_id),
             project_id: new ObjectId(projIdStr),
-            rank: p.rank, // Always use the new rank value
+            rank: rank,
             rationals: p.rationals || "",
             locked: existing?.locked || false,
           };
@@ -963,7 +986,6 @@ class ProjectController {
 
       await ProjectRankingModel.bulkUpsert(rankingDocs);
 
-      // updated rankings for response
       const rankedProjects =
         await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
 
@@ -1251,13 +1273,8 @@ class ProjectController {
 
       await ProjectModel.update(id, {
         status: PROJECT_STATES.KILLED,
-        ai_rank: null,
-        ai_rank_score: null,
-        ai_rank_factors: {},
         updated_at: new Date()
       });
-
-      await ProjectRankingModel.clearRankingsForProject(id);
 
       res.json({
         message: "Project killed successfully and rankings cleared",
@@ -1336,20 +1353,10 @@ class ProjectController {
 
       const updateUpdate = { status, updated_at: new Date() };
 
-      if (status === PROJECT_STATES.KILLED) {
-        updateUpdate.ai_rank = null;
-        updateUpdate.ai_rank_score = null;
-        updateUpdate.ai_rank_factors = {};
-      }
-
       await ProjectModel.collection().updateOne(
         { _id: new ObjectId(id) },
         { $set: updateUpdate }
       );
-
-      if (status === PROJECT_STATES.KILLED) {
-        await ProjectRankingModel.clearRankingsForProject(id);
-      }
 
       res.json({
         message: "Project status updated successfully",
@@ -1711,11 +1718,12 @@ class ProjectController {
       );
 
       // Kickstart: set non-launched projects to Draft and assumptions to "testing"
-      // Projects that are already launched (active) must NOT be reset to draft
+      // Projects that are already launched (active) or in terminal states (killed/completed) must NOT be reset to draft
       await ProjectModel.collection().updateMany(
         {
           business_id: new ObjectId(business_id),
-          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED }
+          launch_status: { $ne: PROJECT_LAUNCH_STATUS.LAUNCHED },
+          status: { $nin: [PROJECT_STATES.KILLED, PROJECT_STATES.COMPLETED] }
         },
         {
           $set: {
@@ -1741,7 +1749,21 @@ class ProjectController {
       );
 
       // SECOND: Apply the new rankings
-      const bulkResult = await ProjectModel.bulkUpdateAIRanks(ai_rankings);
+      // We should avoid applying AI ranks to projects that are KILLED or COMPLETED
+      const projectIds_AI = ai_rankings.map(r => new ObjectId(r.project_id));
+      const projectsData_AI = await ProjectModel.collection().find({
+        _id: { $in: projectIds_AI }
+      }, { projection: { status: 1 } }).toArray();
+
+      const projectStatusMap_AI = {};
+      projectsData_AI.forEach(p => projectStatusMap_AI[p._id.toString()] = p.status);
+
+      const filteredAIRankings = ai_rankings.filter(r => {
+        const s = projectStatusMap_AI[r.project_id.toString()];
+        return s !== PROJECT_STATES.KILLED && s !== PROJECT_STATES.COMPLETED;
+      });
+
+      const bulkResult = await ProjectModel.bulkUpdateAIRanks(filteredAIRankings);
 
       res.json({
         message: "AI rankings saved successfully",
