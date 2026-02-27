@@ -980,7 +980,7 @@ class ProjectController {
             project_id: new ObjectId(projIdStr),
             rank: rank,
             rationals: p.rationals || "",
-            locked: existing?.locked || false,
+            locked: true, // Saving is final, automatically lock
           };
         });
 
@@ -1404,9 +1404,12 @@ class ProjectController {
         if (project.business_id.toString() !== business_id) {
           return res.status(400).json({ error: "Project does not belong to business" });
         }
+        // Unlock the project for editing
+        await ProjectModel.update(project_id, { edit_unlocked: true });
+
         return res.json({
           scope: "project",
-          message: "Project edit access will be granted",
+          message: "Project edit access has been granted",
           project_id,
           current_status: project.status,
         });
@@ -1486,6 +1489,83 @@ class ProjectController {
       res.json(response);
     } catch (err) {
       console.error("CHECK ACCESS ERR:", err);
+      res.status(500).json({ error: "Server error", details: err.message });
+    }
+  }
+
+  static async checkAllAccess(req, res) {
+    try {
+      const { business_id } = req.query;
+      const user_id = req.user._id;
+
+      if (!ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Invalid business_id" });
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
+      // Check rerank access
+      let hasRerankAccess = false;
+      try {
+        const businessStatus = business.status || "draft";
+        const isRestrictedRankingState = businessStatus === "launched" || businessStatus === "reprioritizing" || businessStatus === "prioritized";
+
+        const allowedRankingCollabs = await BusinessModel.getAllowedRankingCollaborators(business_id);
+        const isAllowedToRank = allowedRankingCollabs.some(id => id.toString() === user_id.toString());
+        
+        if (isAdmin) {
+          hasRerankAccess = true;
+        } else {
+          // Check if the user has already locked their rankings for this business
+          const rankings = await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
+          const hasLockedRanking = rankings.some(r => r.locked === true);
+          
+          if (isRestrictedRankingState) {
+             hasRerankAccess = isAllowedToRank && !hasLockedRanking;
+          } else {
+             hasRerankAccess = !hasLockedRanking;
+          }
+        }
+      } catch (err) {
+        console.error("Error checking rerank access:", err);
+        hasRerankAccess = isAdmin;
+      }
+
+      // Check edit access for all projects in this business
+      const projects = await ProjectModel.findAll({ business_id: new ObjectId(business_id) });
+      const projectsEditAccess = {};
+
+      projects.forEach(project => {
+        if (isAdmin) {
+           projectsEditAccess[project._id.toString()] = true;
+           return;
+        }
+        
+        const isLaunched = project.launch_status?.toLowerCase() === 'launched';
+        const isActive = project.status?.toLowerCase() === 'active';
+        
+        const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
+          project.allowed_collaborators.some(id => id.toString() === user_id.toString());
+          
+        if ((isLaunched || isActive) && !project.edit_unlocked) {
+           projectsEditAccess[project._id.toString()] = false;
+        } else {
+           projectsEditAccess[project._id.toString()] = isInAllowedCollabs;
+        }
+      });
+
+      res.json({
+        business_id,
+        has_rerank_access: hasRerankAccess,
+        projects_edit_access: projectsEditAccess,
+      });
+    } catch (err) {
+      console.error("CHECK ALL ACCESS ERR:", err);
       res.status(500).json({ error: "Server error", details: err.message });
     }
   }

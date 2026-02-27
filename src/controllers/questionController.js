@@ -24,11 +24,28 @@ class QuestionController {
         return res.status(400).json({ error: 'Order must be a positive integer' });
       }
 
+      const db = require('../config/database').getDB();
+      const resolvedOrder = order || 1;
+
+      // Auto-shift: if a question with the same order already exists in this phase, shift up
+      const collision = await db.collection('global_questions').findOne({
+        is_active: true,
+        phase: phase.trim(),
+        order: resolvedOrder
+      });
+
+      if (collision) {
+        await db.collection('global_questions').updateMany(
+          { is_active: true, phase: phase.trim(), order: { $gte: resolvedOrder } },
+          { $inc: { order: 1 } }
+        );
+      }
+
       const questionData = {
         question_text: question_text.trim(),
         phase: phase.trim(),
         severity: severity.toLowerCase(),
-        order: order || 1,
+        order: resolvedOrder,
         used_for: used_for || '',
         objective: objective || '',
         required_info: required_info || '',
@@ -67,7 +84,14 @@ class QuestionController {
             error: `Invalid phase. Allowed phases are: ${ALLOWED_PHASES.join(', ')}`
           });
         }
-        questionFilter.phase = phase;
+        
+        let phaseFilter = phase;
+        if (phase === 'advanced') {
+          phaseFilter = { $in: ['initial', 'essential', 'advanced'] };
+        } else if (phase === 'essential') {
+          phaseFilter = { $in: ['initial', 'essential'] };
+        }
+        questionFilter.phase = phaseFilter;
       }
 
       const questions = await QuestionModel.findAll(questionFilter);
@@ -312,9 +336,9 @@ class QuestionController {
 
       const result = await QuestionModel.bulkWrite(bulkOps);
 
-      const updatedQuestions = await QuestionModel.findAll({ 
-        phase: phase, 
-        is_active: true 
+      const updatedQuestions = await QuestionModel.findAll({
+        phase: phase,
+        is_active: true
       });
 
       res.json({
@@ -349,25 +373,21 @@ class QuestionController {
         return res.status(404).json({ error: 'Question not found' });
       }
 
-      const conversationCount = await ConversationModel.countDocuments({ 
-        question_id: new ObjectId(questionId) 
+      // Soft-delete: mark inactive so existing conversation snapshots are preserved
+      const conversationCount = await ConversationModel.countDocuments({
+        question_id: new ObjectId(questionId)
       });
 
-      if (conversationCount > 0) {
-        return res.status(400).json({
-          error: 'Cannot delete question with existing conversations',
-          conversation_count: conversationCount
-        });
-      }
+      const result = await QuestionModel.update(questionId, { is_active: false });
 
-      const result = await QuestionModel.delete(questionId);
-
-      if (result.deletedCount === 0) {
+      if (result.matchedCount === 0) {
         return res.status(500).json({ error: 'Failed to delete question' });
       }
 
       res.json({
         message: 'Question deleted successfully',
+        soft_deleted: true,
+        had_conversations: conversationCount > 0,
         deleted_question: {
           id: questionId,
           question_text: question.question_text,

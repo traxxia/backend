@@ -102,11 +102,6 @@ class ConversationController {
             "Cannot combine business_id and user_id. Business conversations always belong to the business owner.",
         });
       }
-      let questionFilter = { is_active: true };
-      if (phase) questionFilter.phase = phase;
-
-      const questions = await QuestionModel.findAll(questionFilter);
-
       let businessInfo = null;
       let documentInfo = null;
       let ownerIdToUse = requestedUserId;
@@ -196,102 +191,159 @@ class ConversationController {
         ...(phase && { "metadata.phase": phase }),
       });
 
-      //BUILD QUESTION RESPONSE
-      const result = questions.map((question) => {
-        const questionConvs = conversations.filter(
-          (c) =>
-            c.question_id &&
-            c.question_id.toString() === question._id.toString()
-        );
+      // BUILD QUESTION LIST
+      // We want to show:
+      // 1. ALL active questions for the requested phase(s) - cumulative approach
+      // 2. Any questions the user has previously interacted with (even if inactive/soft-deleted)
+      
+      const questionIdMap = new Map(); // question_id string -> question doc
+      const db = require('../config/database').getDB();
 
-        const allEntries = questionConvs.sort(
-          (a, b) => new Date(a.created_at) - new Date(b.created_at)
-        );
+      // Determine cumulative phases
+      let phaseFilter = phase;
+      if (phase === 'advanced') {
+        phaseFilter = { $in: ['initial', 'essential', 'advanced'] };
+      } else if (phase === 'essential') {
+        phaseFilter = { $in: ['initial', 'essential'] };
+      }
 
-        const userAnswers = allEntries.filter(
-          (entry) =>
-            entry.message_type === "user" &&
-            entry.answer_text &&
-            entry.answer_text.trim() !== ""
-        );
+      // Fetch ALL active questions for the cumulative phases
+      const activeQuestions = await db.collection('global_questions')
+        .find({
+          is_active: true,
+          ...(phaseFilter ? { phase: phaseFilter } : {})
+        })
+        .sort({ order: 1 })
+        .toArray();
 
-        const realAnswers = userAnswers.filter(
-          (e) => e.answer_text !== "[Question Skipped]"
-        );
+      // Populate map with active questions
+      for (const q of activeQuestions) {
+        questionIdMap.set(q._id.toString(), q);
+      }
 
-        const skippedAnswers = userAnswers.filter(
-          (e) => e.answer_text === "[Question Skipped]"
-        );
+      // Identify question IDs from existing conversations that aren't in the active list
+      const conversationQuestionIds = conversations
+        .map(conv => conv.question_id?.toString())
+        .filter(qid => qid && !questionIdMap.has(qid));
 
-        const hasRealAnswer = realAnswers.length > 0;
+      if (conversationQuestionIds.length > 0) {
+        // Fetch these additional interacted questions (might be inactive or from other phases)
+        const interactedQuestions = await db.collection('global_questions')
+          .find({
+            _id: { $in: Array.from(new Set(conversationQuestionIds)).map(id => new ObjectId(id)) }
+          })
+          .toArray();
 
-        const latestUserAnswer = hasRealAnswer
-          ? realAnswers[realAnswers.length - 1]
-          : skippedAnswers.length > 0
-            ? skippedAnswers[skippedAnswers.length - 1]
-            : null;
-
-        const isSkipped = !hasRealAnswer && skippedAnswers.length > 0;
-
-        const conversationFlow = [];
-
-        allEntries.forEach((entry) => {
-          if (entry.message_type === "bot" && entry.message_text) {
-            conversationFlow.push({
-              type: "question",
-              text: entry.message_text,
-              timestamp: entry.created_at,
-              is_followup: entry.is_followup || false,
-            });
-          } else if (entry.message_type === "user" && entry.answer_text) {
-            conversationFlow.push({
-              type: "answer",
-              text: entry.answer_text,
-              timestamp: entry.created_at,
-              is_latest: latestUserAnswer && entry._id.toString() === latestUserAnswer._id.toString(),
-              is_followup: entry.is_followup || false,
-              is_edited: entry.metadata?.is_edit === true,
-            });
-          }
-        });
-
-        conversationFlow.sort(
-          (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
-        );
-
-        let status = "incomplete";
-        if (isSkipped) {
-          status = "skipped";
-        } else if (latestUserAnswer?.metadata?.is_complete) {
-          // Explicit completion flag saved in metadata
-          status = "complete";
-        } else if (hasRealAnswer) {
-          // Fallback: treat any real (non-skipped) answer as completed
-          status = "complete";
+        for (const q of interactedQuestions) {
+          questionIdMap.set(q._id.toString(), q);
         }
-        // if (isSkipped) status = "skipped";
-        // else if (latestUserAnswer?.metadata?.is_complete) status = "complete";
+      }
 
-        return {
-          question_id: question._id,
-          question_text: question.question_text,
-          phase: question.phase,
-          order: question.order,
-          conversation_flow: conversationFlow,
-          total_interactions: conversationFlow.length,
-          total_answers: conversationFlow.filter((i) => i.type === "answer")
-            .length,
-          completion_status: status,
-          is_skipped: isSkipped,
-          last_updated: latestUserAnswer
-            ? latestUserAnswer.created_at
-            : allEntries.length > 0
-              ? allEntries[allEntries.length - 1].created_at
-              : null,
-          latest_answer: latestUserAnswer?.answer_text || null,
-          is_edited: latestUserAnswer?.metadata?.is_edit === true,
-        };
-      });
+
+      //BUILD QUESTION RESPONSE
+      const result = Array.from(questionIdMap.entries())
+        .map(([qidStr, question]) => {
+          const questionConvs = conversations.filter(
+            (c) =>
+              c.question_id &&
+              c.question_id.toString() === qidStr
+          );
+
+          // Resolve question text: from doc, or fall back to snapshot stored in conv
+          const resolvedQuestionText =
+            question?.question_text ||
+            questionConvs.find(c => c.question_text_snapshot)?.question_text_snapshot ||
+            '(Question removed)';
+
+          const resolvedPhase = question?.phase || questionConvs[0]?.question_phase_snapshot || 'unknown';
+          const resolvedOrder = question?.order ?? Infinity;
+
+          const allEntries = questionConvs.sort(
+            (a, b) => new Date(a.created_at) - new Date(b.created_at)
+          );
+
+          const userAnswers = allEntries.filter(
+            (entry) =>
+              entry.message_type === "user" &&
+              entry.answer_text &&
+              entry.answer_text.trim() !== ""
+          );
+
+          const realAnswers = userAnswers.filter(
+            (e) => e.answer_text !== "[Question Skipped]"
+          );
+
+          const skippedAnswers = userAnswers.filter(
+            (e) => e.answer_text === "[Question Skipped]"
+          );
+
+          const hasRealAnswer = realAnswers.length > 0;
+
+          const latestUserAnswer = hasRealAnswer
+            ? realAnswers[realAnswers.length - 1]
+            : skippedAnswers.length > 0
+              ? skippedAnswers[skippedAnswers.length - 1]
+              : null;
+
+          const isSkipped = !hasRealAnswer && skippedAnswers.length > 0;
+
+          const conversationFlow = [];
+
+          allEntries.forEach((entry) => {
+            if (entry.message_type === "bot" && entry.message_text) {
+              conversationFlow.push({
+                type: "question",
+                text: entry.message_text,
+                timestamp: entry.created_at,
+                is_followup: entry.is_followup || false,
+              });
+            } else if (entry.message_type === "user" && entry.answer_text) {
+              conversationFlow.push({
+                type: "answer",
+                text: entry.answer_text,
+                timestamp: entry.created_at,
+                is_latest: latestUserAnswer && entry._id.toString() === latestUserAnswer._id.toString(),
+                is_followup: entry.is_followup || false,
+                is_edited: entry.metadata?.is_edit === true,
+              });
+            }
+          });
+
+          conversationFlow.sort(
+            (a, b) => new Date(a.timestamp) - new Date(b.timestamp)
+          );
+
+          let status = "incomplete";
+          if (isSkipped) {
+            status = "skipped";
+          } else if (latestUserAnswer?.metadata?.is_complete) {
+            status = "complete";
+          } else if (hasRealAnswer) {
+            status = "complete";
+          }
+
+          return {
+            question_id: question?._id || qidStr,
+            question_text: resolvedQuestionText,
+            phase: resolvedPhase,
+            order: resolvedOrder,
+            is_deleted: !question?.is_active && question !== null ? true : (question === null),
+            conversation_flow: conversationFlow,
+            total_interactions: conversationFlow.length,
+            total_answers: conversationFlow.filter((i) => i.type === "answer")
+              .length,
+            completion_status: status,
+            is_skipped: isSkipped,
+            last_updated: latestUserAnswer
+              ? latestUserAnswer.created_at
+              : allEntries.length > 0
+                ? allEntries[allEntries.length - 1].created_at
+                : null,
+            latest_answer: latestUserAnswer?.answer_text || null,
+            is_edited: latestUserAnswer?.metadata?.is_edit === true,
+          };
+        })
+        .sort((a, b) => a.order - b.order);
 
       const analysisResultsByPhase = {};
 
@@ -330,7 +382,7 @@ class ConversationController {
       res.json({
         conversations: result,
         phase_analysis: analysisResultsByPhase,
-        total_questions: questions.length,
+        total_questions: result.length,
         completed: result.filter((r) => r.completion_status === "complete")
           .length,
         skipped: result.filter((r) => r.completion_status === "skipped").length,
@@ -448,6 +500,17 @@ class ConversationController {
       }
 
       // === NORMAL MODE (New Answer or Bot Message) ===
+      // Fetch question text snapshot to persist even if question is later soft-deleted
+      let question_text_snapshot = null;
+      let question_phase_snapshot = null;
+      if (question_id) {
+        try {
+          const qDoc = await QuestionModel.findById(question_id);
+          question_text_snapshot = qDoc?.question_text || null;
+          question_phase_snapshot = qDoc?.phase || null;
+        } catch (_) { /* non-fatal */ }
+      }
+
       const payload = {
         user_id: ownerId,
         business_id: new ObjectId(business_id),
@@ -457,6 +520,8 @@ class ConversationController {
         message_text: message_text || null,
         answer_text: answer_text || null,
         is_followup: isBotMessage && metadata.is_followup === true,
+        question_text_snapshot,
+        question_phase_snapshot,
         metadata: {
           ...metadata,
           is_complete: isUserMessage ? is_complete : false,
