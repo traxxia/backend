@@ -36,7 +36,7 @@ class AiHistoryModel {
 
         if (projectId === 'all') {
             // Return all messages for the user, regardless of project_id
-        } else if (projectId) {
+        } else if (projectId && projectId !== 'global' && ObjectId.isValid(projectId)) {
             query.project_id = new ObjectId(projectId);
         } else {
             // Only return messages that have NO project_id (global chat)
@@ -47,6 +47,22 @@ class AiHistoryModel {
             .find(query)
             .sort({ created_at: 1 })
             .toArray();
+    }
+
+    static async clearHistory(userId, projectId) {
+        const coll = this.collection();
+        const query = { user_id: new ObjectId(userId) };
+
+        if (projectId === 'all') {
+            // Delete all messages for the user
+        } else if (projectId && projectId !== 'global' && ObjectId.isValid(projectId)) {
+            query.project_id = new ObjectId(projectId);
+        } else {
+            // Only delete messages that have NO project_id (global chat)
+            query.project_id = { $exists: false };
+        }
+
+        return await coll.deleteMany(query);
     }
 
     static async deleteByProjectId(projectId) {

@@ -14,6 +14,7 @@ router.get("/admin-rank", authenticateToken, ProjectController.getAdminRankings)
 router.post("/lock-rank", authenticateToken, ProjectController.lockRank);
 
 router.get("/check-access", authenticateToken, ProjectController.checkUserAccess);
+router.get("/check-all-access", authenticateToken, ProjectController.checkAllAccess);
 router.get("/granted-access", authenticateToken, ProjectController.getGrantedAccess);
 router.post("/revoke-access", authenticateToken, ProjectController.revokeAccess);
 
