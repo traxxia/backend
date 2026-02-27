@@ -723,7 +723,17 @@ class ProjectController {
       delete updateData.business_id;
       delete updateData.created_at;
 
+      if (updateData.status === PROJECT_STATES.KILLED) {
+        updateData.ai_rank = null;
+        updateData.ai_rank_score = null;
+        updateData.ai_rank_factors = {};
+      }
+
       await ProjectModel.update(id, updateData);
+
+      if (updateData.status === PROJECT_STATES.KILLED) {
+        await ProjectRankingModel.clearRankingsForProject(id);
+      }
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -914,16 +924,15 @@ class ProjectController {
 
       const isAdmin = ["company_admin", "super_admin"].includes(req.user.role.role_name);
 
-      // Only restrict collaborators during reprioritizing state
-      // Allow collaborators to rank even when there are launched projects (admins can add new projects)
-      if (business.status === "reprioritizing") {
+      // Enforce reranking access for collaborators during launched or reprioritizing states
+      if (business.status === "launched" || business.status === "reprioritizing") {
         if (!isAdmin) {
           const allowed = await BusinessModel.getAllowedRankingCollaborators(business_id);
           const allowedIds = allowed.map(uid => uid.toString());
 
           if (!allowedIds.includes(user_id.toString())) {
             return res.status(403).json({
-              error: `You are not allowed to rank projects for this business as it is in reprioritizing state. Admin permission required.`,
+              error: `You are not allowed to rank projects for this business as it is in ${business.status} state. Admin permission required.`,
             });
           }
         }
@@ -1242,11 +1251,16 @@ class ProjectController {
 
       await ProjectModel.update(id, {
         status: PROJECT_STATES.KILLED,
+        ai_rank: null,
+        ai_rank_score: null,
+        ai_rank_factors: {},
         updated_at: new Date()
       });
 
+      await ProjectRankingModel.clearRankingsForProject(id);
+
       res.json({
-        message: "Project killed successfully",
+        message: "Project killed successfully and rankings cleared",
         killed: { id, project_name: found.project_name },
       });
     } catch (err) {
@@ -1320,10 +1334,22 @@ class ProjectController {
         );
       }
 
+      const updateUpdate = { status, updated_at: new Date() };
+
+      if (status === PROJECT_STATES.KILLED) {
+        updateUpdate.ai_rank = null;
+        updateUpdate.ai_rank_score = null;
+        updateUpdate.ai_rank_factors = {};
+      }
+
       await ProjectModel.collection().updateOne(
         { _id: new ObjectId(id) },
-        { $set: { status, updated_at: new Date() } }
+        { $set: updateUpdate }
       );
+
+      if (status === PROJECT_STATES.KILLED) {
+        await ProjectRankingModel.clearRankingsForProject(id);
+      }
 
       res.json({
         message: "Project status updated successfully",

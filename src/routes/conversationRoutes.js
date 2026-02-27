@@ -6,6 +6,7 @@ const { checkWriteAccess } = require('../middleware/subscriptionMiddleware');
 
 router.get('/', authenticateToken, ConversationController.getAll);
 router.post('/', authenticateToken, checkWriteAccess, ConversationController.create);
+router.post('/bulk', authenticateToken, checkWriteAccess, ConversationController.bulkCreate);
 router.post('/skip', authenticateToken, checkWriteAccess, ConversationController.skip);
 router.post('/followup-question', authenticateToken, checkWriteAccess, ConversationController.saveFollowupQuestion);
 router.post('/phase-analysis', authenticateToken, checkWriteAccess, ConversationController.savePhaseAnalysis);

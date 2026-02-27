@@ -33,15 +33,15 @@ class ProjectRankingModel {
     return this.collection().bulkWrite(ops);
   }
 
-  static async lockRank(userId, projectId){
+  static async lockRank(userId, projectId) {
     return this.collection().updateOne(
-      { user_id: new ObjectId(userId), project_id: new ObjectId(projectId)},
-      {$set: { locked: true, updated_at: new Date()}}
+      { user_id: new ObjectId(userId), project_id: new ObjectId(projectId) },
+      { $set: { locked: true, updated_at: new Date() } }
 
     )
   }
 
-  static async isLocked(userId, projectId){
+  static async isLocked(userId, projectId) {
     const doc = await this.collection().findOne({
       user_id: new ObjectId(userId),
       project_id: new ObjectId(projectId)
@@ -60,18 +60,25 @@ class ProjectRankingModel {
   }
 
   static async unlockRankingByBusiness(businessId) {
-  return this.collection().updateMany(
-    { business_id: new ObjectId(businessId) },
-    { $set: { locked: false } }
-  );
-}
+    return this.collection().updateMany(
+      { business_id: new ObjectId(businessId) },
+      { $set: { locked: false } }
+    );
+  }
 
-static async lockRankingByBusiness(businessId) {
-  return this.collection().updateMany(
-    { business_id: new ObjectId(businessId) },
-    { $set: { locked: true } }
-  );
-}
+  static async lockRankingByBusiness(businessId) {
+    return this.collection().updateMany(
+      { business_id: new ObjectId(businessId) },
+      { $set: { locked: true } }
+    );
+  }
+
+  static async clearRankingsForProject(projectId) {
+    return this.collection().updateMany(
+      { project_id: new ObjectId(projectId) },
+      { $set: { rank: null, updated_at: new Date() } }
+    );
+  }
 
 }
 
