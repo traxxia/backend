@@ -88,6 +88,27 @@ class AiHistoryController {
             res.status(500).json({ error: 'Failed to fetch chat history' });
         }
     }
+    /**
+     * Clear chat history.
+     */
+    static async clearChatHistory(req, res) {
+        try {
+            const { projectId } = req.params;
+            const userId = req.user._id;
+
+            // If projectId is provided and is a specific ID (not "global" or "all"), validate project access
+            if (projectId && !['global', 'all'].includes(projectId)) {
+                const access = await AiHistoryController.validateProjectAccess(projectId, req.user);
+                if (access.error) return res.status(403).json({ error: access.error });
+            }
+
+            const result = await AiHistoryModel.clearHistory(userId, projectId);
+            res.json({ message: 'Chat history cleared', deletedCount: result.deletedCount });
+        } catch (error) {
+            console.error('Error clearing chat history:', error);
+            res.status(500).json({ error: 'Failed to clear chat history' });
+        }
+    }
 }
 
 module.exports = AiHistoryController;
