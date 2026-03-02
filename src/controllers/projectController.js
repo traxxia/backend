@@ -782,6 +782,9 @@ class ProjectController {
         { $set: { launch_status: PROJECT_LAUNCH_STATUS.PENDING_LAUNCH, updated_at: new Date() } }
       );
 
+      // NEW: Unlock rankings to allow collaborators to provide input on the new selection
+      await ProjectRankingModel.unlockRankingByBusiness(businessId);
+
       // 3. Admin Ranking Check: Admin must have ranked all selected projects
       const adminRankings = await ProjectRankingModel.collection().find({
         user_id: new ObjectId(req.user._id),
@@ -985,6 +988,11 @@ class ProjectController {
         });
 
       await ProjectRankingModel.bulkUpsert(rankingDocs);
+
+      // NEW: Grant rerank access to this collaborator for restricted states
+      if (!isAdmin) {
+        await BusinessModel.addAllowedRankingCollaborator(business_id, user_id);
+      }
 
       const rankedProjects =
         await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
@@ -1517,18 +1525,18 @@ class ProjectController {
 
         const allowedRankingCollabs = await BusinessModel.getAllowedRankingCollaborators(business_id);
         const isAllowedToRank = allowedRankingCollabs.some(id => id.toString() === user_id.toString());
-        
+
         if (isAdmin) {
           hasRerankAccess = true;
         } else {
           // Check if the user has already locked their rankings for this business
           const rankings = await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
           const hasLockedRanking = rankings.some(r => r.locked === true);
-          
+
           if (isRestrictedRankingState) {
-             hasRerankAccess = isAllowedToRank && !hasLockedRanking;
+            hasRerankAccess = isAllowedToRank && !hasLockedRanking;
           } else {
-             hasRerankAccess = !hasLockedRanking;
+            hasRerankAccess = !hasLockedRanking;
           }
         }
       } catch (err) {
@@ -1542,20 +1550,20 @@ class ProjectController {
 
       projects.forEach(project => {
         if (isAdmin) {
-           projectsEditAccess[project._id.toString()] = true;
-           return;
+          projectsEditAccess[project._id.toString()] = true;
+          return;
         }
-        
+
         const isLaunched = project.launch_status?.toLowerCase() === 'launched';
         const isActive = project.status?.toLowerCase() === 'active';
-        
+
         const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
           project.allowed_collaborators.some(id => id.toString() === user_id.toString());
-          
+
         if ((isLaunched || isActive) && !project.edit_unlocked) {
-           projectsEditAccess[project._id.toString()] = false;
+          projectsEditAccess[project._id.toString()] = false;
         } else {
-           projectsEditAccess[project._id.toString()] = isInAllowedCollabs;
+          projectsEditAccess[project._id.toString()] = isInAllowedCollabs;
         }
       });
 
@@ -1790,6 +1798,9 @@ class ProjectController {
         total_projects: ai_rankings.length,
         metadata: metadata || {}
       });
+
+      // NEW: Unlock rankings when AI rankings are saved (kickstart)
+      await ProjectRankingModel.unlockRankingByBusiness(business_id);
 
       // NEW: Automatically move business to prioritizing phase during kickstart
       await BusinessModel.collection().updateOne(
