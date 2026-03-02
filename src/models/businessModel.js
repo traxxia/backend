@@ -166,6 +166,16 @@ class BusinessModel {
     return business?.allowed_ranking_collaborators || [];
   }
 
+  static async addAllowedRankingCollaborator(businessId, userId) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $addToSet: { allowed_ranking_collaborators: new ObjectId(userId) },
+        $set: { updated_at: new Date() },
+      }
+    );
+  }
+
   static async clearAllowedRankingCollaborators(businessId) {
     return await this.collection().updateOne(
       { _id: new ObjectId(businessId) },
