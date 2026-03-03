@@ -343,7 +343,8 @@ class ConversationController {
             is_edited: latestUserAnswer?.metadata?.is_edit === true,
           };
         })
-        .sort((a, b) => a.order - b.order);
+        .sort((a, b) => a.order - b.order)
+        .filter(q => !q.is_deleted);
 
       const analysisResultsByPhase = {};
 
