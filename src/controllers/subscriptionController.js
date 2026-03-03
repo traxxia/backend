@@ -51,7 +51,7 @@ class SubscriptionController {
             });
 
             // Available Plans
-            const availablePlans = await db.collection('plans').find({ status: 'active' }).toArray();
+            const availablePlans = await db.collection('plans').find({ status: 'active' }).sort({ _id: 1 }).toArray();
 
             // Billing History
             const billingHistory = await db.collection('billing_history')
