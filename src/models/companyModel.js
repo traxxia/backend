@@ -131,7 +131,7 @@ class CompanyModel {
   static async getAITokenUsage(companyId) {
     const db = getDB();
     const company = await db.collection('companies').findOne({ _id: new ObjectId(companyId) });
-    
+
     if (!company) {
       throw new Error('Company not found');
     }
@@ -167,14 +167,15 @@ class CompanyModel {
     return {
       ai_token_usage: currentUsage,
       quotaExceed,
-      quotaResetAt: resetAt
+      quotaResetAt: resetAt,
+      ai_limit: 3000000
     };
   }
 
   static async updateAITokenUsage(companyId, tokensUsed) {
     const db = getDB();
     const company = await db.collection('companies').findOne({ _id: new ObjectId(companyId) });
-    
+
     if (!company) {
       throw new Error('Company not found');
     }
