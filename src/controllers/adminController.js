@@ -626,12 +626,43 @@ class AdminController {
         return res.status(404).json({ error: "Analysis result is empty" });
       }
 
+      // If it's a strategic analysis, we need to fetch other analyses to populate the Action Horizons
+      let phaseAnalysisArray = [];
+      if (analysisType === 'strategic') {
+        const otherAnalyses = await db.collection('user_business_conversations').find({
+          user_id: business.user_id,
+          business_id: new ObjectId(businessId),
+          conversation_type: 'phase_analysis'
+        }).toArray();
+
+        phaseAnalysisArray = otherAnalyses.map(a => {
+          const parsedData = typeof a.analysis_result === 'string'
+            ? JSON.parse(a.analysis_result)
+            : a.analysis_result;
+
+          let type = (a.metadata?.analysis_type || '').toLowerCase();
+          // Standardize types for StrategicAnalysis component
+          if (['porters', 'porter_analysis', 'porters_five_forces'].includes(type)) type = 'porters';
+          if (['pestel', 'pestel_analysis'].includes(type)) type = 'pestel';
+          if (['swot'].includes(type)) type = 'swot';
+          if (['strategic', 'strategic_analysis'].includes(type)) type = 'strategic';
+
+          return {
+            ...a,
+            analysis_type: type,
+            analysis_data: parsedData,
+            analysis_result: parsedData
+          };
+        });
+      }
+
       res.json({
         audit_id: auditEntry._id,
         timestamp: auditEntry.timestamp,
         business_name: business.business_name,
         business_id: business._id,
         analysis_result: conversation.analysis_result,
+        phase_analysis_array: phaseAnalysisArray, // Provide the array for strategic analysis
         analysis_metadata: {
           type: analysisType,
           name: auditEntry.event_data.analysis_name || 'Analysis',
