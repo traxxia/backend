@@ -26,6 +26,7 @@ router.put('/users/:user_id/role', authenticateToken, requireAdmin, AdminControl
 // Question routes
 router.post('/questions', authenticateToken, requireSuperAdmin, QuestionController.create);
 router.get('/questions', authenticateToken, requireAdmin, QuestionController.getAll);
+router.put('/questions/reorder', authenticateToken, requireSuperAdmin, QuestionController.reorder);
 router.put('/questions/:id', authenticateToken, requireSuperAdmin, QuestionController.update);
 router.delete('/questions/:id', authenticateToken, requireSuperAdmin, QuestionController.delete);
 
