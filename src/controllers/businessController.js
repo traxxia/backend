@@ -440,13 +440,17 @@ class BusinessController {
       }
 
       const tierName = await TierService.getUserTier(req.user._id);
-      const limits = TierService.getTierLimits(tierName);
+      const limits = await TierService.getTierLimits(tierName);
       const existingCount = await BusinessModel.countByUserId(req.user._id);
 
       if (existingCount >= limits.max_workspaces) {
         const upgradeMsg = tierName === 'essential' ? ' Upgrade to Advanced for more workspaces.' : '';
         return res.status(403).json({
-          error: `Workspace limit reached for ${tierName} plan. Maximum ${limits.max_workspaces} workspace(s) allowed.${upgradeMsg}`
+          error: `Workspace limit reached for ${tierName} plan. Maximum ${limits.max_workspaces} workspace(s) allowed.${upgradeMsg}`,
+          plan: tierName,
+          limits: {
+            max_workspaces: limits.max_workspaces
+          }
         });
       }
 
@@ -778,7 +782,7 @@ class BusinessController {
       const isAdmin = VALID_ADMIN_ROLES.includes(requesterRole);
 
       const tierName = await TierService.getUserTier(req.user._id);
-      const limits = TierService.getTierLimits(tierName);
+      const limits = await TierService.getTierLimits(tierName);
       const currentCollaboratorsCount = (business.collaborators || []).length;
 
       if (!isAdmin) {

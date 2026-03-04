@@ -178,7 +178,7 @@ class AdminController {
       const db = getDB();
       const currentUsersCount = await db.collection('users').countDocuments({ company_id: companyId });
       const userTier = await TierService.getUserTier(req.user._id);
-      const limits = TierService.getTierLimits(userTier);
+      const limits = await TierService.getTierLimits(userTier);
 
       // For essential plan, max_collaborators is 0. 
       // Total users allowed might be 1 (the owner/admin).
@@ -209,7 +209,8 @@ class AdminController {
           ? role.toLowerCase()
           : "user";
 
-      if (finalRoleName === 'collaborator', 'user', 'viewer') {
+      // Enforce seat limits based on target role
+      if (finalRoleName === 'collaborator') {
         const currentCollaboratorsCount = await db.collection('users').aggregate([
           { $match: { company_id: companyId } },
           {
@@ -221,7 +222,7 @@ class AdminController {
             }
           },
           { $unwind: '$role' },
-          { $match: { 'role.role_name': { $in: ['collaborator', 'user', 'viewer'] } } },
+          { $match: { 'role.role_name': 'collaborator' } },
           { $count: 'count' }
         ]).toArray();
 
@@ -229,6 +230,54 @@ class AdminController {
         if (count >= limits.max_collaborators) {
           return res.status(403).json({
             error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed. Upgrade to Advanced if you need more seats.`
+          });
+        }
+      }
+
+      if (finalRoleName === 'viewer') {
+        const currentViewersCount = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'viewer' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const viewerCount = currentViewersCount[0]?.count || 0;
+        if (viewerCount >= (limits.max_viewers ?? 0)) {
+          return res.status(403).json({
+            error: `Viewer limit reached for ${userTier} plan. Maximum ${limits.max_viewers ?? 0} viewer(s) allowed. Upgrade your plan if you need more viewer seats.`
+          });
+        }
+      }
+
+      if (finalRoleName === 'user') {
+        const currentUsersWithUserRole = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'user' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const userCount = currentUsersWithUserRole[0]?.count || 0;
+        if (userCount >= (limits.max_users ?? 0)) {
+          return res.status(403).json({
+            error: `User limit reached for ${userTier} plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`
           });
         }
       }
@@ -296,9 +345,11 @@ class AdminController {
       const companyId = targetUser.company_id;
 
       const userTier = await TierService.getUserTier(req.user._id); // Assuming the updating admin's tier is the company's tier
-      const limits = TierService.getTierLimits(userTier);
+      const limits = await TierService.getTierLimits(userTier);
 
-      if (role.toLowerCase() === 'collaborator') {
+      const normalizedRole = role.toLowerCase();
+
+      if (normalizedRole === 'collaborator') {
         const currentCollaboratorsCount = await db.collection('users').aggregate([
           { $match: { company_id: companyId } },
           {
@@ -318,6 +369,54 @@ class AdminController {
         if (count >= limits.max_collaborators) {
           return res.status(403).json({
             error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed.`
+          });
+        }
+      }
+
+      if (normalizedRole === 'viewer') {
+        const currentViewersCount = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'viewer' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const viewerCount = currentViewersCount[0]?.count || 0;
+        if (viewerCount >= (limits.max_viewers ?? 0)) {
+          return res.status(403).json({
+            error: `Viewer limit reached for ${userTier} plan. Maximum ${limits.max_viewers ?? 0} viewer(s) allowed.`
+          });
+        }
+      }
+
+      if (normalizedRole === 'user') {
+        const currentUsersWithUserRole = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'user' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const userCount = currentUsersWithUserRole[0]?.count || 0;
+        if (userCount >= (limits.max_users ?? 0)) {
+          return res.status(403).json({
+            error: `User limit reached for ${userTier} plan. Maximum ${limits.max_users ?? 0} user(s) allowed.`
           });
         }
       }

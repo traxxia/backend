@@ -25,7 +25,7 @@ class SubscriptionController {
 
             const company = await db.collection('companies').findOne({ _id: user.company_id });
             const planName = await TierService.getUserTier(userId);
-            const limits = TierService.getTierLimits(planName);
+            const limits = await TierService.getTierLimits(planName);
 
             // 1. Count Businesses
             const currentWorkspaces = await db.collection('user_businesses').countDocuments({
@@ -38,6 +38,20 @@ class SubscriptionController {
             const currentCollaborators = await db.collection('users').countDocuments({
                 company_id: user.company_id,
                 role_id: collabRole?._id
+            });
+
+            // 2b. Count Viewers
+            const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
+            const currentViewers = await db.collection('users').countDocuments({
+                company_id: user.company_id,
+                role_id: viewerRole?._id
+            });
+
+            // 2c. Count Users (role 'user')
+            const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+            const currentUsersWithUserRole = await db.collection('users').countDocuments({
+                company_id: user.company_id,
+                role_id: userRole?._id
             });
 
             // 3. Count Projects
@@ -118,7 +132,7 @@ class SubscriptionController {
                 available_plans: availablePlans.map(p => ({
                     _id: p._id,
                     name: p.name,
-                    price: p.price_usd || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
+                    price: p.price || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
                     features: p.features || []
                 })),
                 billing_history: billingHistory.map(bh => ({
@@ -134,6 +148,14 @@ class SubscriptionController {
                     collaborators: {
                         current: currentCollaborators,
                         limit: limits.max_collaborators
+                    },
+                    users: {
+                        current: currentUsersWithUserRole,
+                        limit: limits.max_users ?? 0
+                    },
+                    viewers: {
+                        current: currentViewers,
+                        limit: limits.max_viewers ?? 0
                     },
                     projects: {
                         current: currentProjects,
@@ -573,8 +595,7 @@ class SubscriptionController {
             const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
             if (!newPlan) return res.status(404).json({ error: 'Plan not found' });
 
-
-            const limits = TIER_LIMITS[newPlan.name.toLowerCase()] || TIER_LIMITS.essential;
+            const limits = TierService.getLimitsForPlan(newPlan);
 
             // 1. Validate limits
             const companyUsers = await db.collection('users')
@@ -589,7 +610,13 @@ class SubscriptionController {
             });
 
             if (activeBusinessesCount + reactivate_business_ids.length > limits.max_workspaces) {
-                return res.status(400).json({ error: `You can only have ${limits.max_workspaces} active workspaces.` });
+                return res.status(400).json({
+                    error: `You can only have ${limits.max_workspaces} active workspaces for this plan.`,
+                    plan: newPlan.name,
+                    limits: {
+                        max_workspaces: limits.max_workspaces
+                    }
+                });
             }
 
             // 2. Reactivate Businesses
