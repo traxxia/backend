@@ -4,6 +4,7 @@ const TierService = require('../services/tierService');
 const StripeService = require('../services/stripeService');
 const { TIER_LIMITS } = require('../config/constants');
 
+
 class SubscriptionController {
     static async getDetails(req, res) {
         try {
@@ -24,6 +25,7 @@ class SubscriptionController {
             }
 
             const company = await db.collection('companies').findOne({ _id: user.company_id });
+
             const planName = await TierService.getUserTier(userId);
             const limits = TierService.getTierLimits(planName);
 
@@ -60,13 +62,13 @@ class SubscriptionController {
                 .toArray();
 
             // Expiration Logic
-            let expiresAt = company?.expires_at;
-            let status = company?.status || 'active';
+            let expiresAt = company?.subscription_end_date || company?.expires_at;
+            let startDate = company?.subscription_start_date || company?.created_at || user.created_at || new Date();
+            let status = company?.subscription_status || company?.status || 'active';
 
             // If no expiration date (legacy data), set one based on created_at or give 30 days grace from now
             if (!expiresAt) {
-                const baseDate = company?.created_at || user.created_at || new Date();
-                expiresAt = new Date(baseDate);
+                expiresAt = new Date(startDate);
                 expiresAt.setMonth(expiresAt.getMonth() + 1);
             }
 
@@ -82,8 +84,6 @@ class SubscriptionController {
                 // Ensure status is active for unlimited plans if it was somehow marked expired
                 status = 'active';
             }
-
-            const startDate = company?.created_at || user.created_at || new Date();
 
             // Fetch Payment Method Details if available
             let paymentMethods = [];
@@ -406,6 +406,34 @@ class SubscriptionController {
             }
 
             const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            // --- INSTANT RENEWAL TRIGGER ---
+            // If the DB says the plan is expiring soon (or already expired), 
+            // and we have a Stripe subscription, we force Stripe to renew NOW.
+            if (company?.stripe_subscription_id && company.subscription_status === 'active') {
+                const now = new Date();
+                const expiry = company.subscription_end_date ? new Date(company.subscription_end_date) : null;
+
+                // If expiry is missing, or in the past, or expires within 24 hours
+                if (!expiry || expiry < new Date(now.getTime() + 24 * 60 * 60 * 1000)) {
+                    try {
+                        console.log(`Plan for ${company.company_name} is due. Triggering instant Stripe renewal...`);
+
+                        // Tell Stripe to reset the billing cycle to "NOW"
+                        // This forces an immediate invoice and payment attempt.
+                        await StripeService.updateSubscription(company.stripe_subscription_id, {
+                            billing_cycle_anchor: 'now',
+                            proration_behavior: 'always_invoice'
+                        });
+
+                        console.log("Stripe renewal triggered successfully.");
+                        // Note: The Webhook will handle updating the DB with the new dates shortly.
+                    } catch (stripeError) {
+                        console.error("Failed to trigger instant renewal:", stripeError.message);
+                    }
+                }
+            }
+
             const currentPlan = await db.collection('plans').findOne({ _id: company?.plan_id });
             const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
 

@@ -5,21 +5,30 @@ class CompanyModel {
   static async create(companyData) {
     const db = getDB();
     const createdAt = new Date();
-    const expiresAt = new Date(createdAt);
+
+    // Default expiry is 1 month from now
+    let expiresAt = new Date(createdAt);
     expiresAt.setMonth(expiresAt.getMonth() + 1);
 
+    // If Stripe data provides an end date, use it for expires_at
+    if (companyData.subscription_end_date) {
+      expiresAt = new Date(companyData.subscription_end_date);
+    }
+
     const result = await db.collection('companies').insertOne({
-      ...companyData,
       status: 'active',
-      subscription_status: 'active',
-      stripe_customer_id: companyData.stripe_customer_id || null,
-      stripe_subscription_id: companyData.stripe_subscription_id || null,
-      stripe_payment_method_id: companyData.stripe_payment_method_id || null,
+      subscription_status: 'active', // Default, can be overridden by ...companyData
+      ...companyData,
       ai_token_usage: 0,
       quotaExceed: false,
       quotaResetAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       created_at: createdAt,
-      expires_at: expiresAt
+      expires_at: expiresAt,
+      // Initialize these even if Stripe is not used, so they aren't null in the DB
+      stripe_customer_id: companyData.stripe_customer_id || null,
+      stripe_subscription_id: companyData.stripe_subscription_id || null,
+      subscription_start_date: companyData.subscription_start_date || createdAt,
+      subscription_end_date: companyData.subscription_end_date || expiresAt,
     });
     return result.insertedId;
   }
@@ -210,6 +219,22 @@ class CompanyModel {
       quotaExceed,
       quotaResetAt: resetAt
     };
+  }
+
+  static async updateById(companyId, updateData) {
+    const db = getDB();
+    return await db.collection('companies').updateOne(
+      { _id: new ObjectId(companyId) },
+      { $set: { ...updateData, updated_at: new Date() } }
+    );
+  }
+
+  static async updateSubscriptionByStripeId(stripeSubscriptionId, updateData) {
+    const db = getDB();
+    return await db.collection('companies').updateOne(
+      { stripe_subscription_id: stripeSubscriptionId },
+      { $set: { ...updateData, updated_at: new Date() } }
+    );
   }
 }
 

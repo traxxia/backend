@@ -6,6 +6,7 @@ const UserModel = require('../models/userModel');
 const CompanyModel = require("../models/companyModel")
 const { logAuditEvent } = require('../services/auditService');
 const TierService = require('../services/tierService');
+const { TIER_LIMITS } = require('../config/constants');
 
 const StripeService = require('../services/stripeService');
 
@@ -133,6 +134,35 @@ class AuthController {
                 companyData.stripe_subscription_id = subscription.id;
                 companyData.stripe_payment_method_id = paymentMethodId;
                 companyData.subscription_status = subscription.status;
+                companyData.subscription_plan = planDoc.name; // Store plan name for easier logging later
+
+                // Track start and end dates from Stripe
+                companyData.subscription_start_date = subscription.current_period_start
+                  ? new Date(subscription.current_period_start * 1000)
+                  : new Date();
+
+                companyData.subscription_end_date = subscription.current_period_end
+                  ? new Date(subscription.current_period_end * 1000)
+                  : (() => {
+                    const d = new Date();
+                    d.setMonth(d.getMonth() + 1);
+                    return d;
+                  })();
+
+                companyData.expires_at = companyData.subscription_end_date;
+
+                // Log initial billing history
+                const registrationAmount = planDoc.price_usd || (planDoc.name ? TIER_LIMITS[planDoc.name.toLowerCase()]?.price_usd : 0) || 0;
+
+                await db.collection('billing_history').insertOne({
+                  stripe_subscription_id: subscription.id,
+                  amount: registrationAmount,
+                  currency: 'usd',
+                  date: new Date(),
+                  type: 'initial_payment',
+                  plan_name: planDoc.name
+                  // We'll add company_id below once we have it
+                });
               } else {
                 console.warn('Plan does not have a stripe_price_id, skipping Stripe subscription creation.');
               }
@@ -144,6 +174,14 @@ class AuthController {
         }
 
         finalCompanyId = await CompanyModel.create(companyData);
+
+        // Update the initial billing history with the company_id
+        if (companyData.stripe_subscription_id) {
+          await db.collection('billing_history').updateOne(
+            { stripe_subscription_id: companyData.stripe_subscription_id, company_id: { $exists: false } },
+            { $set: { company_id: finalCompanyId } }
+          );
+        }
 
         const adminRole = await db.collection('roles').findOne({ role_name: 'company_admin' });
         finalRoleId = adminRole._id;
