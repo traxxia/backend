@@ -762,7 +762,7 @@ class AdminController {
         return (a.order || 0) - (b.order || 0);
       });
 
-      // Get business and document information (same as conversations endpoint)
+      // Get business and document information
       let businessInfo = null;
       let documentInfo = null;
 
@@ -829,7 +829,7 @@ class AdminController {
         }
       }
 
-      // Transform conversations into phases structure (simplified version)
+      // Transform conversations into phases structure
       const phaseMap = new Map();
 
       questions.forEach((question) => {
@@ -916,10 +916,28 @@ class AdminController {
         (phase) => phase.questions.length > 0
       );
 
-      // Transform phase analysis
+      // Helper to detect errored analysis result
+      const isErroredAnalysis = (analysisResult) => {
+        if (!analysisResult) return false;
+        if (typeof analysisResult === 'object' && analysisResult.error) return true;
+        if (typeof analysisResult === 'string') {
+          try {
+            const parsed = JSON.parse(analysisResult);
+            return !!(parsed && parsed.error);
+          } catch {
+            return false;
+          }
+        }
+        return false;
+      };
+
+      // Transform phase analysis — skip errored results entirely
       const analysisResultsByPhase = {};
 
       phaseAnalysis.forEach((analysis) => {
+        // Skip analyses that contain errors — don't store them or let them overwrite good data
+        if (isErroredAnalysis(analysis.analysis_result)) return;
+
         const analysisPhase = analysis.metadata?.phase || "initial";
         const analysisType = analysis.metadata?.analysis_type || "unknown";
 
