@@ -4,6 +4,7 @@ const TierService = require('../services/tierService');
 const StripeService = require('../services/stripeService');
 const { TIER_LIMITS } = require('../config/constants');
 
+
 class SubscriptionController {
     static async getDetails(req, res) {
         try {
@@ -24,6 +25,7 @@ class SubscriptionController {
             }
 
             const company = await db.collection('companies').findOne({ _id: user.company_id });
+
             const planName = await TierService.getUserTier(userId);
             const limits = TierService.getTierLimits(planName);
 
@@ -60,13 +62,13 @@ class SubscriptionController {
                 .toArray();
 
             // Expiration Logic
-            let expiresAt = company?.expires_at;
-            let status = company?.status || 'active';
+            let expiresAt = company?.subscription_end_date || company?.expires_at;
+            let startDate = company?.subscription_start_date || company?.created_at || user.created_at || new Date();
+            let status = company?.subscription_status || company?.status || 'active';
 
             // If no expiration date (legacy data), set one based on created_at or give 30 days grace from now
             if (!expiresAt) {
-                const baseDate = company?.created_at || user.created_at || new Date();
-                expiresAt = new Date(baseDate);
+                expiresAt = new Date(startDate);
                 expiresAt.setMonth(expiresAt.getMonth() + 1);
             }
 
@@ -82,8 +84,6 @@ class SubscriptionController {
                 // Ensure status is active for unlimited plans if it was somehow marked expired
                 status = 'active';
             }
-
-            const startDate = company?.created_at || user.created_at || new Date();
 
             // Fetch Payment Method Details if available
             let paymentMethods = [];
@@ -346,18 +346,56 @@ class SubscriptionController {
                 }
             }
 
-            // Normal upgrade/downgrade (no selection needed)
-            const now = new Date();
-            const expiresAt = new Date(now);
-            expiresAt.setMonth(expiresAt.getMonth() + 1);
+            // 6. Sync with Stripe
+            let stripeSubscriptionId = company?.stripe_subscription_id;
+            let periodStart = new Date();
+            let periodEnd = new Date(periodStart);
+            periodEnd.setMonth(periodEnd.getMonth() + 1);
 
+            if (newPlan.stripe_price_id) {
+                try {
+                    if (stripeSubscriptionId) {
+                        // Update existing subscription
+                        console.log(`Updating Stripe subscription ${stripeSubscriptionId} to price ${newPlan.stripe_price_id}`);
+                        const subscription = await StripeService.updateSubscription(stripeSubscriptionId, {
+                            items: [{
+                                id: (await StripeService.retrieveSubscription(stripeSubscriptionId)).items.data[0].id,
+                                price: newPlan.stripe_price_id,
+                            }],
+                            proration_behavior: 'always_invoice',
+                        });
+                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
+                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                    } else if (company?.stripe_customer_id) {
+                        // Create new subscription
+                        console.log(`Creating new Stripe subscription for customer ${company.stripe_customer_id} with price ${newPlan.stripe_price_id}`);
+                        const subscription = await StripeService.createSubscription(
+                            company.stripe_customer_id,
+                            newPlan.stripe_price_id,
+                            company.stripe_payment_method_id
+                        );
+                        stripeSubscriptionId = subscription.id;
+                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
+                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                    }
+                } catch (stripeError) {
+                    console.error('Stripe sync failed during upgrade:', stripeError);
+                    // We continue for now to keep local DB updated, but ideally we should handle this
+                }
+            }
+
+            // Normal upgrade/downgrade (no selection needed)
             const result = await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
                     $set: {
                         plan_id: new ObjectId(plan_id),
-                        updated_at: now,
-                        expires_at: expiresAt,
+                        subscription_plan: newPlan.name,
+                        stripe_subscription_id: stripeSubscriptionId,
+                        subscription_start_date: periodStart,
+                        subscription_end_date: periodEnd,
+                        expires_at: periodEnd,
+                        updated_at: new Date(),
                         status: 'active' // Reactivate if expired
                     }
                 }
@@ -373,7 +411,8 @@ class SubscriptionController {
                 plan_name: newPlan.name,
                 amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
                 date: new Date(),
-                type: 'upgrade'
+                type: 'upgrade',
+                stripe_subscription_id: stripeSubscriptionId
             });
 
             // Return updated details
@@ -406,6 +445,34 @@ class SubscriptionController {
             }
 
             const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            // --- INSTANT RENEWAL TRIGGER ---
+            // If the DB says the plan is expiring soon (or already expired), 
+            // and we have a Stripe subscription, we force Stripe to renew NOW.
+            if (company?.stripe_subscription_id && company.subscription_status === 'active') {
+                const now = new Date();
+                const expiry = company.subscription_end_date ? new Date(company.subscription_end_date) : null;
+
+                // If expiry is missing, or in the past, or expires within 24 hours
+                if (!expiry || expiry < new Date(now.getTime() + 24 * 60 * 60 * 1000)) {
+                    try {
+                        console.log(`Plan for ${company.company_name} is due. Triggering instant Stripe renewal...`);
+
+                        // Tell Stripe to reset the billing cycle to "NOW"
+                        // This forces an immediate invoice and payment attempt.
+                        await StripeService.updateSubscription(company.stripe_subscription_id, {
+                            billing_cycle_anchor: 'now',
+                            proration_behavior: 'always_invoice'
+                        });
+
+                        console.log("Stripe renewal triggered successfully.");
+                        // Note: The Webhook will handle updating the DB with the new dates shortly.
+                    } catch (stripeError) {
+                        console.error("Failed to trigger instant renewal:", stripeError.message);
+                    }
+                }
+            }
+
             const currentPlan = await db.collection('plans').findOne({ _id: company?.plan_id });
             const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
 
@@ -503,18 +570,43 @@ class SubscriptionController {
                 );
             }
 
-            // 6. Update company plan
-            const now = new Date();
-            const expiresAt = new Date(now);
-            expiresAt.setMonth(expiresAt.getMonth() + 1);
+            // 6. Sync with Stripe
+            let stripeSubscriptionId = company?.stripe_subscription_id;
+            let periodStart = new Date();
+            let periodEnd = new Date(periodStart);
+            periodEnd.setMonth(periodEnd.getMonth() + 1);
 
+            if (newPlan.stripe_price_id) {
+                try {
+                    if (stripeSubscriptionId) {
+                        console.log(`Updating Stripe subscription ${stripeSubscriptionId} to price ${newPlan.stripe_price_id} (Downgrade)`);
+                        const subscription = await StripeService.updateSubscription(stripeSubscriptionId, {
+                            items: [{
+                                id: (await StripeService.retrieveSubscription(stripeSubscriptionId)).items.data[0].id,
+                                price: newPlan.stripe_price_id,
+                            }],
+                            proration_behavior: 'always_invoice',
+                        });
+                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
+                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                    }
+                } catch (stripeError) {
+                    console.error('Stripe sync failed during downgrade:', stripeError);
+                }
+            }
+
+            // 7. Update company plan
             await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
                     $set: {
                         plan_id: new ObjectId(plan_id),
-                        updated_at: now,
-                        expires_at: expiresAt,
+                        subscription_plan: newPlan.name,
+                        stripe_subscription_id: stripeSubscriptionId,
+                        subscription_start_date: periodStart,
+                        subscription_end_date: periodEnd,
+                        expires_at: periodEnd,
+                        updated_at: new Date(),
                         status: 'active'
                     }
                 }
@@ -526,7 +618,8 @@ class SubscriptionController {
                 plan_name: newPlan.name,
                 amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
                 date: new Date(),
-                type: 'downgrade'
+                type: 'downgrade',
+                stripe_subscription_id: stripeSubscriptionId
             });
 
             // 7. Audit log
@@ -638,18 +731,54 @@ class SubscriptionController {
                 );
             }
 
-            // 4. Finally update the plan
-            const now = new Date();
-            const expiresAt = new Date(now);
-            expiresAt.setMonth(expiresAt.getMonth() + 1);
+            // 4. Sync with Stripe
+            const company = await db.collection('companies').findOne({ _id: user.company_id });
+            let stripeSubscriptionId = company?.stripe_subscription_id;
+            let periodStart = new Date();
+            let periodEnd = new Date(periodStart);
+            periodEnd.setMonth(periodEnd.getMonth() + 1);
 
+            if (newPlan.stripe_price_id) {
+                try {
+                    if (stripeSubscriptionId) {
+                        console.log(`Updating Stripe subscription ${stripeSubscriptionId} to price ${newPlan.stripe_price_id} (Reactivation)`);
+                        const subscription = await StripeService.updateSubscription(stripeSubscriptionId, {
+                            items: [{
+                                id: (await StripeService.retrieveSubscription(stripeSubscriptionId)).items.data[0].id,
+                                price: newPlan.stripe_price_id,
+                            }],
+                            proration_behavior: 'always_invoice',
+                        });
+                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
+                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                    } else if (company?.stripe_customer_id) {
+                        console.log(`Creating Stripe subscription for ${company.stripe_customer_id} (Reactivation)`);
+                        const subscription = await StripeService.createSubscription(
+                            company.stripe_customer_id,
+                            newPlan.stripe_price_id,
+                            company.stripe_payment_method_id
+                        );
+                        stripeSubscriptionId = subscription.id;
+                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
+                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                    }
+                } catch (stripeError) {
+                    console.error('Stripe sync failed during reactivation:', stripeError);
+                }
+            }
+
+            // 5. Finally update the plan
             await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
                     $set: {
                         plan_id: new ObjectId(plan_id),
-                        updatedAt: now,
-                        expires_at: expiresAt,
+                        subscription_plan: newPlan.name,
+                        stripe_subscription_id: stripeSubscriptionId,
+                        subscription_start_date: periodStart,
+                        subscription_end_date: periodEnd,
+                        expires_at: periodEnd,
+                        updated_at: new Date(),
                         status: 'active'
                     }
                 }
@@ -661,7 +790,8 @@ class SubscriptionController {
                 plan_name: newPlan.name,
                 amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
                 date: new Date(),
-                type: 'reactivation'
+                type: 'reactivation',
+                stripe_subscription_id: stripeSubscriptionId
             });
 
             // Return updated details

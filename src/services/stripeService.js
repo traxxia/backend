@@ -100,6 +100,38 @@ class StripeService {
             throw error;
         }
     }
+
+    static async retrieveSubscription(subscriptionId) {
+        try {
+            return await stripe.subscriptions.retrieve(subscriptionId);
+        } catch (error) {
+            console.error("Error retrieving subscription:", error);
+            throw error;
+        }
+    }
+
+    static async updateSubscription(subscriptionId, updateData) {
+        try {
+            console.log(`[Stripe] 📤 Updating Subscription ${subscriptionId}:`, JSON.stringify(updateData));
+            // Expand latest_invoice to get the invoice URL immediately for proactive sync
+            return await stripe.subscriptions.update(subscriptionId, {
+                ...updateData,
+                expand: ['latest_invoice']
+            });
+        } catch (error) {
+            console.error("Error updating subscription:", error);
+            throw error;
+        }
+    }
+
+    static constructEvent(payload, sig, secret) {
+        try {
+            return stripe.webhooks.constructEvent(payload, sig, secret);
+        } catch (error) {
+            console.error('Webhook signature verification failed:', error.message);
+            throw error;
+        }
+    }
 }
 
 module.exports = StripeService;
