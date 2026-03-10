@@ -61,7 +61,7 @@ class ProjectModel {
     const userMap = {};
     users.forEach((user) => {
       if (user) {
-        const name = user.name?.trim() || user.email || "Unknown User";
+        const name = user.name?.trim() || "User";
         userMap[user._id.toString()] = name;
       }
     });

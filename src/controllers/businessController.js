@@ -654,6 +654,54 @@ class BusinessController {
     }
   }
 
+  static async getEligibleOwners(req, res) {
+    try {
+      const businessId = req.params.id;
+
+      if (!ObjectId.isValid(businessId)) {
+        return res.status(400).json({ error: "Invalid business id" });
+      }
+
+      const business = await BusinessModel.findById(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Check if user has access to this business
+      const isOwner = business.user_id && business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = (business.collaborators || []).some(
+        (id) => id.toString() === req.user._id.toString()
+      );
+      const isAdmin = ["super_admin", "company_admin"].includes(req.user.role.role_name);
+
+      if (!isOwner && !isCollaborator && !isAdmin) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const ownerId = business.user_id;
+      const collaboratorIds = business.collaborators || [];
+      const allEligibleIds = [ownerId, ...collaboratorIds];
+
+      const users = await UserModel.getAll({
+        _id: { $in: allEligibleIds.map(id => new ObjectId(id)) }
+      });
+
+      const response = users.map(u => ({
+  _id: u._id,
+  name: u.name || u.email,
+  email: u.email,
+  role: u.role_name,
+  is_business_owner: u._id.toString() === ownerId.toString(),
+  is_company_admin: u.role_name === "company_admin"
+}));
+
+      res.json({ eligible_owners: response });
+    } catch (err) {
+      console.error("GET eligible owners error:", err);
+      res.status(500).json({ error: "Failed to fetch eligible owners" });
+    }
+  }
+
   static async setAllowedCollaborators(req, res) {
     try {
       const { businessId, projectId } = req.params;

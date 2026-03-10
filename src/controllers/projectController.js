@@ -72,6 +72,60 @@ function normalizeBudget(value) {
 }
 
 class ProjectController {
+  static _resolveOwner(project, ownerNameMap = {}, bizOwnerFallbackMap = {}) {
+    let ownerName = project.accountable_owner;
+
+    if (project.accountable_owner_id && ownerNameMap[project.accountable_owner_id.toString()]) {
+      ownerName = ownerNameMap[project.accountable_owner_id.toString()];
+    }
+
+    if (!ownerName || ownerName === "Unassigned") {
+      const fallingBackToBizOwner = bizOwnerFallbackMap[project.business_id?.toString()];
+      ownerName = fallingBackToBizOwner || project.created_by;
+    }
+
+    if (!ownerName || ownerName === "Unassigned") {
+      ownerName = project.created_by || "Unassigned";
+    }
+
+    if (ownerName === "User" || ownerName === "Unknown User") {
+      const fallback = bizOwnerFallbackMap[project.business_id?.toString()];
+      ownerName = fallback || "Company Admin";
+    }
+
+    return ownerName;
+  }
+
+  static async _getOwnerNames(projects) {
+    const db = getDB();
+    const uniqueBusinessIds = [...new Set(projects.map(p => p.business_id?.toString()).filter(Boolean))];
+    const businesses = await db.collection("user_businesses")
+      .find({ _id: { $in: uniqueBusinessIds.map(id => new ObjectId(id)) } })
+      .toArray();
+
+    const businessesMap = {};
+    businesses.forEach(b => businessesMap[b._id.toString()] = b);
+
+    const bOwnerIds = [...new Set(businesses.map(b => b.user_id?.toString()).filter(Boolean))];
+    const bOwners = await UserModel.getAll({ _id: { $in: bOwnerIds.map(id => new ObjectId(id)) } });
+    const bOwnerNames = {};
+    bOwners.forEach(u => {
+      bOwnerNames[u._id.toString()] = u.name || (u.role_name === 'company_admin' ? "Company Admin" : "Business Owner");
+    });
+
+    const bizOwnerFallbackMap = {};
+    businesses.forEach(b => {
+      if (b.user_id) bizOwnerFallbackMap[b._id.toString()] = bOwnerNames[b.user_id.toString()];
+    });
+
+    const uniqueOwnerIds = [...new Set(projects.map(p => p.accountable_owner_id?.toString()).filter(Boolean))];
+    const ownerUsersInfo = await UserModel.getAll({ _id: { $in: uniqueOwnerIds.map(id => new ObjectId(id)) } });
+    const ownerNameMap = {};
+    ownerUsersInfo.forEach(u => ownerNameMap[u._id.toString()] = u.name || (u.role_name === 'company_admin' ? "Company Admin" : "User"));
+
+    return { ownerNameMap, bizOwnerFallbackMap, businessesMap };
+  }
+
   static async getAll(req, res) {
     const db = getDB();
 
@@ -122,17 +176,11 @@ class ProjectController {
       const total = await ProjectModel.count(filter);
       let projects = await ProjectModel.populateCreatedBy(raw);
 
-      let businessStatus = null;
-      let businessAccessMode = null;
-      if (business_id && ObjectId.isValid(business_id)) {
-        const business = await BusinessModel.findById(business_id);
-        if (business) {
-          businessStatus = business.status;
-          businessAccessMode = business.access_mode;
-        }
-      }
-
       const projectIds = projects.map(p => p._id);
+
+      const { ownerNameMap, bizOwnerFallbackMap, businessesMap } = await ProjectController._getOwnerNames(projects);
+
+
       const allLogs = await db.collection("decision_logs")
         .find({ project_id: { $in: projectIds } })
         .sort({ changed_at: -1 })
@@ -145,6 +193,7 @@ class ProjectController {
         logsByProject[idStr].push(log);
       });
 
+
       projects = projects.map(project => {
         let cleanDesc = project.description || "";
         if (cleanDesc.startsWith("PMF Tactical Action:")) {
@@ -153,14 +202,26 @@ class ProjectController {
             .split('\n')[0];
         }
 
+        const ownerName = ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap);
+
         return {
           ...project,
           description: cleanDesc,
+          accountable_owner: ownerName,
           allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
           status: project.status, // Ensure status is returned
           decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []) // fallback to embedded if still there
         };
       });
+
+      // Get status and access mode from the primary requested business context if applicable
+      let businessStatus = null;
+      let businessAccessMode = null;
+      if (business_id && ObjectId.isValid(business_id) && businessesMap[business_id.toString()]) {
+        const b = businessesMap[business_id.toString()];
+        businessStatus = b.status;
+        businessAccessMode = b.access_mode;
+      }
 
       let ranking_lock_summary = {
         locked_users_count: 0,
@@ -237,7 +298,11 @@ class ProjectController {
 
       const [project] = await ProjectModel.populateCreatedBy(raw);
 
+      const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames([project]);
+      project.accountable_owner = ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap);
+
       // Attach decision logs from the separate collection
+      const DecisionLogModel = require("../models/decisionLogModel");
       project.decision_log = await DecisionLogModel.findByProjectId(id);
 
       res.json({ project });
@@ -276,7 +341,8 @@ class ProjectController {
         learning_state,
         last_reviewed,
         constraints_non_negotiables,
-        explicitly_out_of_scope
+        explicitly_out_of_scope,
+        accountable_owner_id
       } = req.body;
 
       // Required fields
@@ -432,15 +498,20 @@ class ProjectController {
         description: normalizeString(description),
         why_this_matters: normalizeString(why_this_matters),
         strategic_decision: normalizeString(strategic_decision),
-        accountable_owner: normalizeString(accountable_owner),
+        accountable_owner: await (async () => {
+          if (accountable_owner_id && ObjectId.isValid(accountable_owner_id)) {
+            const ownerUser = await UserModel.findById(accountable_owner_id);
+            if (ownerUser) return ownerUser.name || ownerUser.email;
+          }
+          return normalizeString(accountable_owner);
+        })(),
         key_assumptions: Array.isArray(key_assumptions)
           ? key_assumptions.slice(0, 3).map(normalizeString)
           : [],
-        learning_state: "testing",
         success_criteria: normalizeString(success_criteria),
         kill_criteria: normalizeString(kill_criteria),
         review_cadence: normalizeString(review_cadence),
-
+        accountable_owner_id: accountable_owner_id ? new ObjectId(accountable_owner_id) : null,
         status: status || PROJECT_STATES.DRAFT,
         launch_status: PROJECT_LAUNCH_STATUS.UNLAUNCHED,
         learning_state: learning_state || "Testing",
@@ -643,6 +714,20 @@ class ProjectController {
 
       if (req.body.accountable_owner !== undefined)
         updateData.accountable_owner = normalizeString(req.body.accountable_owner);
+
+      if (req.body.accountable_owner_id !== undefined) {
+        const ownerId = req.body.accountable_owner_id;
+        if (ownerId === "" || ownerId === null) {
+          updateData.accountable_owner_id = null;
+        } else if (ObjectId.isValid(ownerId)) {
+          updateData.accountable_owner_id = new ObjectId(ownerId);
+          // Sync name if possible
+          const ownerUser = await UserModel.findById(ownerId);
+          if (ownerUser) {
+            updateData.accountable_owner = ownerUser.name || ownerUser.email;
+          }
+        }
+      }
 
       if (req.body.key_assumptions !== undefined) {
         if (req.body.key_assumptions === "" || req.body.key_assumptions === null) {
@@ -1168,11 +1253,17 @@ class ProjectController {
         return new Date(a.project.created_at) - new Date(b.project.created_at);
       });
 
-      const responseProjects = ordered.map(({ ranking, project }) => {
+      const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames(allProjects);
+
+      const populatedProjects = await ProjectModel.populateCreatedBy(allProjects);
+
+      const responseProjects = ordered.map(({ ranking, project: rawProject }) => {
+        const project = populatedProjects.find(p => p._id.toString() === rawProject._id.toString()) || rawProject;
         return {
           ...project,
           project_id: project._id,
           project_name: project.project_name,
+          accountable_owner: ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap),
           rank: ranking.rank,
           rationals: ranking.rationals || "",
           locked: ranking.locked || false,
@@ -1219,6 +1310,10 @@ class ProjectController {
         business_id: new ObjectId(business_id),
       });
 
+      const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames(projects);
+
+      const populatedProjects = await ProjectModel.populateCreatedBy(projects);
+
       const rankMap = {};
       rankings.forEach(r => {
         rankMap[r.project_id.toString()] = r.rank;
@@ -1227,13 +1322,14 @@ class ProjectController {
       const ranked = [];
       const unranked = [];
 
-      projects.forEach(p => {
+      populatedProjects.forEach(p => {
         const rank = rankMap[p._id.toString()] ?? null;
         const item = {
           ...p,
           admin_user_id: admin_user_id,
           business_id,
           project_id: p._id,
+          accountable_owner: ProjectController._resolveOwner(p, ownerNameMap, bizOwnerFallbackMap),
           rank,
           created_at: p.created_at,
         };
