@@ -62,7 +62,8 @@ class TierService {
                 limitsObj.projects ??
                 null,
             insight: plan?.insight ?? limitsObj.insight ?? false,
-            strategic: plan?.strategic ?? limitsObj.strategic ?? false
+            strategic: plan?.strategic ?? limitsObj.strategic ?? false,
+            pmf: plan?.pmf ?? limitsObj.pmf ?? false
         };
     }
 
@@ -97,7 +98,8 @@ class TierService {
             max_users: Number.MAX_SAFE_INTEGER,
             max_projects: null,
             insight: true,
-            strategic: true
+            strategic: true,
+            pmf: true
         };
     }
 
@@ -124,6 +126,11 @@ class TierService {
     static async canAccessExecution(tierName) {
         const limits = await this.getTierLimits(tierName);
         return limits.can_create_projects;
+    }
+
+    static async canAccessPMF(tierName) {
+        const limits = await this.getTierLimits(tierName);
+        return limits.pmf;
     }
 }
 
