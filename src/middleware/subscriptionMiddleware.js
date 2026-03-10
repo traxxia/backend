@@ -77,7 +77,7 @@ const checkCollaboratorAccess = async (req, res, next) => {
 const checkProjectCreation = async (req, res, next) => {
     try {
         const tierName = await TierService.getUserTier(req.user._id);
-        const limits = TierService.getTierLimits(tierName);
+        const limits = await TierService.getTierLimits(tierName);
 
         if (!limits.can_create_projects) {
             return res.status(403).json({

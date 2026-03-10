@@ -8,6 +8,27 @@ if (!STRIPE_SECRET_KEY) {
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 class StripeService {
+    static async createProductAndPrice(name, description, priceAmount) {
+        try {
+            const product = await stripe.products.create({
+                name,
+                description: description || name,
+            });
+
+            const price = await stripe.prices.create({
+                product: product.id,
+                unit_amount: Math.round(priceAmount * 100), // Assumes amount is in dollars
+                currency: 'usd',
+                recurring: { interval: 'month' }, // Assumes monthly billing
+            });
+
+            return price.id;
+        } catch (error) {
+            console.error('Error creating Stripe product/price:', error);
+            throw error;
+        }
+    }
+    
     static async createCustomer(email, name, paymentMethodId, setAsDefault = true) {
         try {
             const customerData = {

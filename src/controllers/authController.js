@@ -61,7 +61,7 @@ class AuthController {
       });
 
       const planName = await TierService.getUserTier(user._id);
-
+      const planLimits = await TierService.getTierLimits(planName);
       res.json({
         token,
         user: {
@@ -70,6 +70,7 @@ class AuthController {
           email: user.email,
           role: role.role_name,
           plan_name: planName,
+          limits: planLimits,
           company: company ? {
             name: company.company_name,
             logo: company.logo,
