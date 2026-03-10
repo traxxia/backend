@@ -8,6 +8,9 @@ const { logoUpload } = require('../middleware/upload');
 // Company routes
 router.get('/companies', authenticateToken, requireAdmin, AdminController.getCompanies);
 router.post('/companies', authenticateToken, requireSuperAdmin, logoUpload.single('logo'), AdminController.createCompany);
+router.put('/companies/:id', authenticateToken, requireAdmin, AdminController.updateCompany);
+router.put('/companies/:id/logo', authenticateToken, requireAdmin, logoUpload.single('logo'), AdminController.updateCompanyLogo);
+router.get('/companies/:id/logo/display', AdminController.serveLogo);
 
 // User routes
 router.get('/users', authenticateToken, requireAdmin, AdminController.getUsers);

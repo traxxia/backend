@@ -8,6 +8,7 @@ const QuestionModel = require("../models/questionModel");
 const BusinessModel = require("../models/businessModel");
 const ConversationModel = require("../models/conversationModel");
 const TierService = require('../services/tierService');
+const blobService = require("../services/blobService");
 
 class AdminController {
   static async getCompanies(req, res) {
@@ -25,13 +26,20 @@ class AdminController {
 
       const companies = await CompanyModel.findAll(matchFilter);
 
-      const enhancedCompanies = companies.map((company) => ({
-        ...company,
-        admin_name: company.admin_name || "No Admin Assigned",
-        admin_email: company.admin_email || "No Email",
-        total_users: company.total_users || 0,
-        active_users: company.active_users || 0,
-      }));
+      const enhancedCompanies = companies.map((company) => {
+        let displayLogo = company.logo;
+        if (displayLogo && displayLogo.includes('blob.core.windows.net')) {
+          displayLogo = `/api/admin/companies/${company._id}/logo/display`;
+        }
+        return {
+          ...company,
+          logo: displayLogo,
+          admin_name: company.admin_name || "No Admin Assigned",
+          admin_email: company.admin_email || "No Email",
+          total_users: company.total_users || 0,
+          active_users: company.active_users || 0,
+        };
+      });
 
       res.json({
         companies: enhancedCompanies,
@@ -75,7 +83,19 @@ class AdminController {
 
       let logoUrl = null;
       if (req.file) {
-        logoUrl = `${req.protocol}://${req.get("host")}/uploads/logos/${req.file.filename}`;
+        try {
+          const blobName = `company_logo_${Date.now()}_${req.file.originalname}`;
+          logoUrl = await blobService.uploadBuffer(
+            blobName,
+            req.file.buffer,
+            req.file.mimetype
+          );
+        } catch (blobError) {
+          console.error("Failed to upload logo to Azure:", blobError);
+          return res
+            .status(500)
+            .json({ error: "Failed to upload logo to cloud storage" });
+        }
       }
 
       const companyId = await CompanyModel.create({
@@ -1211,6 +1231,137 @@ class AdminController {
     } catch (error) {
       console.error("Failed to fetch user data:", error);
       res.status(500).json({ error: "Failed to fetch user data" });
+    }
+  }
+
+  static async updateCompany(req, res) {
+    try {
+      const { id } = req.params;
+      const { company_name, industry, size } = req.body;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: "Invalid company ID" });
+      }
+
+      // Authorization check
+      if (req.user.role.role_name === "company_admin") {
+        if (req.user.company_id.toString() !== id) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      }
+
+      const updateData = {};
+      if (company_name) {
+        updateData.company_name = company_name;
+        updateData.company_name_normalized = company_name.trim().toLowerCase();
+      }
+      if (industry !== undefined) updateData.industry = industry;
+      if (size !== undefined) updateData.size = size;
+
+      if (Object.keys(updateData).length === 0) {
+        return res.status(400).json({ error: "No update data provided" });
+      }
+
+      const result = await CompanyModel.updateById(id, updateData);
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ error: "Company not found" });
+      }
+
+      res.json({ message: "Company updated successfully" });
+    } catch (error) {
+      console.error("Error updating company:", error);
+      res.status(500).json({ error: "Failed to update company" });
+    }
+  }
+
+  static async updateCompanyLogo(req, res) {
+    try {
+      const { id } = req.params;
+
+      if (!ObjectId.isValid(id)) {
+        return res.status(400).json({ error: "Invalid company ID" });
+      }
+
+      // Authorization check
+      if (req.user.role.role_name === "company_admin") {
+        if (req.user.company_id.toString() !== id) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      }
+
+      if (!req.file) {
+        return res.status(400).json({ error: "No logo file uploaded" });
+      }
+
+      let logoUrl = null;
+      try {
+        const blobName = `company_logo_${id}_${Date.now()}_${req.file.originalname}`;
+        logoUrl = await blobService.uploadBuffer(blobName, req.file.buffer, req.file.mimetype);
+      } catch (blobError) {
+        console.error("Failed to upload logo to Azure:", blobError);
+        return res.status(500).json({ error: "Failed to upload logo to cloud storage" });
+      }
+
+      const result = await CompanyModel.updateLogo(id, logoUrl);
+
+      if (result.matchedCount === 0) {
+        return res.status(404).json({ error: "Company not found" });
+      }
+
+      res.json({
+        message: "Logo updated successfully",
+        logo_url: `/api/admin/companies/${id}/logo/display`
+      });
+    } catch (error) {
+      console.error("Error updating company logo:", error);
+      res.status(500).json({ error: "Failed to update company logo" });
+    }
+  }
+
+  static async serveLogo(req, res) {
+    try {
+      const { id } = req.params;
+
+      if (!id || !ObjectId.isValid(id)) {
+        return res.status(400).json({ error: "Invalid company ID" });
+      }
+
+      const db = getDB();
+      const company = await db.collection('companies').findOne({ _id: new ObjectId(id) });
+
+      if (!company || !company.logo) {
+        return res.status(404).json({ error: "Logo not found" });
+      }
+
+      // Robust blob name extraction from full URL
+      const logoUrl = company.logo;
+      const urlParts = logoUrl.split('/');
+      const blobNameWithSas = urlParts[urlParts.length - 1];
+      const encodedBlobName = blobNameWithSas.split('?')[0];
+      const blobName = decodeURIComponent(encodedBlobName);
+
+      let contentType = 'image/png';
+      if (blobName.toLowerCase().endsWith('.jpg') || blobName.toLowerCase().endsWith('.jpeg')) {
+        contentType = 'image/jpeg';
+      } else if (blobName.toLowerCase().endsWith('.webp')) {
+        contentType = 'image/webp';
+      } else if (blobName.toLowerCase().endsWith('.gif')) {
+        contentType = 'image/gif';
+      } else if (blobName.toLowerCase().endsWith('.svg')) {
+        contentType = 'image/svg+xml';
+      }
+
+      await blobService.downloadToStream(
+        blobName,
+        res,
+        contentType,
+        blobName,
+        'inline'
+      );
+    } catch (error) {
+      console.error("[serveLogo] Error serving company logo:", error);
+      res.status(500).json({ error: "Failed to serve logo" });
     }
   }
 }
