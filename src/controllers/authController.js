@@ -71,8 +71,11 @@ class AuthController {
           role: role.role_name,
           plan_name: planName,
           company: company ? {
+            id: company._id,
             name: company.company_name,
-            logo: company.logo,
+            logo: (company.logo && company.logo.includes('blob.core.windows.net'))
+              ? `/api/admin/companies/${company._id}/logo/display`
+              : company.logo,
             industry: company.industry
           } : null
         }

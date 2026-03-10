@@ -4,7 +4,7 @@ class BlobService {
   constructor(containerName, blobServiceClient) {
     this.containerName = containerName;
     this.blobServiceClient = blobServiceClient;
-    
+
     if (this.blobServiceClient && this.containerName) {
       this.containerClient = this.blobServiceClient.getContainerClient(this.containerName);
     } else {
@@ -24,7 +24,7 @@ class BlobService {
     if (!this.containerClient) {
       throw new Error('Blob storage not configured');
     }
-    
+
     await this.ensureContainer();
     const blockBlobClient = this.containerClient.getBlockBlobClient(blobName);
     await blockBlobClient.uploadData(buffer, {
@@ -33,11 +33,11 @@ class BlobService {
     return blockBlobClient.url;
   }
 
-  async downloadToStream(blobName, res, contentType, fileName) {
+  async downloadToStream(blobName, res, contentType, fileName, disposition = 'attachment') {
     if (!this.containerClient) {
       throw new Error('Blob storage not configured');
     }
-    
+
     await this.ensureContainer();
     const blockBlobClient = this.containerClient.getBlockBlobClient(blobName);
 
@@ -48,7 +48,7 @@ class BlobService {
     res.setHeader('Content-Type', contentType || 'application/octet-stream');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="${fileName || blobName}"`
+      `${disposition}; filename="${fileName || blobName}"`
     );
 
     const downloadResponse = await blockBlobClient.download(0);
@@ -59,7 +59,7 @@ class BlobService {
     if (!this.containerClient) {
       throw new Error('Blob storage not configured');
     }
-    
+
     await this.ensureContainer();
     const blockBlobClient = this.containerClient.getBlockBlobClient(blobName);
     await blockBlobClient.delete();
@@ -70,7 +70,7 @@ class BlobService {
     if (!this.containerClient) {
       return false;
     }
-    
+
     try {
       const blockBlobClient = this.containerClient.getBlockBlobClient(blobName);
       return await blockBlobClient.exists();
