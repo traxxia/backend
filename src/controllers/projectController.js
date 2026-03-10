@@ -3,6 +3,7 @@ const ProjectModel = require("../models/projectModel");
 const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
+const DecisionLogModel = require("../models/decisionLogModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
 
@@ -131,6 +132,19 @@ class ProjectController {
         }
       }
 
+      const projectIds = projects.map(p => p._id);
+      const allLogs = await db.collection("decision_logs")
+        .find({ project_id: { $in: projectIds } })
+        .sort({ changed_at: -1 })
+        .toArray();
+
+      const logsByProject = {};
+      allLogs.forEach(log => {
+        const idStr = log.project_id.toString();
+        if (!logsByProject[idStr]) logsByProject[idStr] = [];
+        logsByProject[idStr].push(log);
+      });
+
       projects = projects.map(project => {
         let cleanDesc = project.description || "";
         if (cleanDesc.startsWith("PMF Tactical Action:")) {
@@ -144,6 +158,7 @@ class ProjectController {
           description: cleanDesc,
           allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
           status: project.status, // Ensure status is returned
+          decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []) // fallback to embedded if still there
         };
       });
 
@@ -221,6 +236,9 @@ class ProjectController {
       if (!raw) return res.status(404).json({ error: "Project not found" });
 
       const [project] = await ProjectModel.populateCreatedBy(raw);
+
+      // Attach decision logs from the separate collection
+      project.decision_log = await DecisionLogModel.findByProjectId(id);
 
       res.json({ project });
     } catch (err) {
@@ -655,6 +673,37 @@ class ProjectController {
 
           if (!found) {
             return res.status(400).json({ error: "Invalid status value" });
+          }
+
+          if (found !== existing.status) {
+
+            if (!req.body.justification || String(req.body.justification).trim() === "") {
+              return res.status(400).json({
+                error: "Justification is required when changing project status."
+              });
+            }
+
+            const justification = String(req.body.justification).trim();
+
+            // Allow alphabets + spaces + punctuation
+            const validSentence = /^[A-Za-z\s.,'-]+$/;
+
+            if (!validSentence.test(justification)) {
+              return res.status(400).json({
+                error: "Justification must contain only letters and valid sentence punctuation."
+              });
+            }
+
+            const logEntry = {
+              project_id: new ObjectId(id),
+              from_status: existing.status,
+              to_status: found,
+              justification: justification,
+              changed_by: new ObjectId(req.user._id),
+              changed_at: new Date()
+            };
+
+            await DecisionLogModel.create(logEntry);
           }
 
           updateData.status = found;
@@ -2201,6 +2250,30 @@ class ProjectController {
       res.status(500).json({ error: "Server error" });
     }
   }
+
+  static async getDecisionLogs(req, res) {
+    try {
+      const { projectId } = req.params;
+      console.log(`[ProjectController] Fetching decision logs for project: ${projectId}`);
+
+      if (!ObjectId.isValid(projectId)) {
+        return res.status(400).json({ error: "Invalid project ID" });
+      }
+
+      const logs = await DecisionLogModel.findByProjectId(projectId);
+
+      res.json({
+        message: "Decision logs fetched successfully",
+        logs
+      });
+
+    } catch (err) {
+      console.error("GET DECISION LOGS ERROR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+
 }
 
 module.exports = ProjectController;

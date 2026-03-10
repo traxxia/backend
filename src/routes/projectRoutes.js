@@ -31,6 +31,12 @@ router.get("/ai-rankings",
 );
 router.get("/consensus-analysis", authenticateToken, ProjectController.getConsensusAnalysis);
 router.get("/collaborator-consensus", authenticateToken, ProjectController.getCollaboratorConsensus);
+router.get(
+  "/:projectId/decision-logs",
+  authenticateToken,
+  ProjectController.getDecisionLogs
+);
+
 // Project-specific routes (keep these AFTER the more specific routes above)
 router.get("/:id", authenticateToken, ProjectController.getById);
 router.patch("/:id", authenticateToken, checkWriteAccess, ProjectController.update);
