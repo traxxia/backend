@@ -1721,6 +1721,8 @@ class ProjectController {
         const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
           project.allowed_collaborators.some(id => id.toString() === user_id.toString());
 
+        const isOwner = project.accountable_owner_id && project.accountable_owner_id.toString() === user_id.toString();
+
         if ((isLaunched || isActive) && !project.edit_unlocked) {
           projectsEditAccess[project._id.toString()] = false;
         } else {
@@ -2405,15 +2407,10 @@ class ProjectController {
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
 
-      const permissions = getProjectPermissions({
-        projectStatus: existing.status,
-        isOwner,
-        isCollaborator,
-        isAdmin
-      });
+      const isOwnerAccountable = existing.accountable_owner_id && existing.accountable_owner_id.toString() === req.user._id.toString();
 
-      if (!permissions.canEdit) {
-        return res.status(403).json({ error: "You do not have permission to update this project" });
+      if (!isAdmin && !isOwnerAccountable && !permissions.canEdit) {
+        return res.status(403).json({ error: "You do not have permission to update this project. Only admins or the accountable owner can perform updates." });
       }
 
       const updateData = {
@@ -2470,15 +2467,10 @@ class ProjectController {
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
 
-      const permissions = getProjectPermissions({
-        projectStatus: existing.status,
-        isOwner,
-        isCollaborator,
-        isAdmin
-      });
+      const isOwnerAccountable = existing.accountable_owner_id && existing.accountable_owner_id.toString() === req.user._id.toString();
 
-      if (!permissions.canEdit) {
-        return res.status(403).json({ error: "You do not have permission to review this project" });
+      if (!isAdmin && !isOwnerAccountable && !permissions.canEdit) {
+        return res.status(403).json({ error: "You do not have permission to review this project. Only admins or the accountable owner can perform reviews." });
       }
 
       const now = new Date();
