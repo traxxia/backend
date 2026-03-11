@@ -93,6 +93,17 @@ class PMFAnalysisController {
                 return res.status(404).json({ error: "PMF executive summary not found" });
             }
 
+            // Fetch onboarding data to include in the response
+            const analysis = await PMFAnalysisModel.findByBusinessId(businessId);
+            if (analysis && analysis.onboarding_data) {
+                // Nest onboarding_data within summary to ensure the frontend extracts it
+                if (summary.summary && typeof summary.summary === 'object') {
+                    summary.summary.onboarding_data = analysis.onboarding_data;
+                } else {
+                    summary.onboarding_data = analysis.onboarding_data;
+                }
+            }
+
             res.json(summary);
         } catch (error) {
             console.error("Error fetching PMF executive summary:", error);
