@@ -17,6 +17,7 @@ const VALID_STATUS = Object.values(PROJECT_STATES);
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
+const { calculateNextReviewDate, isProjectStale } = require("../utils/helpers");
 
 
 
@@ -210,7 +211,8 @@ class ProjectController {
           accountable_owner: ownerName,
           allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
           status: project.status, // Ensure status is returned
-          decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []) // fallback to embedded if still there
+          decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []), // fallback to embedded if still there
+          is_stale: isProjectStale(project.next_review_date),
         };
       });
 
@@ -275,7 +277,10 @@ class ProjectController {
       res.json({
         total,
         count: projects.length,
-        projects,
+        projects: projects.map(p => ({
+          ...p,
+          is_stale: isProjectStale(p.next_review_date)
+        })),
         business_status: businessStatus,
         business_access_mode: businessAccessMode,
         ranking_lock_summary,
@@ -297,6 +302,7 @@ class ProjectController {
       if (!raw) return res.status(404).json({ error: "Project not found" });
 
       const [project] = await ProjectModel.populateCreatedBy(raw);
+      project.is_stale = isProjectStale(project.next_review_date);
 
       const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames([project]);
       project.accountable_owner = ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap);
@@ -533,6 +539,7 @@ class ProjectController {
             budget_estimate === undefined
             ? ""
             : String(budget_estimate).trim(),
+        next_review_date: calculateNextReviewDate(last_reviewed || new Date(), review_cadence),
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -848,9 +855,15 @@ class ProjectController {
         updateData.learning_state = normalizeString(req.body.learning_state);
       }
 
-      if (req.body.last_reviewed !== undefined) {
-        const lr = req.body.last_reviewed;
-        updateData.last_reviewed = (lr === null || lr === "") ? null : new Date(lr);
+      if (req.body.last_reviewed !== undefined || req.body.review_cadence !== undefined) {
+        const lr = req.body.last_reviewed !== undefined ? req.body.last_reviewed : existing.last_reviewed;
+        const rc = req.body.review_cadence !== undefined ? req.body.review_cadence : existing.review_cadence;
+
+        if (req.body.last_reviewed !== undefined) {
+          updateData.last_reviewed = (req.body.last_reviewed === null || req.body.last_reviewed === "") ? null : new Date(req.body.last_reviewed);
+        }
+
+        updateData.next_review_date = calculateNextReviewDate(lr || new Date(), rc);
       }
 
       delete updateData._id;
@@ -861,6 +874,7 @@ class ProjectController {
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
+      project.is_stale = isProjectStale(project.next_review_date);
 
       res.json({
         message: "Project updated successfully",
@@ -1269,6 +1283,7 @@ class ProjectController {
           locked: ranking.locked || false,
           ai_rank: project.ai_rank || null,
           ai_rank_score: project.ai_rank_score || null,
+          is_stale: isProjectStale(project.next_review_date),
         };
       });
 
@@ -1332,6 +1347,7 @@ class ProjectController {
           accountable_owner: ProjectController._resolveOwner(p, ownerNameMap, bizOwnerFallbackMap),
           rank,
           created_at: p.created_at,
+          is_stale: isProjectStale(p.next_review_date),
         };
 
         if (rank !== null) {
@@ -2370,6 +2386,144 @@ class ProjectController {
   }
 
 
+
+  static async adhocUpdate(req, res) {
+    try {
+      const { id } = req.params;
+      const { status, learning_state, justification } = req.body;
+
+      if (!justification) {
+        return res.status(400).json({ error: "Justification is mandatory for ad-hoc updates" });
+      }
+
+      const existing = await ProjectModel.findById(id);
+      if (!existing) return res.status(404).json({ error: "Project not found" });
+
+      // Permission check
+      const business = await BusinessModel.findById(existing.business_id);
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+      const isOwner = business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
+
+      const permissions = getProjectPermissions({
+        projectStatus: existing.status,
+        isOwner,
+        isCollaborator,
+        isAdmin
+      });
+
+      if (!permissions.canEdit) {
+        return res.status(403).json({ error: "You do not have permission to update this project" });
+      }
+
+      const updateData = {
+        updated_at: new Date()
+      };
+
+      if (status) updateData.status = status;
+      if (learning_state) updateData.learning_state = learning_state;
+
+      await ProjectModel.update(id, updateData);
+
+      const updated = await ProjectModel.findById(id);
+      const [project] = await ProjectModel.populateCreatedBy(updated);
+      project.is_stale = isProjectStale(project.next_review_date);
+
+      // Log the decision
+      const db = getDB();
+      await db.collection("audit_trail").insertOne({
+        user_id: new ObjectId(req.user._id),
+        event_type: "project_decision_log",
+        event_data: {
+          project_id: new ObjectId(id),
+          business_id: existing.business_id,
+          action: "adhoc_update",
+          justification,
+          old_state: { status: existing.status, learning_state: existing.learning_state },
+          new_state: { status: status || existing.status, learning_state: learning_state || existing.learning_state }
+        },
+        timestamp: new Date()
+      });
+
+      res.json({ message: "Ad-hoc update processed", project });
+    } catch (err) {
+      console.error("ADHOC UPDATE ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async performReview(req, res) {
+    try {
+      const { id } = req.params;
+      const { status, learning_state, justification, no_changes } = req.body;
+
+      if (!justification) {
+        return res.status(400).json({ error: "Justification is mandatory for reviews" });
+      }
+
+      const existing = await ProjectModel.findById(id);
+      if (!existing) return res.status(404).json({ error: "Project not found" });
+
+      // Permission check
+      const business = await BusinessModel.findById(existing.business_id);
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+      const isOwner = business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
+
+      const permissions = getProjectPermissions({
+        projectStatus: existing.status,
+        isOwner,
+        isCollaborator,
+        isAdmin
+      });
+
+      if (!permissions.canEdit) {
+        return res.status(403).json({ error: "You do not have permission to review this project" });
+      }
+
+      const now = new Date();
+      const updateData = {
+        last_reviewed: now,
+        updated_at: now,
+        next_review_date: calculateNextReviewDate(now, existing.review_cadence)
+      };
+
+      if (!no_changes) {
+        if (status) updateData.status = status;
+        if (learning_state) updateData.learning_state = learning_state;
+      }
+
+      await ProjectModel.update(id, updateData);
+
+      const updated = await ProjectModel.findById(id);
+      const [project] = await ProjectModel.populateCreatedBy(updated);
+      project.is_stale = isProjectStale(project.next_review_date);
+
+      // Log the decision
+      const db = getDB();
+      await db.collection("audit_trail").insertOne({
+        user_id: new ObjectId(req.user._id),
+        event_type: "project_decision_log",
+        event_data: {
+          project_id: new ObjectId(id),
+          business_id: existing.business_id,
+          action: no_changes ? "no_change_review" : "cadence_review",
+          justification,
+          old_state: { status: existing.status, learning_state: existing.learning_state },
+          new_state: {
+            status: no_changes ? existing.status : (status || existing.status),
+            learning_state: no_changes ? existing.learning_state : (learning_state || existing.learning_state)
+          }
+        },
+        timestamp: new Date()
+      });
+
+      res.json({ message: "Review processed", project });
+    } catch (err) {
+      console.error("PERFORM REVIEW ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
 }
 
 module.exports = ProjectController;

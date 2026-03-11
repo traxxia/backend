@@ -41,6 +41,8 @@ router.get(
 router.get("/:id", authenticateToken, ProjectController.getById);
 router.patch("/:id", authenticateToken, checkWriteAccess, ProjectController.update);
 router.patch("/:id/status", authenticateToken, checkWriteAccess, ProjectController.changeStatus);
+router.patch("/:id/adhoc-update", authenticateToken, checkWriteAccess, ProjectController.adhocUpdate);
+router.post("/:id/review", authenticateToken, checkWriteAccess, ProjectController.performReview);
 router.put("/edit-access", authenticateToken, ProjectController.grantEditAccess);
 
 router.delete(
