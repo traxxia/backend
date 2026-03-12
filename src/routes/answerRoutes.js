@@ -1,17 +1,14 @@
 const express = require('express');
 const router = express.Router();
 const AnswerController = require('../controllers/answerController');
+const { authenticateToken } = require('../middleware/auth');
 
-// POST: Create a new answer
-router.post('/', AnswerController.create);
+router.post('/', authenticateToken, AnswerController.create);
 
-// GET: Get answer by ID
-router.get('/:id', AnswerController.getByID);
+router.get('/:id', authenticateToken, AnswerController.getByID);
 
-// GET: Get answers by business ID
-router.get('/business/:business_id', AnswerController.getByBusinessID);
+router.get('/business/:business_id', authenticateToken, AnswerController.getByBusinessID);
 
-// PUT: Update answer by ID
-router.put('/:id', AnswerController.update);
+router.put('/:id', authenticateToken, AnswerController.update);
 
 module.exports = router;
