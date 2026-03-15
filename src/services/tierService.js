@@ -1,26 +1,25 @@
 const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
+const { TIER_LIMITS } = require('../config/constants');
 
 class TierService {
     static async getUserTier(userId) {
         const db = getDB();
 
         const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
-        if (!user || !user.company_id) return 'unlimited';
+        if (!user || !user.company_id) return 'none';
 
         const company = await db.collection('companies').findOne({ _id: user.company_id });
-        if (!company) return 'unlimited';
+        if (!company) return 'none';
 
-        // If all Stripe IDs are null/missing, give unlimited access
-        if (this.isStripeAccountNull(company)) {
-            return 'unlimited';
-        }
+        // Legacy companies created without a plan have locked access
+        if (!company.plan_id) return 'none';
 
-        // Legacy companies created without a plan have unlimited access
-        if (!company.plan_id) return 'unlimited';
-
-        const plan = await db.collection('plans').findOne({ _id: company.plan_id });
-        return plan?.name?.toLowerCase() || 'essential';
+        // Cast plan_id to ObjectId to ensure correct MongoDB lookup, as it may be saved as a string
+        const planObjId = typeof company.plan_id === 'string' ? new ObjectId(company.plan_id) : company.plan_id;
+        const plan = await db.collection('plans').findOne({ _id: planObjId });
+        
+        return plan?.name?.toLowerCase() || 'none';
     }
 
     static isStripeAccountNull(company) {
@@ -44,7 +43,8 @@ class TierService {
                 1,
             can_create_projects:
                 plan?.can_create_projects ??
-                (limitsObj.projects != null ? true : true),
+                limitsObj.projects ??
+                true,
             max_collaborators:
                 plan?.max_collaborators ??
                 limitsObj.collaborators ??
@@ -57,10 +57,6 @@ class TierService {
                 plan?.max_users ??
                 limitsObj.users ??
                 0,
-            max_projects:
-                plan?.max_projects ??
-                limitsObj.projects ??
-                null,
             insight: plan?.insight ?? limitsObj.insight ?? false,
             strategic: plan?.strategic ?? limitsObj.strategic ?? false,
             pmf: plan?.pmf ?? limitsObj.pmf ?? false
@@ -87,19 +83,17 @@ class TierService {
             return this.getLimitsForPlan(plan);
         }
 
-        // If no matching plan is found in the DB (e.g. truly legacy/unlimited
-        // accounts), treat limits as effectively unlimited rather than falling
-        // back to any hard-coded constants.
+        // If no matching plan is found in the DB, 
+        // lock all access so they must purchase a plan.
         return {
-            max_workspaces: Number.MAX_SAFE_INTEGER,
-            can_create_projects: true,
-            max_collaborators: Number.MAX_SAFE_INTEGER,
-            max_viewers: Number.MAX_SAFE_INTEGER,
-            max_users: Number.MAX_SAFE_INTEGER,
-            max_projects: null,
-            insight: true,
-            strategic: true,
-            pmf: true
+            max_workspaces: 0,
+            can_create_projects: false,
+            max_collaborators: 0,
+            max_viewers: 0,
+            max_users: 0,
+            insight: false,
+            strategic: false,
+            pmf: false
         };
     }
 

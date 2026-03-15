@@ -159,7 +159,7 @@ class SubscriptionController {
                     },
                     projects: {
                         current: currentProjects,
-                        limit: limits.can_create_projects ? (limits.max_projects || 'unlimited') : 0
+                        limit: limits.can_create_projects
                     }
                 }
             });

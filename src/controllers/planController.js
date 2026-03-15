@@ -68,10 +68,43 @@ class PlanController {
                 return res.status(403).json({ error: 'Access denied. Admin or Super Admin only.' });
             }
 
+            // Capture old plan to check for status transitions
+            const oldPlan = await PlanModel.findById(planId);
+            if (!oldPlan) {
+                return res.status(404).json({ error: 'Plan not found' });
+            }
+
             const result = await PlanModel.update(planId, planData);
 
-            if (result.matchedCount === 0) {
-                return res.status(404).json({ error: 'Plan not found' });
+            // Handle Stripe cancel_at_period_end toggling
+            if (planData.status && planData.status !== oldPlan.status) {
+                const db = require('../config/database').getDB();
+                const { ObjectId } = require('mongodb');
+                
+                // Find all active companies on this plan
+                const companies = await db.collection('companies').find({
+                    plan_id: new ObjectId(planId),
+                    stripe_subscription_id: { $ne: null },
+                    subscription_status: { $in: ['active', 'past_due', 'trialing'] }
+                }).toArray();
+
+                for (const company of companies) {
+                    try {
+                        if (planData.status === 'disable') {
+                            console.log(`[Plan Controller] Canceling Stripe auto-renewal for company ${company.company_name} because plan was disabled.`);
+                            await StripeService.updateSubscription(company.stripe_subscription_id, {
+                                cancel_at_period_end: true
+                            });
+                        } else if (planData.status === 'active') {
+                            console.log(`[Plan Controller] Restoring Stripe auto-renewal for company ${company.company_name} because plan was re-enabled.`);
+                            await StripeService.updateSubscription(company.stripe_subscription_id, {
+                                cancel_at_period_end: false
+                            });
+                        }
+                    } catch (stripeError) {
+                        console.error(`Failed to update cancel_at_period_end for company ${company._id}:`, stripeError.message);
+                    }
+                }
             }
 
             res.json({ message: 'Plan updated successfully' });

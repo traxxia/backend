@@ -48,12 +48,6 @@ class AuthController {
         );
       }
 
-      const token = jwt.sign({
-        id: user._id,
-        email: user.email,
-        role: role.role_name
-      }, SECRET_KEY, { expiresIn: '24h' });
-
       await logAuditEvent(user._id, 'login_success', {
         email,
         role: role.role_name,
@@ -62,6 +56,18 @@ class AuthController {
 
       const planName = await TierService.getUserTier(user._id);
       const planLimits = await TierService.getTierLimits(planName);
+
+      const token = jwt.sign({
+        id: user._id,
+        email: user.email,
+        role: role.role_name,
+        limits: {
+          insight:             planLimits.insight             ?? false,
+          strategic:           planLimits.strategic           ?? false,
+          pmf:                 planLimits.pmf                 ?? false,
+          can_create_projects: planLimits.can_create_projects ?? false,
+        }
+      }, SECRET_KEY, { expiresIn: '24h' });
       res.json({
         token,
         user: {
