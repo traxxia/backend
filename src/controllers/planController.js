@@ -3,7 +3,8 @@ const StripeService = require('../services/stripeService');
 class PlanController {
     static async getAll(req, res) {
         try {
-            const plans = await PlanModel.getAll();
+            const includeInactive = req.query.include_inactive === 'true' || req.headers['x-include-inactive'] === 'true';
+            const plans = await PlanModel.getAll(includeInactive);
             res.json({ plans });
         } catch (error) {
             console.error('Failed to fetch plans:', error);
