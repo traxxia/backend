@@ -21,6 +21,94 @@ const { calculateNextReviewDate, isProjectStale } = require("../utils/helpers");
 
 
 
+// State transition validation based on Launch Status and Functional State
+function validateStateTransition(currentStatus, currentLaunchStatus, targetStatus, isAdmin = false) {
+  const status = (currentStatus || "").toLowerCase();
+  const launchStatus = (currentLaunchStatus || PROJECT_LAUNCH_STATUS.UNLAUNCHED).toLowerCase();
+  const target = (targetStatus || "").toLowerCase();
+
+  // If already Launched, cannot return to Unlaunched states (Draft)
+  if (launchStatus === PROJECT_LAUNCH_STATUS.LAUNCHED && target === PROJECT_STATES.DRAFT) {
+    return { isValid: false, error: "Once a project moves to 'Launched', it cannot return to 'Draft' (Unlaunched)." };
+  }
+
+  // Terminal states cannot transition to any other state (Except Killed which admins can edit/move)
+  if (status === PROJECT_STATES.COMPLETED || status === PROJECT_STATES.SCALED) {
+    return { isValid: false, error: `Project is in a terminal state (${status}) and cannot be moved.` };
+  }
+
+  if (status === PROJECT_STATES.KILLED && !isAdmin) {
+    return { isValid: false, error: "Project is in a terminal state (killed) and cannot be moved." };
+  }
+
+  // Transitions from Killed (Admins Only)
+  if (status === PROJECT_STATES.KILLED && isAdmin) {
+    // If it was unlaunched, it can only move to Draft or Active (if being launched)
+    if (launchStatus === PROJECT_LAUNCH_STATUS.UNLAUNCHED) {
+      if (![PROJECT_STATES.DRAFT, PROJECT_STATES.ACTIVE].includes(target)) {
+        return { isValid: false, error: `Invalid transition from Killed to ${target} for unlaunched project.` };
+      }
+    } else {
+      // If launched, it can move to any active state
+      const validStates = [PROJECT_STATES.ACTIVE, PROJECT_STATES.AT_RISK, PROJECT_STATES.PAUSED];
+      if (!validStates.includes(target) && target !== PROJECT_STATES.KILLED) {
+        return { isValid: false, error: `Invalid transition from Killed to ${target} for launched project.` };
+      }
+    }
+  }
+
+  // Transitions from Draft
+  if (status === PROJECT_STATES.DRAFT) {
+    // Draft -> Active is EXCLUSIVELY handled via the "Launch" mechanism
+    if (target === PROJECT_STATES.ACTIVE) {
+      return { isValid: false, error: "Projects can only move to 'Active' through the Launch mechanism after being ranked." };
+    }
+    // Draft -> Killed (Unlaunched) or Draft -> Draft
+    const validDraftTransitions = [PROJECT_STATES.DRAFT, PROJECT_STATES.KILLED];
+    if (!validDraftTransitions.includes(target)) {
+      return { isValid: false, error: `Invalid transition from Draft to ${target}.` };
+    }
+  }
+
+  // Transitions from Active
+  if (status === PROJECT_STATES.ACTIVE) {
+    const validActiveTransitions = [
+      PROJECT_STATES.ACTIVE,
+      PROJECT_STATES.AT_RISK,
+      PROJECT_STATES.PAUSED,
+      PROJECT_STATES.COMPLETED,
+      PROJECT_STATES.KILLED,
+      PROJECT_STATES.SCALED
+    ];
+    if (!validActiveTransitions.includes(target)) {
+      return { isValid: false, error: `Invalid transition from Active to ${target}.` };
+    }
+  }
+
+  // Transitions from At Risk
+  if (status === PROJECT_STATES.AT_RISK) {
+    const validAtRiskTransitions = [
+      PROJECT_STATES.AT_RISK,
+      PROJECT_STATES.ACTIVE,
+      PROJECT_STATES.PAUSED,
+      PROJECT_STATES.KILLED
+    ];
+    if (!validAtRiskTransitions.includes(target)) {
+      return { isValid: false, error: `Invalid transition from At Risk to ${target}.` };
+    }
+  }
+
+  // Transitions from Paused
+  if (status === PROJECT_STATES.PAUSED) {
+    const validPausedTransitions = [PROJECT_STATES.PAUSED, PROJECT_STATES.ACTIVE, PROJECT_STATES.KILLED];
+    if (!validPausedTransitions.includes(target)) {
+      return { isValid: false, error: `Invalid transition from Paused to ${target}.` };
+    }
+  }
+
+  return { isValid: true };
+}
+
 // Permission matrix for ALL project actions
 function getProjectPermissions({
   projectStatus,
@@ -43,11 +131,12 @@ function getProjectPermissions({
     case PROJECT_STATES.PAUSED:
       return {
         canCreate: false,
-        canEdit: isAdmin || isAllowedCollaborator, // Strictly admins or allowed collaborators
+        canEdit: isAdmin || isAllowedCollaborator || isOwner || isCollaborator, // Enabled editing for owners/collaborators in launched states for visual indicators
       };
 
     case PROJECT_STATES.COMPLETED:
     case PROJECT_STATES.KILLED:
+    case PROJECT_STATES.SCALED:
       return {
         canCreate: false,
         canEdit: false, // Terminal states are locked for EVERYONE (including admins)
@@ -591,8 +680,11 @@ class ProjectController {
       const existing = await ProjectModel.findById(id);
       if (!existing) return res.status(404).json({ error: "Not found" });
 
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
       // Block ANY updates to terminal states
-      if (existing.status === PROJECT_STATES.KILLED || existing.status === PROJECT_STATES.COMPLETED) {
+      if ((existing.status === PROJECT_STATES.COMPLETED || existing.status === PROJECT_STATES.SCALED) ||
+        (existing.status === PROJECT_STATES.KILLED && !isAdmin)) {
         return res.status(403).json({
           error: `This project is in a terminal state (${existing.status}) and cannot be modified.`
         });
@@ -606,7 +698,6 @@ class ProjectController {
       }
 
       if (existing.status === "launched") {
-        const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
         const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
           existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
 
@@ -658,7 +749,6 @@ class ProjectController {
       if (!business)
         return res.status(404).json({ error: "Parent business not found" });
 
-      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(
         (id) => id.toString() === req.user._id.toString()
@@ -765,6 +855,12 @@ class ProjectController {
 
           if (!found) {
             return res.status(400).json({ error: "Invalid status value" });
+          }
+
+          // Validation for state transition
+          const transition = validateStateTransition(existing.status, existing.launch_status, found, isAdmin);
+          if (!transition.isValid) {
+            return res.status(400).json({ error: transition.error });
           }
 
           if (found !== existing.status) {
@@ -908,6 +1004,9 @@ class ProjectController {
         const project = await ProjectModel.findById(id);
         if (!project) continue;
 
+        if (!project.review_cadence || project.review_cadence.trim() === "") {
+          return res.status(400).json({ error: `Project '${project.project_name}' is missing a review cadence. Please set one before launching.` });
+        }
         if (!businessId) businessId = project.business_id;
         projectsToLaunch.push(project);
       }
@@ -948,7 +1047,7 @@ class ProjectController {
 
         const bulletedList = unrankedProjectNames.map(name => `• ${name}`).join("\n");
         return res.status(400).json({
-          error: `The following projects chosen for launch are not ranked:\n${bulletedList}\n\nPlease rank them before launching.`
+          error: `Launch failed: Numerical ranks are mandatory for all projects moved to 'Launched'. The following projects are not ranked:\n${bulletedList}\n\nPlease assign ranks before launching.`
         });
       }
 
@@ -1018,10 +1117,13 @@ class ProjectController {
         }
 
         // Perform launch
+        const now = new Date();
         await ProjectModel.update(id, {
           status: PROJECT_STATES.ACTIVE,
           launch_status: PROJECT_LAUNCH_STATUS.LAUNCHED,
-          updated_at: new Date()
+          last_reviewed: now,
+          next_review_date: calculateNextReviewDate(now, project.review_cadence),
+          updated_at: now
         });
 
         results.push({ id, status: "launched", is_ranked: true });
@@ -1434,7 +1536,7 @@ class ProjectController {
         });
       }
 
-      if (found.status === PROJECT_STATES.KILLED || found.status === PROJECT_STATES.COMPLETED) {
+      if (found.status === PROJECT_STATES.KILLED || found.status === PROJECT_STATES.COMPLETED || found.status === PROJECT_STATES.SCALED) {
         return res.status(403).json({
           error: `Project is already in a terminal state (${found.status})`
         });
@@ -1485,39 +1587,10 @@ class ProjectController {
         return res.status(404).json({ error: "Project not found" });
       }
 
-      // Prevent changing from terminal states
-      if (project.status === PROJECT_STATES.KILLED) {
-        return res.status(403).json({
-          error: "This project is in killed state"
-        });
-      }
-      if (project.status === PROJECT_STATES.COMPLETED) {
-        return res.status(403).json({
-          error: "Cannot change status of a project that is already Completed."
-        });
-      }
-
-      // Pre-launch restrictions
-      if (project.launch_status !== PROJECT_LAUNCH_STATUS.LAUNCHED) {
-        if (status === PROJECT_STATES.AT_RISK || status === PROJECT_STATES.PAUSED) {
-          return res.status(400).json({ error: "At Risk and Paused statuses are only available after launch." });
-        }
-      }
-
-      if (status === "launched") {
-        const businessId =
-          typeof project.business_id === "string"
-            ? new ObjectId(project.business_id)
-            : project.business_id;
-
-        console.log("Clearing allowed_collaborators for business:", businessId);
-
-        await ProjectModel.clearAllowedCollaborators(project._id);
-
-        await ProjectModel.collection().updateMany(
-          { business_id: businessId },
-          { $set: { allowed_collaborators: [], updated_at: new Date() } }
-        );
+      // Lifecycle transition validation
+      const validation = validateStateTransition(project.status, project.launch_status, status);
+      if (!validation.isValid) {
+        return res.status(400).json({ error: validation.error });
       }
 
       const updateUpdate = { status, updated_at: new Date() };

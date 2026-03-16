@@ -248,7 +248,7 @@ class AdminController {
         const count = currentCollaboratorsCount[0]?.count || 0;
         if (count >= limits.max_collaborators) {
           return res.status(403).json({
-            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed. Upgrade to Advanced if you need more seats.`
+            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed.`
           });
         }
       }
