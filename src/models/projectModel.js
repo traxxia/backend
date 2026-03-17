@@ -61,7 +61,7 @@ class ProjectModel {
     const userMap = {};
     users.forEach((user) => {
       if (user) {
-        const name = user.name?.trim() || user.email || "Unknown User";
+        const name = user.name?.trim() || "User";
         userMap[user._id.toString()] = name;
       }
     });
@@ -98,6 +98,9 @@ class ProjectModel {
           ai_rank: rankData.rank,
           ai_rank_score: rankData.score || null,
           ai_rank_factors: rankData.factors || {},
+          ...(rankData.impact && { impact: rankData.impact }),
+          ...(rankData.effort && { effort: rankData.effort }),
+          ...(rankData.risk && { risk: rankData.risk }),
           updated_at: new Date(),
         },
       }
@@ -114,6 +117,9 @@ class ProjectModel {
             ai_rank: ranking.rank,
             ai_rank_score: ranking.score || null,
             ai_rank_factors: ranking.factors || {},
+            ...(ranking.impact && { impact: ranking.impact }),
+            ...(ranking.effort && { effort: ranking.effort }),
+            ...(ranking.risk && { risk: ranking.risk }),
             updated_at: new Date(),
           },
         },
