@@ -9,7 +9,7 @@ on:
       - main
 
 env:
-  IMAGE_NAME: trax_dev_backend
+  IMAGE_NAME: traxxia_backend
   REGISTRY: ${{ secrets.ACR_LOGIN_SERVER }}   # e.g. myregistry.azurecr.io
 
 jobs:
