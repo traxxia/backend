@@ -29,6 +29,12 @@ cron.schedule('* * * * *', () => {
 });
 
 // Middleware
+app.use(cors({
+  origin: '*',
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS']
+}));
+app.options('*', cors()); // Explicitly handle preflight
+
 // Important: Webhook route must come BEFORE bodyParser.json()
 app.use('/api/webhook', (req, res, next) => {
   if (req.originalUrl === '/api/webhook') {
@@ -38,7 +44,7 @@ app.use('/api/webhook', (req, res, next) => {
 }, express.raw({ type: 'application/json' }), webhookRoutes);
 
 app.use(bodyParser.json());
-app.use(cors());
+// app.use(cors()); // Removed from here
 app.use('/uploads', express.static(path.join(__dirname, '../uploads')));
 
 // Routes
