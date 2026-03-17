@@ -3,10 +3,10 @@ name: Traxxia Backend CI
 on:
   push:
     branches:
-      - develop
+      - main
   pull_request:
     branches:
-      - develop
+      - main
 
 env:
   IMAGE_NAME: trax_dev_backend
