@@ -3,6 +3,7 @@ const ProjectModel = require("../models/projectModel");
 const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
+const DecisionLogModel = require("../models/decisionLogModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
 
@@ -16,8 +17,97 @@ const VALID_STATUS = Object.values(PROJECT_STATES);
 const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
+const { calculateNextReviewDate, isProjectStale } = require("../utils/helpers");
 
 
+
+// State transition validation based on Launch Status and Functional State
+function validateStateTransition(currentStatus, currentLaunchStatus, targetStatus, isAdmin = false) {
+  const status = (currentStatus || "").toLowerCase();
+  const launchStatus = (currentLaunchStatus || PROJECT_LAUNCH_STATUS.UNLAUNCHED).toLowerCase();
+  const target = (targetStatus || "").toLowerCase();
+
+  // If already Launched, cannot return to Unlaunched states (Draft)
+  if (launchStatus === PROJECT_LAUNCH_STATUS.LAUNCHED && target === PROJECT_STATES.DRAFT) {
+    return { isValid: false, error: "Once a project moves to 'Launched', it cannot return to 'Draft' (Unlaunched)." };
+  }
+
+  // Terminal states cannot transition to any other state (Except Killed which admins can edit/move)
+  if (status === PROJECT_STATES.COMPLETED || status === PROJECT_STATES.SCALED) {
+    return { isValid: false, error: `Project is in a terminal state (${status}) and cannot be moved.` };
+  }
+
+  if (status === PROJECT_STATES.KILLED && !isAdmin) {
+    return { isValid: false, error: "Project is in a terminal state (killed) and cannot be moved." };
+  }
+
+  // Transitions from Killed (Admins Only)
+  if (status === PROJECT_STATES.KILLED && isAdmin) {
+    // If it was unlaunched, it can only move to Draft or Active (if being launched)
+    if (launchStatus === PROJECT_LAUNCH_STATUS.UNLAUNCHED) {
+      if (![PROJECT_STATES.DRAFT, PROJECT_STATES.ACTIVE].includes(target)) {
+        return { isValid: false, error: `Invalid transition from Killed to ${target} for unlaunched project.` };
+      }
+    } else {
+      // If launched, it can move to any active state
+      const validStates = [PROJECT_STATES.ACTIVE, PROJECT_STATES.AT_RISK, PROJECT_STATES.PAUSED];
+      if (!validStates.includes(target) && target !== PROJECT_STATES.KILLED) {
+        return { isValid: false, error: `Invalid transition from Killed to ${target} for launched project.` };
+      }
+    }
+  }
+
+  // Transitions from Draft
+  if (status === PROJECT_STATES.DRAFT) {
+    // Draft -> Active is EXCLUSIVELY handled via the "Launch" mechanism
+    if (target === PROJECT_STATES.ACTIVE) {
+      return { isValid: false, error: "Projects can only move to 'Active' through the Launch mechanism after being ranked." };
+    }
+    // Draft -> Killed (Unlaunched) or Draft -> Draft
+    const validDraftTransitions = [PROJECT_STATES.DRAFT, PROJECT_STATES.KILLED];
+    if (!validDraftTransitions.includes(target)) {
+      return { isValid: false, error: `Invalid transition from Draft to ${target}.` };
+    }
+  }
+
+  // Transitions from Active
+  if (status === PROJECT_STATES.ACTIVE) {
+    const validActiveTransitions = [
+      PROJECT_STATES.ACTIVE,
+      PROJECT_STATES.AT_RISK,
+      PROJECT_STATES.PAUSED,
+      PROJECT_STATES.COMPLETED,
+      PROJECT_STATES.KILLED,
+      PROJECT_STATES.SCALED
+    ];
+    if (!validActiveTransitions.includes(target)) {
+      return { isValid: false, error: `Invalid transition from Active to ${target}.` };
+    }
+  }
+
+  // Transitions from At Risk
+  if (status === PROJECT_STATES.AT_RISK) {
+    const validAtRiskTransitions = [
+      PROJECT_STATES.AT_RISK,
+      PROJECT_STATES.ACTIVE,
+      PROJECT_STATES.PAUSED,
+      PROJECT_STATES.KILLED
+    ];
+    if (!validAtRiskTransitions.includes(target)) {
+      return { isValid: false, error: `Invalid transition from At Risk to ${target}.` };
+    }
+  }
+
+  // Transitions from Paused
+  if (status === PROJECT_STATES.PAUSED) {
+    const validPausedTransitions = [PROJECT_STATES.PAUSED, PROJECT_STATES.ACTIVE, PROJECT_STATES.KILLED];
+    if (!validPausedTransitions.includes(target)) {
+      return { isValid: false, error: `Invalid transition from Paused to ${target}.` };
+    }
+  }
+
+  return { isValid: true };
+}
 
 // Permission matrix for ALL project actions
 function getProjectPermissions({
@@ -48,11 +138,12 @@ function getProjectPermissions({
     case PROJECT_STATES.PAUSED:
       return {
         canCreate: false,
-        canEdit: isAdmin || isAllowedCollaborator, // Strictly admins or allowed collaborators
+        canEdit: isAdmin || isAllowedCollaborator || isOwner || isCollaborator, // Enabled editing for owners/collaborators in launched states for visual indicators
       };
 
     case PROJECT_STATES.COMPLETED:
     case PROJECT_STATES.KILLED:
+    case PROJECT_STATES.SCALED:
       return {
         canCreate: false,
         canEdit: false, // Terminal states are locked for EVERYONE (including admins)
@@ -77,6 +168,60 @@ function normalizeBudget(value) {
 }
 
 class ProjectController {
+  static _resolveOwner(project, ownerNameMap = {}, bizOwnerFallbackMap = {}) {
+    let ownerName = project.accountable_owner;
+
+    if (project.accountable_owner_id && ownerNameMap[project.accountable_owner_id.toString()]) {
+      ownerName = ownerNameMap[project.accountable_owner_id.toString()];
+    }
+
+    if (!ownerName || ownerName === "Unassigned") {
+      const fallingBackToBizOwner = bizOwnerFallbackMap[project.business_id?.toString()];
+      ownerName = fallingBackToBizOwner || project.created_by;
+    }
+
+    if (!ownerName || ownerName === "Unassigned") {
+      ownerName = project.created_by || "Unassigned";
+    }
+
+    if (ownerName === "User" || ownerName === "Unknown User") {
+      const fallback = bizOwnerFallbackMap[project.business_id?.toString()];
+      ownerName = fallback || "Company Admin";
+    }
+
+    return ownerName;
+  }
+
+  static async _getOwnerNames(projects) {
+    const db = getDB();
+    const uniqueBusinessIds = [...new Set(projects.map(p => p.business_id?.toString()).filter(Boolean))];
+    const businesses = await db.collection("user_businesses")
+      .find({ _id: { $in: uniqueBusinessIds.map(id => new ObjectId(id)) } })
+      .toArray();
+
+    const businessesMap = {};
+    businesses.forEach(b => businessesMap[b._id.toString()] = b);
+
+    const bOwnerIds = [...new Set(businesses.map(b => b.user_id?.toString()).filter(Boolean))];
+    const bOwners = await UserModel.getAll({ _id: { $in: bOwnerIds.map(id => new ObjectId(id)) } });
+    const bOwnerNames = {};
+    bOwners.forEach(u => {
+      bOwnerNames[u._id.toString()] = u.name || (u.role_name === 'company_admin' ? "Company Admin" : "Business Owner");
+    });
+
+    const bizOwnerFallbackMap = {};
+    businesses.forEach(b => {
+      if (b.user_id) bizOwnerFallbackMap[b._id.toString()] = bOwnerNames[b.user_id.toString()];
+    });
+
+    const uniqueOwnerIds = [...new Set(projects.map(p => p.accountable_owner_id?.toString()).filter(Boolean))];
+    const ownerUsersInfo = await UserModel.getAll({ _id: { $in: uniqueOwnerIds.map(id => new ObjectId(id)) } });
+    const ownerNameMap = {};
+    ownerUsersInfo.forEach(u => ownerNameMap[u._id.toString()] = u.name || (u.role_name === 'company_admin' ? "Company Admin" : "User"));
+
+    return { ownerNameMap, bizOwnerFallbackMap, businessesMap };
+  }
+
   static async getAll(req, res) {
     const db = getDB();
 
@@ -127,15 +272,23 @@ class ProjectController {
       const total = await ProjectModel.count(filter);
       let projects = await ProjectModel.populateCreatedBy(raw);
 
-      let businessStatus = null;
-      let businessAccessMode = null;
-      if (business_id && ObjectId.isValid(business_id)) {
-        const business = await BusinessModel.findById(business_id);
-        if (business) {
-          businessStatus = business.status;
-          businessAccessMode = business.access_mode;
-        }
-      }
+      const projectIds = projects.map(p => p._id);
+
+      const { ownerNameMap, bizOwnerFallbackMap, businessesMap } = await ProjectController._getOwnerNames(projects);
+
+
+      const allLogs = await db.collection("decision_logs")
+        .find({ project_id: { $in: projectIds } })
+        .sort({ changed_at: -1 })
+        .toArray();
+
+      const logsByProject = {};
+      allLogs.forEach(log => {
+        const idStr = log.project_id.toString();
+        if (!logsByProject[idStr]) logsByProject[idStr] = [];
+        logsByProject[idStr].push(log);
+      });
+
 
       projects = projects.map(project => {
         let cleanDesc = project.description || "";
@@ -145,13 +298,27 @@ class ProjectController {
             .split('\n')[0];
         }
 
+        const ownerName = ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap);
+
         return {
           ...project,
           description: cleanDesc,
+          accountable_owner: ownerName,
           allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
           status: project.status, // Ensure status is returned
+          decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []), // fallback to embedded if still there
+          is_stale: isProjectStale(project.next_review_date),
         };
       });
+
+      // Get status and access mode from the primary requested business context if applicable
+      let businessStatus = null;
+      let businessAccessMode = null;
+      if (business_id && ObjectId.isValid(business_id) && businessesMap[business_id.toString()]) {
+        const b = businessesMap[business_id.toString()];
+        businessStatus = b.status;
+        businessAccessMode = b.access_mode;
+      }
 
       let ranking_lock_summary = {
         locked_users_count: 0,
@@ -212,7 +379,10 @@ class ProjectController {
       res.json({
         total,
         count: projects.length,
-        projects,
+        projects: projects.map(p => ({
+          ...p,
+          is_stale: isProjectStale(p.next_review_date)
+        })),
         business_status: businessStatus,
         business_access_mode: businessAccessMode,
         ranking_lock_summary,
@@ -234,6 +404,14 @@ class ProjectController {
       if (!raw) return res.status(404).json({ error: "Project not found" });
 
       const [project] = await ProjectModel.populateCreatedBy(raw);
+      project.is_stale = isProjectStale(project.next_review_date);
+
+      const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames([project]);
+      project.accountable_owner = ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap);
+
+      // Attach decision logs from the separate collection
+      const DecisionLogModel = require("../models/decisionLogModel");
+      project.decision_log = await DecisionLogModel.findByProjectId(id);
 
       res.json({ project });
     } catch (err) {
@@ -271,7 +449,8 @@ class ProjectController {
         learning_state,
         last_reviewed,
         constraints_non_negotiables,
-        explicitly_out_of_scope
+        explicitly_out_of_scope,
+        accountable_owner_id
       } = req.body;
 
       // Required fields
@@ -428,15 +607,20 @@ class ProjectController {
         description: normalizeString(description),
         why_this_matters: normalizeString(why_this_matters),
         strategic_decision: normalizeString(strategic_decision),
-        accountable_owner: normalizeString(accountable_owner),
+        accountable_owner: await (async () => {
+          if (accountable_owner_id && ObjectId.isValid(accountable_owner_id)) {
+            const ownerUser = await UserModel.findById(accountable_owner_id);
+            if (ownerUser) return ownerUser.name || ownerUser.email;
+          }
+          return normalizeString(accountable_owner);
+        })(),
         key_assumptions: Array.isArray(key_assumptions)
           ? key_assumptions.slice(0, 3).map(normalizeString)
           : [],
-        learning_state: "testing",
         success_criteria: normalizeString(success_criteria),
         kill_criteria: normalizeString(kill_criteria),
         review_cadence: normalizeString(review_cadence),
-
+        accountable_owner_id: accountable_owner_id ? new ObjectId(accountable_owner_id) : null,
         status: status || PROJECT_STATES.DRAFT,
         launch_status: PROJECT_LAUNCH_STATUS.UNLAUNCHED,
         learning_state: learning_state || "Testing",
@@ -458,6 +642,7 @@ class ProjectController {
             budget_estimate === undefined
             ? ""
             : String(budget_estimate).trim(),
+        next_review_date: calculateNextReviewDate(last_reviewed || new Date(), review_cadence),
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -509,8 +694,11 @@ class ProjectController {
       const existing = await ProjectModel.findById(id);
       if (!existing) return res.status(404).json({ error: "Not found" });
 
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+
       // Block ANY updates to terminal states
-      if (existing.status === PROJECT_STATES.KILLED || existing.status === PROJECT_STATES.COMPLETED) {
+      if ((existing.status === PROJECT_STATES.COMPLETED || existing.status === PROJECT_STATES.SCALED) ||
+        (existing.status === PROJECT_STATES.KILLED && !isAdmin)) {
         return res.status(403).json({
           error: `This project is in a terminal state (${existing.status}) and cannot be modified.`
         });
@@ -524,7 +712,6 @@ class ProjectController {
       }
 
       if (existing.status === "launched") {
-        const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
         const isInAllowedCollabs = Array.isArray(existing.allowed_collaborators) &&
           existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
 
@@ -576,7 +763,6 @@ class ProjectController {
       if (!business)
         return res.status(404).json({ error: "Parent business not found" });
 
-      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(
         (id) => id.toString() === req.user._id.toString()
@@ -641,6 +827,20 @@ class ProjectController {
       if (req.body.accountable_owner !== undefined)
         updateData.accountable_owner = normalizeString(req.body.accountable_owner);
 
+      if (req.body.accountable_owner_id !== undefined) {
+        const ownerId = req.body.accountable_owner_id;
+        if (ownerId === "" || ownerId === null) {
+          updateData.accountable_owner_id = null;
+        } else if (ObjectId.isValid(ownerId)) {
+          updateData.accountable_owner_id = new ObjectId(ownerId);
+          // Sync name if possible
+          const ownerUser = await UserModel.findById(ownerId);
+          if (ownerUser) {
+            updateData.accountable_owner = ownerUser.name || ownerUser.email;
+          }
+        }
+      }
+
       if (req.body.key_assumptions !== undefined) {
         if (req.body.key_assumptions === "" || req.body.key_assumptions === null) {
           updateData.key_assumptions = [];
@@ -670,6 +870,43 @@ class ProjectController {
 
           if (!found) {
             return res.status(400).json({ error: "Invalid status value" });
+          }
+
+          // Validation for state transition
+          const transition = validateStateTransition(existing.status, existing.launch_status, found, isAdmin);
+          if (!transition.isValid) {
+            return res.status(400).json({ error: transition.error });
+          }
+
+          if (found !== existing.status) {
+
+            if (!req.body.justification || String(req.body.justification).trim() === "") {
+              return res.status(400).json({
+                error: "Justification is required when changing project status."
+              });
+            }
+
+            const justification = String(req.body.justification).trim();
+
+            // Allow alphabets + spaces + punctuation
+            const validSentence = /^[A-Za-z\s.,'-]+$/;
+
+            if (!validSentence.test(justification)) {
+              return res.status(400).json({
+                error: "Justification must contain only letters and valid sentence punctuation."
+              });
+            }
+
+            const logEntry = {
+              project_id: new ObjectId(id),
+              from_status: existing.status,
+              to_status: found,
+              justification: justification,
+              changed_by: new ObjectId(req.user._id),
+              changed_at: new Date()
+            };
+
+            await DecisionLogModel.create(logEntry);
           }
 
           updateData.status = found;
@@ -729,9 +966,15 @@ class ProjectController {
         updateData.learning_state = normalizeString(req.body.learning_state);
       }
 
-      if (req.body.last_reviewed !== undefined) {
-        const lr = req.body.last_reviewed;
-        updateData.last_reviewed = (lr === null || lr === "") ? null : new Date(lr);
+      if (req.body.last_reviewed !== undefined || req.body.review_cadence !== undefined) {
+        const lr = req.body.last_reviewed !== undefined ? req.body.last_reviewed : existing.last_reviewed;
+        const rc = req.body.review_cadence !== undefined ? req.body.review_cadence : existing.review_cadence;
+
+        if (req.body.last_reviewed !== undefined) {
+          updateData.last_reviewed = (req.body.last_reviewed === null || req.body.last_reviewed === "") ? null : new Date(req.body.last_reviewed);
+        }
+
+        updateData.next_review_date = calculateNextReviewDate(lr || new Date(), rc);
       }
 
       delete updateData._id;
@@ -742,6 +985,7 @@ class ProjectController {
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
+      project.is_stale = isProjectStale(project.next_review_date);
 
       res.json({
         message: "Project updated successfully",
@@ -775,6 +1019,9 @@ class ProjectController {
         const project = await ProjectModel.findById(id);
         if (!project) continue;
 
+        if (!project.review_cadence || project.review_cadence.trim() === "") {
+          return res.status(400).json({ error: `Project '${project.project_name}' is missing a review cadence. Please set one before launching.` });
+        }
         if (!businessId) businessId = project.business_id;
         projectsToLaunch.push(project);
       }
@@ -815,7 +1062,7 @@ class ProjectController {
 
         const bulletedList = unrankedProjectNames.map(name => `• ${name}`).join("\n");
         return res.status(400).json({
-          error: `The following projects chosen for launch are not ranked:\n${bulletedList}\n\nPlease rank them before launching.`
+          error: `Launch failed: Numerical ranks are mandatory for all projects moved to 'Launched'. The following projects are not ranked:\n${bulletedList}\n\nPlease assign ranks before launching.`
         });
       }
 
@@ -904,10 +1151,13 @@ class ProjectController {
         }
 
         // Perform launch
+        const now = new Date();
         await ProjectModel.update(id, {
           status: PROJECT_STATES.ACTIVE,
           launch_status: PROJECT_LAUNCH_STATUS.LAUNCHED,
-          updated_at: new Date()
+          last_reviewed: now,
+          next_review_date: calculateNextReviewDate(now, project.review_cadence),
+          updated_at: now
         });
 
         results.push({ id, status: "launched", is_ranked: true });
@@ -1171,16 +1421,23 @@ class ProjectController {
         return new Date(a.project.created_at) - new Date(b.project.created_at);
       });
 
-      const responseProjects = ordered.map(({ ranking, project }) => {
+      const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames(allProjects);
+
+      const populatedProjects = await ProjectModel.populateCreatedBy(allProjects);
+
+      const responseProjects = ordered.map(({ ranking, project: rawProject }) => {
+        const project = populatedProjects.find(p => p._id.toString() === rawProject._id.toString()) || rawProject;
         return {
           ...project,
           project_id: project._id,
           project_name: project.project_name,
+          accountable_owner: ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap),
           rank: ranking.rank,
           rationals: ranking.rationals || "",
           locked: ranking.locked || false,
           ai_rank: project.ai_rank || null,
           ai_rank_score: project.ai_rank_score || null,
+          is_stale: isProjectStale(project.next_review_date),
         };
       });
 
@@ -1222,6 +1479,10 @@ class ProjectController {
         business_id: new ObjectId(business_id),
       });
 
+      const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames(projects);
+
+      const populatedProjects = await ProjectModel.populateCreatedBy(projects);
+
       const rankMap = {};
       rankings.forEach(r => {
         rankMap[r.project_id.toString()] = r.rank;
@@ -1230,15 +1491,17 @@ class ProjectController {
       const ranked = [];
       const unranked = [];
 
-      projects.forEach(p => {
+      populatedProjects.forEach(p => {
         const rank = rankMap[p._id.toString()] ?? null;
         const item = {
           ...p,
           admin_user_id: admin_user_id,
           business_id,
           project_id: p._id,
+          accountable_owner: ProjectController._resolveOwner(p, ownerNameMap, bizOwnerFallbackMap),
           rank,
           created_at: p.created_at,
+          is_stale: isProjectStale(p.next_review_date),
         };
 
         if (rank !== null) {
@@ -1325,7 +1588,7 @@ class ProjectController {
         });
       }
 
-      if (found.status === PROJECT_STATES.KILLED || found.status === PROJECT_STATES.COMPLETED) {
+      if (found.status === PROJECT_STATES.KILLED || found.status === PROJECT_STATES.COMPLETED || found.status === PROJECT_STATES.SCALED) {
         return res.status(403).json({
           error: `Project is already in a terminal state (${found.status})`
         });
@@ -1376,39 +1639,10 @@ class ProjectController {
         return res.status(404).json({ error: "Project not found" });
       }
 
-      // Prevent changing from terminal states
-      if (project.status === PROJECT_STATES.KILLED) {
-        return res.status(403).json({
-          error: "This project is in killed state"
-        });
-      }
-      if (project.status === PROJECT_STATES.COMPLETED) {
-        return res.status(403).json({
-          error: "Cannot change status of a project that is already Completed."
-        });
-      }
-
-      // Pre-launch restrictions
-      if (project.launch_status !== PROJECT_LAUNCH_STATUS.LAUNCHED) {
-        if (status === PROJECT_STATES.AT_RISK || status === PROJECT_STATES.PAUSED) {
-          return res.status(400).json({ error: "At Risk and Paused statuses are only available after launch." });
-        }
-      }
-
-      if (status === "launched") {
-        const businessId =
-          typeof project.business_id === "string"
-            ? new ObjectId(project.business_id)
-            : project.business_id;
-
-        console.log("Clearing allowed_collaborators for business:", businessId);
-
-        await ProjectModel.clearAllowedCollaborators(project._id);
-
-        await ProjectModel.collection().updateMany(
-          { business_id: businessId },
-          { $set: { allowed_collaborators: [], updated_at: new Date() } }
-        );
+      // Lifecycle transition validation
+      const validation = validateStateTransition(project.status, project.launch_status, status);
+      if (!validation.isValid) {
+        return res.status(400).json({ error: validation.error });
       }
 
       const updateUpdate = { status, updated_at: new Date() };
@@ -1617,6 +1851,8 @@ class ProjectController {
 
         const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
           project.allowed_collaborators.some(id => id.toString() === user_id.toString());
+
+        const isOwner = project.accountable_owner_id && project.accountable_owner_id.toString() === user_id.toString();
 
         if ((isLaunched || isActive) && !project.edit_unlocked) {
           // For launched projects, only those with special access can edit
@@ -2284,6 +2520,158 @@ class ProjectController {
 
     } catch (err) {
       console.error("GET COLLABORATOR CONSENSUS ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async getDecisionLogs(req, res) {
+    try {
+      const { projectId } = req.params;
+      console.log(`[ProjectController] Fetching decision logs for project: ${projectId}`);
+
+      if (!ObjectId.isValid(projectId)) {
+        return res.status(400).json({ error: "Invalid project ID" });
+      }
+
+      const logs = await DecisionLogModel.findByProjectId(projectId);
+
+      res.json({
+        message: "Decision logs fetched successfully",
+        logs
+      });
+
+    } catch (err) {
+      console.error("GET DECISION LOGS ERROR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+
+
+  static async adhocUpdate(req, res) {
+    try {
+      const { id } = req.params;
+      const { status, learning_state, justification } = req.body;
+
+      if (!justification) {
+        return res.status(400).json({ error: "Justification is mandatory for ad-hoc updates" });
+      }
+
+      const existing = await ProjectModel.findById(id);
+      if (!existing) return res.status(404).json({ error: "Project not found" });
+
+      // Permission check
+      const business = await BusinessModel.findById(existing.business_id);
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+      const isOwner = business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
+
+      const isOwnerAccountable = existing.accountable_owner_id && existing.accountable_owner_id.toString() === req.user._id.toString();
+
+      if (!isAdmin && !isOwnerAccountable && !permissions.canEdit) {
+        return res.status(403).json({ error: "You do not have permission to update this project. Only admins or the accountable owner can perform updates." });
+      }
+
+      const updateData = {
+        updated_at: new Date()
+      };
+
+      if (status) updateData.status = status;
+      if (learning_state) updateData.learning_state = learning_state;
+
+      await ProjectModel.update(id, updateData);
+
+      const updated = await ProjectModel.findById(id);
+      const [project] = await ProjectModel.populateCreatedBy(updated);
+      project.is_stale = isProjectStale(project.next_review_date);
+
+      // Log the decision
+      const db = getDB();
+      await db.collection("audit_trail").insertOne({
+        user_id: new ObjectId(req.user._id),
+        event_type: "project_decision_log",
+        event_data: {
+          project_id: new ObjectId(id),
+          business_id: existing.business_id,
+          action: "adhoc_update",
+          justification,
+          old_state: { status: existing.status, learning_state: existing.learning_state },
+          new_state: { status: status || existing.status, learning_state: learning_state || existing.learning_state }
+        },
+        timestamp: new Date()
+      });
+
+      res.json({ message: "Ad-hoc update processed", project });
+    } catch (err) {
+      console.error("ADHOC UPDATE ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async performReview(req, res) {
+    try {
+      const { id } = req.params;
+      const { status, learning_state, justification, no_changes } = req.body;
+
+      if (!justification) {
+        return res.status(400).json({ error: "Justification is mandatory for reviews" });
+      }
+
+      const existing = await ProjectModel.findById(id);
+      if (!existing) return res.status(404).json({ error: "Project not found" });
+
+      // Permission check
+      const business = await BusinessModel.findById(existing.business_id);
+      const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
+      const isOwner = business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
+
+      const isOwnerAccountable = existing.accountable_owner_id && existing.accountable_owner_id.toString() === req.user._id.toString();
+
+      if (!isAdmin && !isOwnerAccountable && !permissions.canEdit) {
+        return res.status(403).json({ error: "You do not have permission to review this project. Only admins or the accountable owner can perform reviews." });
+      }
+
+      const now = new Date();
+      const updateData = {
+        last_reviewed: now,
+        updated_at: now,
+        next_review_date: calculateNextReviewDate(now, existing.review_cadence)
+      };
+
+      if (!no_changes) {
+        if (status) updateData.status = status;
+        if (learning_state) updateData.learning_state = learning_state;
+      }
+
+      await ProjectModel.update(id, updateData);
+
+      const updated = await ProjectModel.findById(id);
+      const [project] = await ProjectModel.populateCreatedBy(updated);
+      project.is_stale = isProjectStale(project.next_review_date);
+
+      // Log the decision
+      const db = getDB();
+      await db.collection("audit_trail").insertOne({
+        user_id: new ObjectId(req.user._id),
+        event_type: "project_decision_log",
+        event_data: {
+          project_id: new ObjectId(id),
+          business_id: existing.business_id,
+          action: no_changes ? "no_change_review" : "cadence_review",
+          justification,
+          old_state: { status: existing.status, learning_state: existing.learning_state },
+          new_state: {
+            status: no_changes ? existing.status : (status || existing.status),
+            learning_state: no_changes ? existing.learning_state : (learning_state || existing.learning_state)
+          }
+        },
+        timestamp: new Date()
+      });
+
+      res.json({ message: "Review processed", project });
+    } catch (err) {
+      console.error("PERFORM REVIEW ERR:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
