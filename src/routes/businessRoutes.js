@@ -17,12 +17,6 @@ router.get(
   BusinessController.getCollaborators
 );
 
-router.get(
-  "/:id/eligible-owners",
-  authenticateToken,
-  BusinessController.getEligibleOwners
-);
-
 router.patch(
   '/:businessId/project/:projectId/allowed-collaborators',
   authenticateToken,

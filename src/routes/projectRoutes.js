@@ -31,18 +31,10 @@ router.get("/ai-rankings",
 );
 router.get("/consensus-analysis", authenticateToken, ProjectController.getConsensusAnalysis);
 router.get("/collaborator-consensus", authenticateToken, ProjectController.getCollaboratorConsensus);
-router.get(
-  "/:projectId/decision-logs",
-  authenticateToken,
-  ProjectController.getDecisionLogs
-);
-
 // Project-specific routes (keep these AFTER the more specific routes above)
 router.get("/:id", authenticateToken, ProjectController.getById);
 router.patch("/:id", authenticateToken, checkWriteAccess, ProjectController.update);
 router.patch("/:id/status", authenticateToken, checkWriteAccess, ProjectController.changeStatus);
-router.patch("/:id/adhoc-update", authenticateToken, checkWriteAccess, ProjectController.adhocUpdate);
-router.post("/:id/review", authenticateToken, checkWriteAccess, ProjectController.performReview);
 router.put("/edit-access", authenticateToken, ProjectController.grantEditAccess);
 
 router.delete(
