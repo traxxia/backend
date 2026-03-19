@@ -3,14 +3,14 @@ name: Traxxia Backend CI
 on:
   push:
     branches:
-      - deployment
+      - qa
   pull_request:
     branches:
-      - deployment
+      - qa
 
 env:
-  IMAGE_NAME: traxxia_backend
-  REGISTRY: ${{ secrets.ACR_LOGIN_SERVER }}   # e.g. myregistry.azurecr.io
+  IMAGE_NAME: traxxia_qa_backend
+  REGISTRY: ${{ secrets.QA_ACR_LOGIN_SERVER }}   # e.g. myregistry.azurecr.io
 
 jobs:
   # ─────────────────────────────────────────────
@@ -63,9 +63,9 @@ jobs:
       - name: Log in to Azure Container Registry
         uses: docker/login-action@v3
         with:
-          registry: ${{ secrets.ACR_LOGIN_SERVER }}
-          username: ${{ secrets.ACR_USERNAME }}
-          password: ${{ secrets.ACR_PASSWORD }}
+          registry: ${{ secrets.QA_ACR_LOGIN_SERVER }}
+          username: ${{ secrets.QA_ACR_USERNAME }}
+          password: ${{ secrets.QA_ACR_PASSWORD }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
