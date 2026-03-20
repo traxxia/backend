@@ -2,6 +2,7 @@ const { ObjectId } = require("mongodb");
 const BusinessModel = require("../models/businessModel");
 const UserModel = require("../models/userModel");
 const ConversationModel = require("../models/conversationModel");
+const AnswerModel = require("../models/answerModel");
 const QuestionModel = require("../models/questionModel");
 const ProjectModel = require("../models/projectModel");
 const ProjectRankingModel = require("../models/projectRankingModel")
@@ -165,27 +166,21 @@ class BusinessController {
       const enhance = async (businessList) => {
         return Promise.all(
           businessList.map(async (business) => {
-            const conversations = await ConversationModel.findByFilter({
-              user_id: business.user_id,
-              business_id: business._id,
-              conversation_type: "question_answer",
-            });
+            const answers = await AnswerModel.getByBusinessId(business._id);
 
             const questionStats = {};
-            conversations.forEach((conv) => {
-              if (conv.question_id) {
-                const qid = conv.question_id.toString();
+            answers.forEach((ans) => {
+              if (ans.question_id) {
+                const qid = ans.question_id.toString();
                 if (!questionStats[qid])
                   questionStats[qid] = {
                     hasAnswers: false,
                     isComplete: false,
                     answerCount: 0,
                   };
-                if (conv.answer_text && conv.answer_text.trim() !== "") {
+                if (ans.answer && ans.answer.trim() !== "") {
                   questionStats[qid].hasAnswers = true;
                   questionStats[qid].answerCount++;
-                }
-                if (conv.metadata && conv.metadata.is_complete === true) {
                   questionStats[qid].isComplete = true;
                 }
               }
@@ -313,27 +308,21 @@ class BusinessController {
         phase: { $in: ALLOWED_PHASES },
       });
 
-      const conversations = await ConversationModel.findByFilter({
-        user_id: business.user_id,
-        business_id: business._id,
-        conversation_type: "question_answer",
-      });
+      const answers = await AnswerModel.getByBusinessId(business._id);
 
       const questionStats = {};
-      conversations.forEach((conv) => {
-        if (conv.question_id) {
-          const qid = conv.question_id.toString();
+      answers.forEach((ans) => {
+        if (ans.question_id) {
+          const qid = ans.question_id.toString();
           if (!questionStats[qid])
             questionStats[qid] = {
               hasAnswers: false,
               isComplete: false,
               answerCount: 0,
             };
-          if (conv.answer_text && conv.answer_text.trim() !== "") {
+          if (ans.answer && ans.answer.trim() !== "") {
             questionStats[qid].hasAnswers = true;
             questionStats[qid].answerCount++;
-          }
-          if (conv.metadata && conv.metadata.is_complete === true) {
             questionStats[qid].isComplete = true;
           }
         }
