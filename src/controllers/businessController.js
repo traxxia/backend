@@ -2,6 +2,7 @@ const { ObjectId } = require("mongodb");
 const BusinessModel = require("../models/businessModel");
 const UserModel = require("../models/userModel");
 const ConversationModel = require("../models/conversationModel");
+const AnswerModel = require("../models/answerModel");
 const QuestionModel = require("../models/questionModel");
 const ProjectModel = require("../models/projectModel");
 const ProjectRankingModel = require("../models/projectRankingModel")
@@ -165,27 +166,21 @@ class BusinessController {
       const enhance = async (businessList) => {
         return Promise.all(
           businessList.map(async (business) => {
-            const conversations = await ConversationModel.findByFilter({
-              user_id: business.user_id,
-              business_id: business._id,
-              conversation_type: "question_answer",
-            });
+            const answers = await AnswerModel.getByBusinessId(business._id);
 
             const questionStats = {};
-            conversations.forEach((conv) => {
-              if (conv.question_id) {
-                const qid = conv.question_id.toString();
+            answers.forEach((ans) => {
+              if (ans.question_id) {
+                const qid = ans.question_id.toString();
                 if (!questionStats[qid])
                   questionStats[qid] = {
                     hasAnswers: false,
                     isComplete: false,
                     answerCount: 0,
                   };
-                if (conv.answer_text && conv.answer_text.trim() !== "") {
+                if (ans.answer && ans.answer.trim() !== "") {
                   questionStats[qid].hasAnswers = true;
                   questionStats[qid].answerCount++;
-                }
-                if (conv.metadata && conv.metadata.is_complete === true) {
                   questionStats[qid].isComplete = true;
                 }
               }
@@ -313,27 +308,21 @@ class BusinessController {
         phase: { $in: ALLOWED_PHASES },
       });
 
-      const conversations = await ConversationModel.findByFilter({
-        user_id: business.user_id,
-        business_id: business._id,
-        conversation_type: "question_answer",
-      });
+      const answers = await AnswerModel.getByBusinessId(business._id);
 
       const questionStats = {};
-      conversations.forEach((conv) => {
-        if (conv.question_id) {
-          const qid = conv.question_id.toString();
+      answers.forEach((ans) => {
+        if (ans.question_id) {
+          const qid = ans.question_id.toString();
           if (!questionStats[qid])
             questionStats[qid] = {
               hasAnswers: false,
               isComplete: false,
               answerCount: 0,
             };
-          if (conv.answer_text && conv.answer_text.trim() !== "") {
+          if (ans.answer && ans.answer.trim() !== "") {
             questionStats[qid].hasAnswers = true;
             questionStats[qid].answerCount++;
-          }
-          if (conv.metadata && conv.metadata.is_complete === true) {
             questionStats[qid].isComplete = true;
           }
         }
@@ -651,54 +640,6 @@ class BusinessController {
     } catch (err) {
       console.error("GET collaborators error:", err);
       res.status(500).json({ error: "Failed to fetch collaborators" });
-    }
-  }
-
-  static async getEligibleOwners(req, res) {
-    try {
-      const businessId = req.params.id;
-
-      if (!ObjectId.isValid(businessId)) {
-        return res.status(400).json({ error: "Invalid business id" });
-      }
-
-      const business = await BusinessModel.findById(businessId);
-      if (!business) {
-        return res.status(404).json({ error: "Business not found" });
-      }
-
-      // Check if user has access to this business
-      const isOwner = business.user_id && business.user_id.toString() === req.user._id.toString();
-      const isCollaborator = (business.collaborators || []).some(
-        (id) => id.toString() === req.user._id.toString()
-      );
-      const isAdmin = ["super_admin", "company_admin"].includes(req.user.role.role_name);
-
-      if (!isOwner && !isCollaborator && !isAdmin) {
-        return res.status(403).json({ error: "Access denied" });
-      }
-
-      const ownerId = business.user_id;
-      const collaboratorIds = business.collaborators || [];
-      const allEligibleIds = [ownerId, ...collaboratorIds];
-
-      const users = await UserModel.getAll({
-        _id: { $in: allEligibleIds.map(id => new ObjectId(id)) }
-      });
-
-      const response = users.map(u => ({
-  _id: u._id,
-  name: u.name || u.email,
-  email: u.email,
-  role: u.role_name,
-  is_business_owner: u._id.toString() === ownerId.toString(),
-  is_company_admin: u.role_name === "company_admin"
-}));
-
-      res.json({ eligible_owners: response });
-    } catch (err) {
-      console.error("GET eligible owners error:", err);
-      res.status(500).json({ error: "Failed to fetch eligible owners" });
     }
   }
 

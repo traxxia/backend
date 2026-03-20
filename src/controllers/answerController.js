@@ -25,6 +25,32 @@ class AnswerController {
     }
   }
 
+  static async bulkCreate(req, res) {
+    try {
+      const { business_id, answers } = req.body;
+      
+      if (!business_id || !Array.isArray(answers) || answers.length === 0) {
+        return res.status(400).json({ error: 'business_id and a non-empty array of answers are required' });
+      }
+
+      const answersData = answers.map(item => ({
+        business_id: new ObjectId(business_id),
+        question_id: new ObjectId(item.question_id),
+        answer: item.answer
+      }));
+
+      const result = await AnswerModel.bulkCreate(answersData);
+      
+      res.status(201).json({
+        message: `${answers.length} answers created successfully`,
+        data: { insertedIds: result }
+      });
+    } catch (error) {
+      console.error('Bulk create answers error:', error);
+      res.status(500).json({ error: 'Failed to bulk create answers' });
+    }
+  }
+
   static async getByID(req, res) {
     try {
       const { id } = req.params;

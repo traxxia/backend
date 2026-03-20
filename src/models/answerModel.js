@@ -12,6 +12,17 @@ class AnswerModel {
     return result.insertedId;
   }
 
+  static async bulkCreate(answersData) {
+    const db = getDB();
+    const formattedAnswers = answersData.map(answer => ({
+      ...answer,
+      created_at: new Date(),
+      updated_at: new Date()
+    }));
+    const result = await db.collection('answers').insertMany(formattedAnswers);
+    return result.insertedIds;
+  }
+
   static async getById(id) {
     const db = getDB();
     return await db.collection('answers').findOne({ _id: new ObjectId(id) });
