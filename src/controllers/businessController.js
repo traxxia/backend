@@ -422,7 +422,7 @@ class BusinessController {
           .json({ error: "Country must be at least 2 characters long" });
       }
 
-      if (req.user.role.role_name === "collaborator" || req.user.role.role_name === "user") {
+      if (req.user.role.role_name === "collaborator") {
         return res.status(403).json({
           error: "Collaborators cannot create businesses. Please contact your admin."
         });
