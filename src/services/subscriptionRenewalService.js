@@ -31,8 +31,23 @@ class SubscriptionRenewalService {
 
         console.log(`[Auto-Renewal] Found ${expiredCompanies.length} subscriptions that need renewal in Stripe...`);
 
+        // Fetch all plans to check their disabled status
+        const plans = await db.collection('plans').find().toArray();
+        const planMap = plans.reduce((acc, plan) => {
+            acc[plan._id.toString()] = plan;
+            return acc;
+        }, {});
+
         for (const company of expiredCompanies) {
             try {
+                const planIdStr = typeof company.plan_id === 'object' ? company.plan_id.toString() : company.plan_id;
+                const companyPlan = planMap[planIdStr];
+
+                if (companyPlan && companyPlan.status === 'disable') {
+                    console.log(`[Auto-Renewal] Skipping renewal for ${company.company_name} because their plan (${companyPlan.name}) is disabled. Letting it naturally expire.`);
+                    continue; // Leave it for Stripe to cancel at period end
+                }
+
                 console.log(`[Auto-Renewal] Found Expired: ${company.company_name}`);
                 console.log(`[Auto-Renewal] Triggering Stripe...`);
 

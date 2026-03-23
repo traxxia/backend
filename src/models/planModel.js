@@ -2,9 +2,10 @@ const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 
 class PlanModel {
-  static async getAll() {
+  static async getAll(includeInactive = false) {
     const db = getDB();
-    return await db.collection('plans').find({ status: 'active' }).sort({ _id: 1 }).toArray();
+    const query = includeInactive ? {} : { status: 'active' };
+    return await db.collection('plans').find(query).sort({ _id: 1 }).toArray();
   }
 
   static async findById(planId) {
