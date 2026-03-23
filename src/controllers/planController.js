@@ -1,5 +1,6 @@
 const PlanModel = require('../models/planModel');
 const StripeService = require('../services/stripeService');
+const { logAuditEvent } = require('../services/auditService');
 class PlanController {
     static async getAll(req, res) {
         try {
@@ -29,8 +30,15 @@ class PlanController {
         try {
             const planData = req.body;
             const userRole = req.user?.role?.role_name || req.user?.role;
-            if (userRole !== 'admin' && userRole !== 'super_admin') {
-                return res.status(403).json({ error: 'Access denied. Admin or Super Admin only.' });
+            if (userRole !== 'super_admin') {
+                return res.status(403).json({ error: 'Access denied. Super Admin only.' });
+            }
+
+            // Sanitize features if they exist
+            if (planData.features && Array.isArray(planData.features)) {
+                planData.features = planData.features
+                    .map(f => typeof f === 'string' ? f.trim() : f)
+                    .filter(f => f !== '');
             }
 
             if (planData.name) {
@@ -52,6 +60,14 @@ class PlanController {
             }
 
             const planId = await PlanModel.create(planData);
+            
+            // Log audit event
+            await logAuditEvent(req.user._id, 'plan_created', { 
+                plan_name: planData.name, 
+                plan_id: planId,
+                price: planData.price 
+            });
+
             res.status(201).json({ message: 'Plan created successfully', planId, stripe_price_id: stripePriceId });
         } catch (error) {
             console.error('Failed to create plan:', error);
@@ -65,8 +81,15 @@ class PlanController {
             const planData = req.body;
 
             const userRole = req.user?.role?.role_name || req.user?.role;
-            if (userRole !== 'admin' && userRole !== 'super_admin') {
-                return res.status(403).json({ error: 'Access denied. Admin or Super Admin only.' });
+            if (userRole !== 'super_admin') {
+                return res.status(403).json({ error: 'Access denied. Super Admin only.' });
+            }
+
+            // Sanitize features if they exist
+            if (planData.features && Array.isArray(planData.features)) {
+                planData.features = planData.features
+                    .map(f => typeof f === 'string' ? f.trim() : f)
+                    .filter(f => f !== '');
             }
 
             // Capture old plan to check for status transitions
@@ -77,35 +100,59 @@ class PlanController {
 
             const result = await PlanModel.update(planId, planData);
 
-            // Handle Stripe cancel_at_period_end toggling
-            if (planData.status && planData.status !== oldPlan.status) {
-                const db = require('../config/database').getDB();
-                const { ObjectId } = require('mongodb');
-                
-                // Find all active companies on this plan
-                const companies = await db.collection('companies').find({
-                    plan_id: new ObjectId(planId),
-                    stripe_subscription_id: { $ne: null },
-                    subscription_status: { $in: ['active', 'past_due', 'trialing'] }
-                }).toArray();
+            // Log audit event
+            await logAuditEvent(req.user._id, 'plan_updated', { 
+                plan_id: planId, 
+                plan_name: oldPlan.name,
+                changes: planData 
+            });
 
-                for (const company of companies) {
+            // Handle Stripe cancel_at_period_end toggling in the "background" (non-blocking)
+            if (planData.status && planData.status !== oldPlan.status) {
+                // Return response early to the user
+                res.json({ message: 'Plan updated successfully. Stripe synchronization started in background.' });
+
+                // Start background sync
+                (async () => {
                     try {
-                        if (planData.status === 'disable') {
-                            console.log(`[Plan Controller] Canceling Stripe auto-renewal for company ${company.company_name} because plan was disabled.`);
-                            await StripeService.updateSubscription(company.stripe_subscription_id, {
-                                cancel_at_period_end: true
-                            });
-                        } else if (planData.status === 'active') {
-                            console.log(`[Plan Controller] Restoring Stripe auto-renewal for company ${company.company_name} because plan was re-enabled.`);
-                            await StripeService.updateSubscription(company.stripe_subscription_id, {
-                                cancel_at_period_end: false
-                            });
+                        const db = require('../config/database').getDB();
+                        const { ObjectId } = require('mongodb');
+                        
+                        // Find all active companies on this plan
+                        const companies = await db.collection('companies').find({
+                            plan_id: new ObjectId(planId),
+                            stripe_subscription_id: { $ne: null },
+                            subscription_status: { $in: ['active', 'past_due', 'trialing'] }
+                        }).toArray();
+
+                        console.log(`[Plan Controller] Starting background Stripe sync for ${companies.length} companies on plan ${oldPlan.name}...`);
+
+                        for (const company of companies) {
+                            try {
+                                const isDisabling = planData.status === 'disable' || planData.status === 'inactive';
+                                
+                                if (isDisabling) {
+                                    console.log(`[Plan Controller] Canceling Stripe auto-renewal for company ${company.company_name} (${company._id})`);
+                                    await StripeService.updateSubscription(company.stripe_subscription_id, {
+                                        cancel_at_period_end: true
+                                    });
+                                } else if (planData.status === 'active') {
+                                    console.log(`[Plan Controller] Restoring Stripe auto-renewal for company ${company.company_name} (${company._id})`);
+                                    await StripeService.updateSubscription(company.stripe_subscription_id, {
+                                        cancel_at_period_end: false
+                                    });
+                                }
+                            } catch (stripeError) {
+                                console.error(`[Plan Controller] Failed to update Stripe for company ${company._id}:`, stripeError.message);
+                            }
                         }
-                    } catch (stripeError) {
-                        console.error(`Failed to update cancel_at_period_end for company ${company._id}:`, stripeError.message);
+                        console.log(`[Plan Controller] Background Stripe sync completed for plan ${oldPlan.name}.`);
+                    } catch (bgError) {
+                        console.error('[Plan Controller] Background Stripe sync failed:', bgError);
                     }
-                }
+                })();
+                
+                return; // Prevent fallthrough to the second res.json
             }
 
             res.json({ message: 'Plan updated successfully' });
