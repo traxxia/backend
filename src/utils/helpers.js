@@ -29,7 +29,7 @@ const calculateNextReviewDate = (lastReviewed, cadence) => {
   if (!lastReviewed || !cadence) return null;
   const date = new Date(lastReviewed);
 
-  switch (cadence.toLowerCase()) {
+  switch (cadence.trim().toLowerCase()) {
     case 'weekly':
       date.setDate(date.getDate() + 7);
       break;
