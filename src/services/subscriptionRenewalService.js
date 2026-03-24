@@ -17,7 +17,7 @@ class SubscriptionRenewalService {
         // We also check "last_renewal_attempt" to avoid spamming Stripe if the webhook is slow.
         const expiredCompanies = await db.collection('companies').find({
             stripe_subscription_id: { $ne: null },
-            subscription_status: 'active',
+            subscription_status: { $in: ['active', 'expired'] },
             subscription_end_date: { $lt: now },
             $or: [
                 { last_renewal_attempt: { $exists: false } },

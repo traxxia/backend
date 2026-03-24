@@ -13,18 +13,33 @@ const SubscriptionRenewalService = require('./services/subscriptionRenewalServic
 const app = express();
 
 // Background Automated Renewal Watcher
-cron.schedule('* * * * *', () => {
+let isJobRunning = false; 
+
+cron.schedule('* * * * *', async () => {
   const { getDB } = require('./config/database');
+
+  if (isJobRunning) {
+    console.log('[Cron] Skipping — previous job still running');
+    return;
+  }
+
   try {
     const db = getDB();
+
+    isJobRunning = true;
+
     console.log(`[Cron] 🕒 Running background renewal check at ${new Date().toISOString()}...`);
-    SubscriptionRenewalService.checkAndRenewExpiredSubscriptions();
+
+    await SubscriptionRenewalService.checkAndRenewExpiredSubscriptions(); 
+
   } catch (err) {
     if (err.message === 'Database not initialized') {
       console.log(`[Cron] Database not ready yet, skipping this cycle.`);
     } else {
       console.error(`[Cron] Unexpected Error:`, err);
     }
+  } finally {
+    isJobRunning = false; 
   }
 });
 
