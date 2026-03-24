@@ -30,9 +30,12 @@ class SubscriptionController {
             // Use snapshotted limits so super-admin plan edits don't affect existing customers
             const limits = await TierService.getCompanyLimits(user.company_id);
 
-            // 1. Count Businesses
+            // 1. Count Businesses across whole company
+            const companyUsers = await db.collection('users').find({ company_id: user.company_id }).project({ _id: 1 }).toArray();
+            const companyUserIds = companyUsers.map(u => u._id);
+
             const currentWorkspaces = await db.collection('user_businesses').countDocuments({
-                user_id: new ObjectId(userId),
+                user_id: { $in: companyUserIds },
                 status: { $ne: 'deleted' }
             });
 
@@ -57,12 +60,12 @@ class SubscriptionController {
                 role_id: userRole?._id
             });
 
-            // 3. Count Projects
-            const userBusinesses = await db.collection('user_businesses')
-                .find({ user_id: new ObjectId(userId) })
+            // 3. Count Projects across all company businesses
+            const companyBusinesses = await db.collection('user_businesses')
+                .find({ user_id: { $in: companyUserIds } })
                 .project({ _id: 1 })
                 .toArray();
-            const businessIds = userBusinesses.map(b => b._id);
+            const businessIds = companyBusinesses.map(b => b._id);
             const currentProjects = await db.collection('projects').countDocuments({
                 business_id: { $in: businessIds }
             });
@@ -293,16 +296,19 @@ class SubscriptionController {
             );
 
             if (isDowngrade) {
-                // Check if user has multiple workspaces
+                // Check if company has multiple workspaces
+                const companyUsers = await db.collection('users').find({ company_id: user.company_id }).project({ _id: 1 }).toArray();
+                const companyUserIds = companyUsers.map(u => u._id);
+
                 const workspaceCount = await db.collection('user_businesses').countDocuments({
-                    user_id: new ObjectId(userId),
+                    user_id: { $in: companyUserIds },
                     status: { $ne: 'deleted' }
                 });
 
-                // Get all businesses to check for collaborators
+                // Get all company businesses to check for collaborators
                 const businesses = await db.collection('user_businesses')
                     .find({
-                        user_id: new ObjectId(userId),
+                        user_id: { $in: companyUserIds },
                         status: { $ne: 'deleted' }
                     })
                     .toArray();
@@ -538,9 +544,12 @@ class SubscriptionController {
             const currentPlan = await db.collection('plans').findOne({ _id: company?.plan_id });
             const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
 
-            // 1. Get all user's businesses
+            // 1. Get all company's businesses
+            const companyUsers = await db.collection('users').find({ company_id: user.company_id }).project({ _id: 1 }).toArray();
+            const companyUserIds = companyUsers.map(u => u._id);
+
             const allBusinesses = await db.collection('user_businesses').find({
-                user_id: new ObjectId(userId),
+                user_id: { $in: companyUserIds },
                 status: { $ne: 'deleted' }
             }).toArray();
 
@@ -742,7 +751,8 @@ class SubscriptionController {
 
             const activeBusinessesCount = await db.collection('user_businesses').countDocuments({
                 user_id: { $in: companyUserIds },
-                access_mode: 'active'
+                access_mode: 'active',
+                status: { $ne: 'deleted' }
             });
 
             if (activeBusinessesCount + reactivate_business_ids.length > limits.max_workspaces) {

@@ -209,20 +209,8 @@ class AdminController {
       // Tier check: Check how many users (collaborators/others) this company already has
       const db = getDB();
       const currentUsersCount = await db.collection('users').countDocuments({ company_id: companyId });
-      const userTier = await TierService.getUserTier(req.user._id);
       // Use snapshotted limits so existing customers keep their purchased limits
       const limits = await TierService.getCompanyLimits(companyId);
-
-      // For essential plan, max_collaborators is 0. 
-      // Total users allowed might be 1 (the owner/admin).
-      // We'll use max_collaborators + 1 (the admin) as the limit for total users if needed, 
-      // or specifically check if they are trying to add a collaborator.
-
-      if (userTier === 'essential' && currentUsersCount >= 1) {
-        return res.status(403).json({
-          error: "Your current plan doesn't support adding more users. Upgrade to Advanced to expand your team."
-        });
-      }
 
       const allowedRoles = ["user", "viewer", "collaborator"];
 
@@ -259,9 +247,9 @@ class AdminController {
         ]).toArray();
 
         const count = currentCollaboratorsCount[0]?.count || 0;
-        if (count >= limits.max_collaborators) {
+        if (count >= (limits.max_collaborators ?? 0)) {
           return res.status(403).json({
-            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed. Upgrade to Advanced if you need more seats.`
+            error: `Collaborator limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_collaborators ?? 0} collaborator(s) allowed. Upgrade your plan if you need more seats.`
           });
         }
       }
@@ -285,7 +273,7 @@ class AdminController {
         const viewerCount = currentViewersCount[0]?.count || 0;
         if (viewerCount >= (limits.max_viewers ?? 0)) {
           return res.status(403).json({
-            error: `Viewer limit reached for ${userTier} plan. Maximum ${limits.max_viewers ?? 0} viewer(s) allowed. Upgrade your plan if you need more viewer seats.`
+            error: `Viewer limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_viewers ?? 0} viewer(s) allowed. Upgrade your plan if you need more viewer seats.`
           });
         }
       }
@@ -309,7 +297,7 @@ class AdminController {
         const userCount = currentUsersWithUserRole[0]?.count || 0;
         if (userCount >= (limits.max_users ?? 0)) {
           return res.status(403).json({
-            error: `User limit reached for ${userTier} plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`
+            error: `User limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`
           });
         }
       }
@@ -398,9 +386,9 @@ class AdminController {
         ]).toArray();
 
         const count = currentCollaboratorsCount[0]?.count || 0;
-        if (count >= limits.max_collaborators) {
+        if (count >= (limits.max_collaborators ?? 0)) {
           return res.status(403).json({
-            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed.`
+            error: `Collaborator limit reached for your current plan. Maximum ${limits.max_collaborators ?? 0} collaborator(s) allowed. Upgrade your plan if you need more seats.`
           });
         }
       }
@@ -423,7 +411,7 @@ class AdminController {
         const viewerCount = currentViewersCount[0]?.count || 0;
         if (viewerCount >= (limits.max_viewers ?? 0)) {
           return res.status(403).json({
-            error: `Viewer limit reached for ${userTier} plan. Maximum ${limits.max_viewers ?? 0} viewer(s) allowed.`
+            error: `Viewer limit reached for your current plan. Maximum ${limits.max_viewers ?? 0} viewer(s) allowed. Upgrade your plan if you need more seats.`
           });
         }
       }
@@ -447,7 +435,7 @@ class AdminController {
         const userCount = currentUsersWithUserRole[0]?.count || 0;
         if (userCount >= (limits.max_users ?? 0)) {
           return res.status(403).json({
-            error: `User limit reached for ${userTier} plan. Maximum ${limits.max_users ?? 0} user(s) allowed.`
+            error: `User limit reached for your current plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`
           });
         }
       }
