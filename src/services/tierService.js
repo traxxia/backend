@@ -29,37 +29,37 @@ class TierService {
     }
 
     static getLimitsForPlan(plan) {
-        // Prefer explicit limits stored on the plan document, with support for
-        // both flat fields (workspace_limit, max_projects, etc.) and a nested
-        // "limits" object as in:
-        //   limits: { workspaces, projects, collaborators, viewers, users }
+        // Preferred source is the nested "limits" object, falling back to top-level fields
+        // that may exist for legacy plans.
         const limitsObj = plan?.limits || {};
 
         return {
             max_workspaces:
+                limitsObj.workspaces ??
                 plan?.max_workspaces ??
                 plan?.workspace_limit ??
-                limitsObj.workspaces ??
                 1,
-            can_create_projects:
-                plan?.can_create_projects ??
+            project:
+                limitsObj.project ??
                 limitsObj.projects ??
+                plan?.can_create_projects ??
+                plan?.max_projects ??  // Added support for max_projects
                 true,
             max_collaborators:
-                plan?.max_collaborators ??
                 limitsObj.collaborators ??
+                plan?.max_collaborators ??
                 0,
             max_viewers:
-                plan?.max_viewers ??
                 limitsObj.viewers ??
+                plan?.max_viewers ??
                 0,
             max_users:
-                plan?.max_users ??
                 limitsObj.users ??
+                plan?.max_users ??
                 0,
-            insight: plan?.insight ?? limitsObj.insight ?? false,
-            strategic: plan?.strategic ?? limitsObj.strategic ?? false,
-            pmf: plan?.pmf ?? limitsObj.pmf ?? false
+            insight: limitsObj.insight ?? plan?.insight ?? false,
+            strategic: limitsObj.strategic ?? plan?.strategic ?? false,
+            pmf: limitsObj.pmf ?? plan?.pmf ?? false
         };
     }
 
@@ -87,7 +87,7 @@ class TierService {
         // lock all access so they must purchase a plan.
         return {
             max_workspaces: 0,
-            can_create_projects: false,
+            project: false,
             max_collaborators: 0,
             max_viewers: 0,
             max_users: 0,
@@ -104,7 +104,7 @@ class TierService {
 
     static async canCreateProject(tierName) {
         const limits = await this.getTierLimits(tierName);
-        return limits.can_create_projects;
+        return limits.project;
     }
 
     static async canAddCollaborator(currentCollaboratorsCount, tierName) {
@@ -114,12 +114,12 @@ class TierService {
 
     static async canConvertInitiative(tierName) {
         const limits = await this.getTierLimits(tierName);
-        return limits.can_create_projects;
+        return limits.project;
     }
 
     static async canAccessExecution(tierName) {
         const limits = await this.getTierLimits(tierName);
-        return limits.can_create_projects;
+        return limits.project;
     }
 
     static async canAccessPMF(tierName) {

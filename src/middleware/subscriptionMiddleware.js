@@ -79,7 +79,7 @@ const checkProjectCreation = async (req, res, next) => {
         const tierName = await TierService.getUserTier(req.user._id);
         const limits = await TierService.getTierLimits(tierName);
 
-        if (!limits.can_create_projects) {
+        if (!limits.project) {
             return res.status(403).json({
                 error: 'Project creation requires Advanced plan',
                 upgrade_required: true,

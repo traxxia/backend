@@ -156,7 +156,7 @@ class SubscriptionController {
                     },
                     projects: {
                         current: currentProjects,
-                        limit: limits.can_create_projects
+                        limit: limits.project
                     }
                 }
             });

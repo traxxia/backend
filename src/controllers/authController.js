@@ -62,10 +62,10 @@ class AuthController {
         email: user.email,
         role: role.role_name,
         limits: {
-          insight:             planLimits.insight             ?? false,
-          strategic:           planLimits.strategic           ?? false,
-          pmf:                 planLimits.pmf                 ?? false,
-          can_create_projects: planLimits.can_create_projects ?? false,
+          insight:   planLimits.insight   ?? false,
+          strategic: planLimits.strategic ?? false,
+          pmf:       planLimits.pmf       ?? false,
+          project:   planLimits.project   ?? false,
         }
       }, SECRET_KEY, { expiresIn: '24h' });
       res.json({
