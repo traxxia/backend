@@ -123,6 +123,7 @@ class TierService {
         if (company.plan_snapshot && company.plan_snapshot.snapshotted_at) {
             const s = company.plan_snapshot;
             return {
+                plan_name:         s.plan_name         ?? 'Unknown',
                 max_workspaces:    s.max_workspaces    ?? 1,
                 project:           s.project           ?? false,
                 max_collaborators: s.max_collaborators ?? 0,
@@ -138,6 +139,7 @@ class TierService {
         const planObjId = typeof company.plan_id === 'string' ? new ObjectId(company.plan_id) : company.plan_id;
         if (!planObjId) {
             return {
+                plan_name: 'None',
                 max_workspaces: 0,
                 project: false,
                 max_collaborators: 0,
@@ -149,7 +151,16 @@ class TierService {
             };
         }
         const plan = await db.collection('plans').findOne({ _id: planObjId });
-        return plan ? this.getLimitsForPlan(plan) : {
+        if (plan) {
+            const limits = this.getLimitsForPlan(plan);
+            return {
+                plan_name: plan.name,
+                ...limits
+            };
+        }
+
+        return {
+            plan_name: 'Unknown',
             max_workspaces: 0,
             project: false,
             max_collaborators: 0,

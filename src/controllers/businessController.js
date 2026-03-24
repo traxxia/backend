@@ -11,7 +11,6 @@ const { getDB } = require("../config/database")
 const TierService = require("../services/tierService");
 
 const {
-  MAX_BUSINESSES_PER_USER,
   ALLOWED_PHASES,
 } = require("../config/constants");
 
@@ -428,15 +427,13 @@ class BusinessController {
         });
       }
 
-      const tierName = await TierService.getUserTier(req.user._id);
-      const limits = await TierService.getTierLimits(tierName);
-      const existingCount = await BusinessModel.countByUserId(req.user._id);
+      const limits = await TierService.getCompanyLimits(req.user.company_id);
+      const existingCount = await BusinessModel.countByCompanyId(req.user.company_id);
 
       if (existingCount >= limits.max_workspaces) {
-        const upgradeMsg = tierName === 'essential' ? ' Upgrade to Advanced for more workspaces.' : '';
         return res.status(403).json({
-          error: `Workspace limit reached for ${tierName} plan. Maximum ${limits.max_workspaces} workspace(s) allowed.${upgradeMsg}`,
-          plan: tierName,
+          error: `Workspace limit reached. Maximum ${limits.max_workspaces} workspace(s) allowed. Please upgrade your plan to create more.`,
+          plan: limits.plan_name,
           limits: {
             max_workspaces: limits.max_workspaces
           }
@@ -770,8 +767,7 @@ class BusinessController {
       const requesterRole = req.user.role.role_name;
       const isAdmin = VALID_ADMIN_ROLES.includes(requesterRole);
 
-      const tierName = await TierService.getUserTier(req.user._id);
-      const limits = await TierService.getTierLimits(tierName);
+      const limits = await TierService.getCompanyLimits(req.user.company_id);
       const currentCollaboratorsCount = (business.collaborators || []).length;
 
       if (!isAdmin) {
@@ -782,9 +778,7 @@ class BusinessController {
 
       if (currentCollaboratorsCount >= limits.max_collaborators) {
         return res.status(403).json({
-          error: tierName === 'essential'
-            ? "Your current plan doesn't support collaborators. Upgrade to Advanced to add team members in the User Management panel."
-            : `Collaborator limit reached for ${tierName} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed. Manage your team in the User Management panel.`
+          error: `Collaborator limit reached. Maximum ${limits.max_collaborators} collaborator(s) allowed. Please upgrade your plan to add more team members.`
         });
       }
 

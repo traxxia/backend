@@ -56,9 +56,10 @@ const checkCollaboratorAccess = async (req, res, next) => {
     try {
         const tierName = await TierService.getUserTier(req.user._id);
 
-        if (tierName === 'essential') {
+        const limits = await TierService.getTierLimits(tierName);
+        if (limits.max_collaborators <= 0) {
             return res.status(403).json({
-                error: 'Collaborator features require Advanced plan',
+                error: 'Collaborator features are not supported by your current plan. Please upgrade to access this feature.',
                 upgrade_required: true,
                 feature: 'collaborators'
             });

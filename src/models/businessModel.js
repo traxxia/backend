@@ -66,6 +66,22 @@ class BusinessModel {
     });
   }
 
+  static async countByCompanyId(companyId) {
+    const db = getDB();
+    // To count businesses for a company, we find all users in that company 
+    // and count businesses owned by them.
+    const companyUsers = await db.collection('users').find({ 
+      company_id: new ObjectId(companyId) 
+    }).toArray();
+    
+    const userIds = companyUsers.map(u => u._id);
+    
+    return await this.collection().countDocuments({
+      user_id: { $in: userIds },
+      status: { $ne: 'deleted' }
+    });
+  }
+
   static async findLastDeleted(userId) {
     return await this.collection()
       .find({ user_id: new ObjectId(userId), status: 'deleted' })
