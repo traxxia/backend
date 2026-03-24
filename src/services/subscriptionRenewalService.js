@@ -2,6 +2,7 @@ const StripeService = require('./stripeService');
 const CompanyModel = require('../models/companyModel');
 const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
+const TierService = require('./tierService');
 
 class SubscriptionRenewalService {
     /**
@@ -75,19 +76,25 @@ class SubscriptionRenewalService {
                         return d;
                     })();
 
+                const updateData = {
+                    subscription_start_date: periodStart,
+                    subscription_end_date: periodEnd,
+                    expires_at: periodEnd,
+                    status: 'active',
+                    subscription_status: 'active',
+                    last_renewal_attempt: new Date(),
+                    updated_at: new Date()
+                };
+
+                // Refresh plan snapshot on renewal
+                if (companyPlan) {
+                  updateData.plan_snapshot = TierService.buildPlanSnapshot(companyPlan);
+                  updateData.subscription_plan = companyPlan.name;
+                }
+
                 await db.collection('companies').updateOne(
                     { _id: company._id },
-                    {
-                        $set: {
-                            subscription_start_date: periodStart,
-                            subscription_end_date: periodEnd,
-                            expires_at: periodEnd,
-                            status: 'active',
-                            subscription_status: 'active',
-                            last_renewal_attempt: new Date(),
-                            updated_at: new Date()
-                        }
-                    }
+                    { $set: updateData }
                 );
                 console.log(`[Auto-Renewal] Proactive Date Sync Complete. Start: ${periodStart.toISOString()}, End: ${periodEnd.toISOString()}`);
 

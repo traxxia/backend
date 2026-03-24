@@ -874,6 +874,169 @@ class SubscriptionController {
             res.status(500).json({ error: error.message });
         }
     }
+
+    static async addPaymentMethod(req, res) {
+        try {
+            const db = getDB();
+            const userId = req.user._id;
+            const { paymentMethodId, setAsDefault = true } = req.body;
+
+            if (!paymentMethodId) {
+                return res.status(400).json({ error: 'paymentMethodId is required' });
+            }
+
+            const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+            if (!user?.company_id) return res.status(404).json({ error: 'Company not found' });
+
+            const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            let customerId = company?.stripe_customer_id;
+
+            if (!customerId) {
+                // Create Stripe customer on first card add
+                const customer = await StripeService.createCustomer(user.email, user.name, paymentMethodId, setAsDefault);
+                customerId = customer.id;
+                await db.collection('companies').updateOne(
+                    { _id: user.company_id },
+                    { $set: { stripe_customer_id: customerId } }
+                );
+            } else {
+                await StripeService.attachPaymentMethod(paymentMethodId, customerId);
+            }
+
+            if (setAsDefault) {
+                await StripeService.updateCustomer(customerId, {
+                    invoice_settings: { default_payment_method: paymentMethodId }
+                });
+                await db.collection('companies').updateOne(
+                    { _id: user.company_id },
+                    { $set: { stripe_customer_id: customerId, stripe_payment_method_id: paymentMethodId } }
+                );
+            } else {
+                await db.collection('companies').updateOne(
+                    { _id: user.company_id },
+                    { $set: { stripe_customer_id: customerId } }
+                );
+            }
+
+            // Return refreshed payment methods list
+            const methods = await StripeService.listPaymentMethods(customerId);
+            const updatedCompany = await db.collection('companies').findOne({ _id: user.company_id });
+            res.json({
+                payment_methods: methods.map(pm => ({
+                    id: pm.id,
+                    brand: pm.card.brand,
+                    last4: pm.card.last4,
+                    exp_month: pm.card.exp_month,
+                    exp_year: pm.card.exp_year
+                })),
+                default_payment_method_id: updatedCompany.stripe_payment_method_id
+            });
+        } catch (error) {
+            console.error('Failed to add payment method:', error);
+            res.status(500).json({ error: error.message || 'Failed to add payment method' });
+        }
+    }
+
+    static async removePaymentMethod(req, res) {
+        try {
+            const db = getDB();
+            const userId = req.user._id;
+            const { paymentMethodId } = req.params;
+
+            const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+            if (!user?.company_id) return res.status(404).json({ error: 'Company not found' });
+
+            const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            if (!company?.stripe_customer_id) {
+                return res.status(400).json({ error: 'No Stripe customer found' });
+            }
+
+            await StripeService.detachPaymentMethod(paymentMethodId);
+
+            // If removed was the default, promote the next available card as default
+            let newDefaultId = company.stripe_payment_method_id;
+            if (company.stripe_payment_method_id === paymentMethodId) {
+                const remaining = await StripeService.listPaymentMethods(company.stripe_customer_id);
+                newDefaultId = remaining[0]?.id || null;
+                if (newDefaultId) {
+                    await StripeService.updateCustomer(company.stripe_customer_id, {
+                        invoice_settings: { default_payment_method: newDefaultId }
+                    });
+                }
+                await db.collection('companies').updateOne(
+                    { _id: user.company_id },
+                    { $set: { stripe_payment_method_id: newDefaultId } }
+                );
+            }
+
+            // Return refreshed payment methods list
+            const methods = await StripeService.listPaymentMethods(company.stripe_customer_id);
+            res.json({
+                payment_methods: methods.map(pm => ({
+                    id: pm.id,
+                    brand: pm.card.brand,
+                    last4: pm.card.last4,
+                    exp_month: pm.card.exp_month,
+                    exp_year: pm.card.exp_year
+                })),
+                default_payment_method_id: newDefaultId
+            });
+        } catch (error) {
+            console.error('Failed to remove payment method:', error);
+            res.status(500).json({ error: error.message || 'Failed to remove payment method' });
+        }
+    }
+
+    static async setDefaultPaymentMethod(req, res) {
+        try {
+            const db = getDB();
+            const userId = req.user._id;
+            const { paymentMethodId } = req.body;
+
+            if (!paymentMethodId) {
+                return res.status(400).json({ error: 'paymentMethodId is required' });
+            }
+
+            const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+            if (!user?.company_id) return res.status(404).json({ error: 'Company not found' });
+
+            const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            if (!company?.stripe_customer_id) {
+                return res.status(400).json({ error: 'No Stripe customer found' });
+            }
+
+            // Update Stripe customer
+            await StripeService.updateCustomer(company.stripe_customer_id, {
+                invoice_settings: { default_payment_method: paymentMethodId }
+            });
+
+            // Update local DB
+            await db.collection('companies').updateOne(
+                { _id: user.company_id },
+                { $set: { stripe_payment_method_id: paymentMethodId } }
+            );
+
+            // Return refreshed payment methods list
+            const methods = await StripeService.listPaymentMethods(company.stripe_customer_id);
+            res.json({
+                payment_methods: methods.map(pm => ({
+                    id: pm.id,
+                    brand: pm.card.brand,
+                    last4: pm.card.last4,
+                    exp_month: pm.card.exp_month,
+                    exp_year: pm.card.exp_year
+                })),
+                default_payment_method_id: paymentMethodId
+            });
+        } catch (error) {
+            console.error('Failed to set default payment method:', error);
+            res.status(500).json({ error: error.message || 'Failed to set default payment method' });
+        }
+    }
 }
 
 module.exports = SubscriptionController;
+

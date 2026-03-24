@@ -62,6 +62,7 @@ class AdminController {
         admin_name,
         admin_email,
         admin_password,
+        plan_id
       } = req.body;
 
       if (!company_name || !admin_name || !admin_email || !admin_password) {
@@ -81,11 +82,29 @@ class AdminController {
         return res.status(400).json({ error: "Company with this name already exists" })
       }
 
-      let logoUrl = null;
+      const db = getDB();
+      const companyData = {
+        company_name,
+        company_name_normalized: normalizedCompanyName,
+        industry: industry || "",
+        size: size || "",
+        logo: null,
+      };
+
+      if (plan_id && ObjectId.isValid(plan_id)) {
+        const planIdObj = new ObjectId(plan_id);
+        const planDoc = await db.collection('plans').findOne({ _id: planIdObj });
+        if (planDoc) {
+          companyData.plan_id = planIdObj;
+          companyData.subscription_plan = planDoc.name;
+          companyData.plan_snapshot = TierService.buildPlanSnapshot(planDoc);
+        }
+      }
+
       if (req.file) {
         try {
           const blobName = `company_logo_${Date.now()}_${req.file.originalname}`;
-          logoUrl = await blobService.uploadBuffer(
+          companyData.logo = await blobService.uploadBuffer(
             blobName,
             req.file.buffer,
             req.file.mimetype
@@ -98,15 +117,8 @@ class AdminController {
         }
       }
 
-      const companyId = await CompanyModel.create({
-        company_name,
-        company_name_normalized: normalizedCompanyName,
-        industry: industry || "",
-        size: size || "",
-        logo: logoUrl,
-      });
+      const companyId = await CompanyModel.create(companyData);
 
-      const db = getDB();
       const companyAdminRole = await db
         .collection("roles")
         .findOne({ role_name: "company_admin" });

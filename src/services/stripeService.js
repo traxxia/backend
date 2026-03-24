@@ -145,6 +145,15 @@ class StripeService {
         }
     }
 
+    static async detachPaymentMethod(paymentMethodId) {
+        try {
+            return await stripe.paymentMethods.detach(paymentMethodId);
+        } catch (error) {
+            console.error('Error detaching payment method:', error);
+            throw error;
+        }
+    }
+
     static constructEvent(payload, sig, secret) {
         try {
             return stripe.webhooks.constructEvent(payload, sig, secret);

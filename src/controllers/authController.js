@@ -127,10 +127,15 @@ class AuthController {
           }
           companyData.plan_id = new ObjectId(plan_id);
 
+          // Build snapshot of the initial plan limits
+          const planDoc = await db.collection('plans').findOne({ _id: companyData.plan_id });
+          if (planDoc) {
+            companyData.plan_snapshot = TierService.buildPlanSnapshot(planDoc);
+          }
+
           // Payment Processing
           if (paymentMethodId) { // Check if payment method is provided
             try {
-              const planDoc = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
               if (planDoc && planDoc.stripe_price_id) {
                 // Always save card and set as default for subscriptions
                 const shouldSaveCard = true;
