@@ -55,7 +55,11 @@ class AuthController {
       });
 
       const planName = await TierService.getUserTier(user._id);
-      const planLimits = await TierService.getTierLimits(planName);
+      // Use snapshotted limits so the JWT reflects the customer's purchased plan,
+      // not the live plan that may have been edited by a super admin.
+      const planLimits = user.company_id
+        ? await TierService.getCompanyLimits(user.company_id)
+        : await TierService.getTierLimits(planName);
 
       const token = jwt.sign({
         id: user._id,

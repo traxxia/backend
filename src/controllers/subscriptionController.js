@@ -27,7 +27,8 @@ class SubscriptionController {
             const company = await db.collection('companies').findOne({ _id: user.company_id });
 
             const planName = await TierService.getUserTier(userId);
-            const limits = await TierService.getTierLimits(planName);
+            // Use snapshotted limits so super-admin plan edits don't affect existing customers
+            const limits = await TierService.getCompanyLimits(user.company_id);
 
             // 1. Count Businesses
             const currentWorkspaces = await db.collection('user_businesses').countDocuments({
@@ -117,6 +118,27 @@ class SubscriptionController {
                 }
             }
 
+            // Determine if the live plan limits differ from the customer's snapshot
+            // so the frontend can show a "limits locked until renewal" notice.
+            let planUpdatedSinceSnapshot = false;
+            if (company?.plan_snapshot?.snapshotted_at) {
+                const livePlan = await db.collection('plans').findOne({ _id: company.plan_id });
+                if (livePlan) {
+                    const liveLimits = TierService.getLimitsForPlan(livePlan);
+                    const snap = company.plan_snapshot;
+                    planUpdatedSinceSnapshot = (
+                        liveLimits.max_workspaces    !== snap.max_workspaces    ||
+                        liveLimits.max_collaborators !== snap.max_collaborators ||
+                        liveLimits.max_viewers       !== snap.max_viewers       ||
+                        liveLimits.max_users         !== snap.max_users         ||
+                        liveLimits.project           !== snap.project           ||
+                        liveLimits.insight           !== snap.insight           ||
+                        liveLimits.strategic         !== snap.strategic         ||
+                        liveLimits.pmf               !== snap.pmf
+                    );
+                }
+            }
+
             res.json({
                 plan: planName,
                 company_name: company?.company_name,
@@ -124,14 +146,29 @@ class SubscriptionController {
                 end_date: expiresAt,
                 expires_at: expiresAt,
                 status: status,
+                plan_updated_since_snapshot: planUpdatedSinceSnapshot,
                 payment_methods: paymentMethods,
                 default_payment_method_id: defaultPaymentMethodId,
-                available_plans: availablePlans.map(p => ({
-                    _id: p._id,
-                    name: p.name,
-                    price: p.price || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
-                    features: p.features || []
-                })),
+                available_plans: availablePlans.map(p => {
+                    const planLimits = TierService.getLimitsForPlan(p);
+                    return {
+                        _id: p._id,
+                        name: p.name,
+                        description: p.description || '',
+                        price: p.price || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
+                        features: p.features || [],
+                        limits: {
+                            workspaces:    planLimits.max_workspaces,
+                            collaborators: planLimits.max_collaborators,
+                            viewers:       planLimits.max_viewers,
+                            users:         planLimits.max_users,
+                            project:       planLimits.project,
+                            pmf:           planLimits.pmf,
+                            insight:       planLimits.insight,
+                            strategic:     planLimits.strategic
+                        }
+                    };
+                }),
                 billing_history: billingHistory.map(bh => ({
                     date: bh.date,
                     plan_name: bh.plan_name,
@@ -157,7 +194,10 @@ class SubscriptionController {
                     projects: {
                         current: currentProjects,
                         limit: limits.project
-                    }
+                    },
+                    pmf:       limits.pmf      ?? false,
+                    insight:   limits.insight  ?? false,
+                    strategic: limits.strategic ?? false
                 }
             });
         } catch (error) {
@@ -404,12 +444,15 @@ class SubscriptionController {
             }
 
             // Normal upgrade/downgrade (no selection needed)
+            // Snapshot current plan limits so existing customer is not affected by future plan edits
+            const planSnapshot = TierService.buildPlanSnapshot(newPlan);
             const result = await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
                         subscription_end_date: periodEnd,
@@ -614,13 +657,15 @@ class SubscriptionController {
                 }
             }
 
-            // 7. Update company plan
+            // 7. Update company plan + snapshot current limits
+            const planSnapshot = TierService.buildPlanSnapshot(newPlan);
             await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
                         subscription_end_date: periodEnd,
@@ -792,13 +837,15 @@ class SubscriptionController {
                 }
             }
 
-            // 5. Finally update the plan
+            // 5. Finally update the plan + snapshot current limits for this renewal
+            const planSnapshot = TierService.buildPlanSnapshot(newPlan);
             await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
                         subscription_end_date: periodEnd,

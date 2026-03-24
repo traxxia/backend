@@ -97,6 +97,90 @@ class TierService {
         };
     }
 
+    /**
+     * Get the effective limits for a company based on their plan_snapshot.
+     * plan_snapshot is written at subscription/renewal time so super admin edits
+     * to the plan template do NOT retroactively affect existing customers.
+     * Falls back to the live plan for legacy companies that have no snapshot yet.
+     */
+    static async getCompanyLimits(companyId) {
+        const db = getDB();
+        const company = await db.collection('companies').findOne({ _id: new ObjectId(companyId) });
+        if (!company) {
+            return {
+                max_workspaces: 0,
+                project: false,
+                max_collaborators: 0,
+                max_viewers: 0,
+                max_users: 0,
+                insight: false,
+                strategic: false,
+                pmf: false
+            };
+        }
+
+        // If a snapshot exists, return it directly — super admin edits won't affect this
+        if (company.plan_snapshot && company.plan_snapshot.snapshotted_at) {
+            const s = company.plan_snapshot;
+            return {
+                max_workspaces:    s.max_workspaces    ?? 1,
+                project:           s.project           ?? false,
+                max_collaborators: s.max_collaborators ?? 0,
+                max_viewers:       s.max_viewers       ?? 0,
+                max_users:         s.max_users         ?? 0,
+                insight:           s.insight           ?? false,
+                strategic:         s.strategic         ?? false,
+                pmf:               s.pmf               ?? false
+            };
+        }
+
+        // Legacy: no snapshot — fall back to the live plan
+        const planObjId = typeof company.plan_id === 'string' ? new ObjectId(company.plan_id) : company.plan_id;
+        if (!planObjId) {
+            return {
+                max_workspaces: 0,
+                project: false,
+                max_collaborators: 0,
+                max_viewers: 0,
+                max_users: 0,
+                insight: false,
+                strategic: false,
+                pmf: false
+            };
+        }
+        const plan = await db.collection('plans').findOne({ _id: planObjId });
+        return plan ? this.getLimitsForPlan(plan) : {
+            max_workspaces: 0,
+            project: false,
+            max_collaborators: 0,
+            max_viewers: 0,
+            max_users: 0,
+            insight: false,
+            strategic: false,
+            pmf: false
+        };
+    }
+
+    /**
+     * Build snapshot object to persist on the company at subscription/renewal time.
+     */
+    static buildPlanSnapshot(plan) {
+        const limits = this.getLimitsForPlan(plan);
+        return {
+            plan_id:           plan._id,
+            plan_name:         plan.name,
+            snapshotted_at:    new Date(),
+            max_workspaces:    limits.max_workspaces,
+            project:           limits.project,
+            max_collaborators: limits.max_collaborators,
+            max_viewers:       limits.max_viewers,
+            max_users:         limits.max_users,
+            insight:           limits.insight,
+            strategic:         limits.strategic,
+            pmf:               limits.pmf
+        };
+    }
+
     static async checkWorkspaceLimit(userBusinessesCount, tierName) {
         const limits = await this.getTierLimits(tierName);
         return userBusinessesCount < limits.max_workspaces;

@@ -198,7 +198,8 @@ class AdminController {
       const db = getDB();
       const currentUsersCount = await db.collection('users').countDocuments({ company_id: companyId });
       const userTier = await TierService.getUserTier(req.user._id);
-      const limits = await TierService.getTierLimits(userTier);
+      // Use snapshotted limits so existing customers keep their purchased limits
+      const limits = await TierService.getCompanyLimits(companyId);
 
       // For essential plan, max_collaborators is 0. 
       // Total users allowed might be 1 (the owner/admin).
@@ -363,8 +364,8 @@ class AdminController {
       const db = getDB();
       const companyId = targetUser.company_id;
 
-      const userTier = await TierService.getUserTier(req.user._id); // Assuming the updating admin's tier is the company's tier
-      const limits = await TierService.getTierLimits(userTier);
+      // Use snapshotted limits so existing customers keep their purchased limits
+      const limits = await TierService.getCompanyLimits(companyId);
 
       const normalizedRole = role.toLowerCase();
 
