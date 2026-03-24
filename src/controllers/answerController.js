@@ -53,6 +53,36 @@ class AnswerController {
     }
   }
 
+  static async bulkUpdate(req, res) {
+    try {
+      const { business_id, answers } = req.body;
+      
+      if (!business_id || !Array.isArray(answers) || answers.length === 0) {
+        return res.status(400).json({ error: 'business_id and a non-empty array of answers are required' });
+      }
+
+      const answersData = answers.map(item => {
+         if(!item.answer_id) throw new Error("Missing answer_id in bulk update payload");
+         return {
+           answer_id: item.answer_id,
+           answer: item.answer
+         };
+      });
+
+      const result = await AnswerModel.bulkUpdate(answersData);
+      
+      res.json({
+        message: `${result.modifiedCount} answers updated successfully`
+      });
+    } catch (error) {
+      console.error('Bulk update answers error:', error);
+      if (error.message && error.message.includes('Missing answer_id')) {
+        return res.status(400).json({ error: error.message });
+      }
+      res.status(500).json({ error: 'Failed to bulk update answers' });
+    }
+  }
+
   static async getByID(req, res) {
     try {
       const { id } = req.params;

@@ -12,6 +12,9 @@ router.post('/bulk', authenticateToken, AnswerController.bulkCreate);
 // GET: Get answer by ID
 router.get('/:id', authenticateToken, AnswerController.getByID);
 
+// PUT: Bulk update answers
+router.put('/bulk', authenticateToken, AnswerController.bulkUpdate);
+
 // GET: Get answers by business ID
 router.get('/business/:business_id', authenticateToken, AnswerController.getByBusinessID);
 
