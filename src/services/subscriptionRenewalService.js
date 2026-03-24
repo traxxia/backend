@@ -99,7 +99,7 @@ class SubscriptionRenewalService {
                 console.log(`[Auto-Renewal] Proactive Date Sync Complete. Start: ${periodStart.toISOString()}, End: ${periodEnd.toISOString()}`);
 
                 // PROACTIVE BILLING HISTORY: Log entry immediately
-                const amount = (updatedSub.plan?.amount || updatedSub.items?.data[0]?.price?.unit_amount || 2900) / 100;
+                const amount = companyPlan?.price || companyPlan?.price_usd || (updatedSub.plan?.amount || updatedSub.items?.data[0]?.price?.unit_amount || 2900) / 100;
                 await db.collection('billing_history').insertOne({
                     company_id: company._id,
                     stripe_subscription_id: updatedSub.id,

@@ -33,6 +33,12 @@ module.exports = {
       project: true,
       max_collaborators: 3,
       price_usd: 89.00
+    },
+    team: {
+      max_workspaces: 10,
+      project: true,
+      max_collaborators: 10,
+      price_usd: 100.00
     }
   },
   MAX_BUSINESSES_PER_USER: 5, // Default/Legacy fallback
