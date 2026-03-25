@@ -217,9 +217,61 @@ class TierService {
         return limits.project;
     }
 
-    static async canAccessPMF(tierName) {
-        const limits = await this.getTierLimits(tierName);
-        return limits.pmf;
+    static async getCompanyUsage(companyId) {
+        const db = getDB();
+        const companyIdObj = new ObjectId(companyId);
+
+        const companyUsers = await db.collection('users').find({ company_id: companyIdObj }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+        const companyUserIds = companyUsers.map(u => u._id);
+
+        const workspaces = await db.collection('user_businesses').countDocuments({
+            user_id: { $in: companyUserIds },
+            status: 'active'
+        });
+
+        const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
+        const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
+        const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+
+        const collaborators = companyUsers.filter(u => u.status === 'active' && u.role_id.toString() === collabRole?._id.toString()).length;
+        const viewers = companyUsers.filter(u => u.status === 'active' && u.role_id.toString() === viewerRole?._id.toString()).length;
+        const users = companyUsers.filter(u => u.status === 'active' && u.role_id.toString() === userRole?._id.toString()).length;
+
+        return {
+            workspaces,
+            collaborators,
+            viewers,
+            users
+        };
+    }
+
+    static async getCompanyArchivedUsage(companyId) {
+        const db = getDB();
+        const companyIdObj = new ObjectId(companyId);
+
+        const companyUsers = await db.collection('users').find({ company_id: companyIdObj }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+        const companyUserIds = companyUsers.map(u => u._id);
+
+        const archivedWorkspaces = await db.collection('user_businesses').countDocuments({
+            user_id: { $in: companyUserIds },
+            status: 'archived'
+        });
+
+        const roles = await db.collection('roles').find({ role_name: { $in: ['collaborator', 'viewer', 'user'] } }).toArray();
+        const collabRole = roles.find(r => r.role_name === 'collaborator');
+        const viewerRole = roles.find(r => r.role_name === 'viewer');
+        const userRole = roles.find(r => r.role_name === 'user');
+
+        const inactiveCollaborators = companyUsers.filter(u => u.status === 'inactive' && u.role_id.toString() === collabRole?._id.toString()).length;
+        const inactiveViewers = companyUsers.filter(u => u.status === 'inactive' && u.role_id.toString() === viewerRole?._id.toString()).length;
+        const inactiveUsers = companyUsers.filter(u => u.status === 'inactive' && u.role_id.toString() === userRole?._id.toString()).length;
+
+        return {
+            workspaces: archivedWorkspaces,
+            collaborators: inactiveCollaborators,
+            viewers: inactiveViewers,
+            users: inactiveUsers
+        };
     }
 }
 
