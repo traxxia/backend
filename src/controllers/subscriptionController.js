@@ -36,28 +36,35 @@ class SubscriptionController {
 
             const currentWorkspaces = await db.collection('user_businesses').countDocuments({
                 user_id: { $in: companyUserIds },
-                status: { $ne: 'deleted' }
+                status: { $ne: 'deleted' },
+                access_mode: { $ne: 'archived' }
             });
 
             // 2. Count Collaborators
             const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
             const currentCollaborators = await db.collection('users').countDocuments({
                 company_id: user.company_id,
-                role_id: collabRole?._id
+                role_id: collabRole?._id,
+                status: { $nin: ['inactive', 'deleted'] },
+                access_mode: { $ne: 'archived' }
             });
 
-                        // 2b. Count Viewers
+            // 2b. Count Viewers
             const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
             const currentViewers = await db.collection('users').countDocuments({
                 company_id: user.company_id,
-                role_id: viewerRole?._id
+                role_id: viewerRole?._id,
+                status: { $nin: ['inactive', 'deleted'] },
+                access_mode: { $ne: 'archived' }
             });
 
             // 2c. Count Users (role 'user')
             const userRole = await db.collection('roles').findOne({ role_name: 'user' });
             const currentUsersWithUserRole = await db.collection('users').countDocuments({
                 company_id: user.company_id,
-                role_id: userRole?._id
+                role_id: userRole?._id,
+                status: { $nin: ['inactive', 'deleted'] },
+                access_mode: { $ne: 'archived' }
             });
 
             // 3. Count Projects across all company businesses
@@ -289,10 +296,17 @@ class SubscriptionController {
                 return res.status(404).json({ error: 'Selected plan not found' });
             }
 
-            // Detect downgrade from Advanced to Essential
-            const isDowngrade = (
-                currentPlan?.name?.toLowerCase() === 'advanced' &&
-                newPlan.name.toLowerCase() === 'essential'
+            // Check if it's a downgrade by comparing plan limits/prices
+            const currentLimits = TierService.getLimitsForPlan(currentPlan || {});
+            const newLimits = TierService.getLimitsForPlan(newPlan);
+
+            const isDowngrade = currentPlan && newPlan && (
+                (newPlan.price_usd !== undefined && currentPlan.price_usd !== undefined && newPlan.price_usd < currentPlan.price_usd) ||
+                (newPlan.price !== undefined && currentPlan.price !== undefined && newPlan.price < currentPlan.price) ||
+                newLimits.max_workspaces < currentLimits.max_workspaces ||
+                newLimits.max_collaborators < currentLimits.max_collaborators ||
+                newLimits.max_users < currentLimits.max_users ||
+                newLimits.max_viewers < currentLimits.max_viewers
             );
 
             if (isDowngrade) {
@@ -313,11 +327,21 @@ class SubscriptionController {
                     })
                     .toArray();
 
+                // Has any non-admin standard users? We need selection if there are ANY users that could be archived
+                const adminRole = await db.collection('roles').findOne({ role_name: 'company_admin' });
+                const standardUserCount = await db.collection('users').countDocuments({
+                    company_id: user.company_id,
+                    role_id: { $ne: adminRole?._id },
+                    status: { $nin: ['inactive', 'deleted'] }
+                });
+
+                const hasStandardUsers = standardUserCount > 0;
+
                 const hasCollaborators = businesses.some(b =>
                     b.collaborators && b.collaborators.length > 0
                 );
 
-                if (workspaceCount > 1 || hasCollaborators) {
+                if (workspaceCount > 1 || hasStandardUsers) {
                     // Fetch collaborator emails for better UI
                     const allCollabIds = businesses.reduce((acc, b) => {
                         if (b.collaborators) acc.push(...b.collaborators);
@@ -356,10 +380,12 @@ class SubscriptionController {
                 }
             }
 
-            // 5. Detect if reactivation selection is required (Moving to Advanced)
-            const isReactivationPossible = (
-                newPlan.name.toLowerCase() === 'advanced' &&
-                (currentPlan?.name?.toLowerCase() === 'essential' || !currentPlan)
+            // 5. Detect if reactivation selection is required (Upgrading or recovering limits)
+            const isReactivationPossible = !isDowngrade && (
+                newLimits.max_workspaces > 1 || 
+                newLimits.max_collaborators > 0 || 
+                newLimits.max_users > 0 || 
+                newLimits.max_viewers > 0
             );
 
             if (isReactivationPossible) {
@@ -377,17 +403,24 @@ class SubscriptionController {
                     })
                     .toArray();
 
-                const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
-                const inactiveCollaborators = await db.collection('users')
+                // Find inactive users by standard roles
+                const roles = await db.collection('roles').find({ role_name: { $in: ['collaborator', 'user', 'viewer'] } }).toArray();
+                const roleIds = roles.map(r => r._id);
+                
+                const inactiveUsers = await db.collection('users')
                     .find({
                         company_id: user.company_id,
-                        role_id: collabRole?._id,
+                        role_id: { $in: roleIds },
                         status: 'inactive',
                         inactive_reason: 'plan_downgrade'
                     })
                     .toArray();
+                    
+                const inactiveCollaborators = inactiveUsers.filter(u => u.role_id.equals(roles.find(r => r.role_name === 'collaborator')?._id));
+                const inactiveStandardUsers = inactiveUsers.filter(u => u.role_id.equals(roles.find(r => r.role_name === 'user')?._id));
+                const inactiveViewers = inactiveUsers.filter(u => u.role_id.equals(roles.find(r => r.role_name === 'viewer')?._id));
 
-                if (archivedBusinesses.length > 0 || inactiveCollaborators.length > 0) {
+                if (archivedBusinesses.length > 0 || inactiveUsers.length > 0) {
                     return res.status(200).json({
                         requires_reactivation_selection: true,
                         action: 'upgrade_reactivation',
@@ -397,15 +430,14 @@ class SubscriptionController {
                             collaborators: b.collaborators?.map(id => id.toString()) || []
                         })),
                         inactive_collaborators: inactiveCollaborators.map(u => ({
-                            _id: u._id.toString(),
-                            email: u.email,
-                            name: u.name,
-                            // Find archived businesses this collaborator belongs to
+                            _id: u._id.toString(), email: u.email, name: u.name,
                             associated_business_ids: archivedBusinesses
                                 .filter(b => b.collaborators?.some(cid => cid.toString() === u._id.toString()))
                                 .map(b => b._id.toString())
                         })),
-                        limits: TIER_LIMITS.advanced,
+                        inactive_users: inactiveStandardUsers.map(u => ({ _id: u._id.toString(), email: u.email, name: u.name })),
+                        inactive_viewers: inactiveViewers.map(u => ({ _id: u._id.toString(), email: u.email, name: u.name })),
+                        limits: newLimits,
                         plan_id: plan_id
                     });
                 }
@@ -498,12 +530,14 @@ class SubscriptionController {
             const {
                 plan_id,
                 active_business_id,
-                active_collaborator_ids = []
+                active_collaborator_ids = [],
+                active_user_ids = [],
+                active_viewer_ids = []
             } = req.body;
 
-            if (!plan_id || !active_business_id) {
+            if (!plan_id) {
                 return res.status(400).json({
-                    error: 'plan_id and active_business_id are required'
+                    error: 'plan_id is required'
                 });
             }
 
@@ -553,12 +587,16 @@ class SubscriptionController {
                 status: { $ne: 'deleted' }
             }).toArray();
 
-            // Validate that active_business_id belongs to user
-            const selectedBusiness = allBusinesses.find(b => b._id.toString() === active_business_id);
-            if (!selectedBusiness) {
-                return res.status(400).json({
-                    error: 'Selected business not found or does not belong to you'
-                });
+            // Validate that active_business_id belongs to user IF they have businesses
+            let selectedBusiness = null;
+            if (allBusinesses.length > 0) {
+                if (!active_business_id) {
+                    return res.status(400).json({ error: 'active_business_id is required since you have active workspaces' });
+                }
+                selectedBusiness = allBusinesses.find(b => b._id.toString() === active_business_id);
+                if (!selectedBusiness) {
+                    return res.status(400).json({ error: 'Selected business not found or does not belong to you' });
+                }
             }
 
             // 2. Archive non-selected businesses (set access_mode to 'archived')
@@ -580,26 +618,31 @@ class SubscriptionController {
             }
 
             // 3. Set active business to 'active' mode
-            await db.collection('user_businesses').updateOne(
-                { _id: new ObjectId(active_business_id) },
-                { $set: { access_mode: 'active' } }
-            );
+            if (active_business_id) {
+                await db.collection('user_businesses').updateOne(
+                    { _id: new ObjectId(active_business_id) },
+                    { $set: { access_mode: 'active' } }
+                );
+            }
 
-            // 4. Archive ALL collaborator access for current company if downgrading to essential
-            // In essential plan, collaborators are not allowed.
-            if (newPlan.name.toLowerCase() === 'essential') {
-                const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
-                const collabsToArchive = await db.collection('users').find({
-                    company_id: user.company_id,
-                    role_id: collabRole?._id
-                }).toArray();
+            // 4. Archive standard users that were NOT selected to be kept active
+            const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
+            const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+            const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
 
-                var archivedCollabCount = collabsToArchive.length;
+            const convertToObjectIdMap = (ids) => ids.filter(Boolean).map(id => new ObjectId(String(id)));
 
+            const validCollabIds = convertToObjectIdMap(active_collaborator_ids);
+            const validUserIds = convertToObjectIdMap(active_user_ids);
+            const validViewerIds = convertToObjectIdMap(active_viewer_ids);
+
+            // Archive Collaborators
+            if (collabRole) {
                 await db.collection('users').updateMany(
                     {
                         company_id: user.company_id,
-                        role_id: collabRole?._id
+                        role_id: collabRole._id,
+                        _id: { $nin: validCollabIds }
                     },
                     {
                         $set: {
@@ -610,21 +653,61 @@ class SubscriptionController {
                         }
                     }
                 );
+            }
 
-                // Also clear collaborators array from the active business
+            // Archive Users
+            if (userRole) {
+                await db.collection('users').updateMany(
+                    {
+                        company_id: user.company_id,
+                        role_id: userRole._id,
+                        _id: { $nin: validUserIds }
+                    },
+                    {
+                        $set: {
+                            status: 'inactive',
+                            access_mode: 'archived',
+                            inactive_reason: 'plan_downgrade',
+                            inactive_at: new Date()
+                        }
+                    }
+                );
+            }
+
+            // Archive Viewers
+            if (viewerRole) {
+                await db.collection('users').updateMany(
+                    {
+                        company_id: user.company_id,
+                        role_id: viewerRole._id,
+                        _id: { $nin: validViewerIds }
+                    },
+                    {
+                        $set: {
+                            status: 'inactive',
+                            access_mode: 'archived',
+                            inactive_reason: 'plan_downgrade',
+                            inactive_at: new Date()
+                        }
+                    }
+                );
+            }
+
+            // Sync collaborators array from active business down to what is allowed
+            if (selectedBusiness && active_business_id) {
+                const currentBusinessCollabs = (selectedBusiness.collaborators || []).map(id => id.toString());
+                const keptCollabsForBusiness = currentBusinessCollabs.filter(id => active_collaborator_ids.includes(id));
+                const archivedCollabsForBusiness = currentBusinessCollabs.filter(id => !active_collaborator_ids.includes(id));
+
                 await db.collection('user_businesses').updateOne(
                     { _id: new ObjectId(active_business_id) },
                     {
                         $set: {
-                            collaborators: [],
-                            archived_collaborators: selectedBusiness.collaborators || []
+                            collaborators: keptCollabsForBusiness.map(id => new ObjectId(id)),
+                            archived_collaborators: archivedCollabsForBusiness.map(id => new ObjectId(id))
                         }
                     }
                 );
-            } else {
-                // Handle non-essential downgrades if any (currently only Essential and Advanced exist)
-                // For now, if it's not essential, we follow the previous logic or keep it as is.
-                // But the request specifically mentioned essential and collaborators.
             }
 
             // 5. Lock all projects in archived businesses to read-only
@@ -720,7 +803,9 @@ class SubscriptionController {
             const {
                 plan_id,
                 reactivate_business_ids = [],
-                reactivate_collaborator_ids = []
+                reactivate_collaborator_ids = [],
+                reactivate_user_ids = [],
+                reactivate_viewer_ids = []
             } = req.body;
 
             const db = getDB();
@@ -790,11 +875,12 @@ class SubscriptionController {
                 );
             }
 
-            // 3. Reactivate Collaborators
-            if (reactivate_collaborator_ids.length > 0) {
+            // 3. Reactivate Selected Users
+            const allUsersToReactivate = [...reactivate_collaborator_ids, ...reactivate_user_ids, ...reactivate_viewer_ids];
+            if (allUsersToReactivate.length > 0) {
                 await db.collection('users').updateMany(
                     {
-                        _id: { $in: reactivate_collaborator_ids.map(id => new ObjectId(id)) },
+                        _id: { $in: allUsersToReactivate.map(id => new ObjectId(id)) },
                         company_id: user.company_id
                     },
                     {
