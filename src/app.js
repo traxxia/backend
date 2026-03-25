@@ -9,17 +9,19 @@ const webhookRoutes = require('./routes/webhookRoutes');
 const errorHandler = require('./middleware/errorHandler');
 const cron = require('node-cron');
 const SubscriptionRenewalService = require('./services/subscriptionRenewalService');
+const renewalLogger = require('./utils/renewalLogger');
 
 const app = express();
 
 // Background Automated Renewal Watcher
 let isJobRunning = false; 
 
-cron.schedule('* * * * *', async () => {
+cron.schedule('*/5 * * * *', async () => {
   const { getDB } = require('./config/database');
 
   if (isJobRunning) {
     console.log('[Cron] Skipping — previous job still running');
+    renewalLogger.warn('[Cron] Skipping — previous job still running');
     return;
   }
 
@@ -29,14 +31,22 @@ cron.schedule('* * * * *', async () => {
     isJobRunning = true;
 
     console.log(`[Cron] 🕒 Running background renewal check at ${new Date().toISOString()}...`);
+    renewalLogger.info(`[Cron] 🕒 Running background renewal check at ${new Date().toISOString()}...`);
 
-    await SubscriptionRenewalService.checkAndRenewExpiredSubscriptions(); 
+    const start = Date.now();
+
+await SubscriptionRenewalService.checkAndRenewExpiredSubscriptions();
+
+console.log(`[Cron] Finished in ${Date.now() - start} ms`);
+renewalLogger.info(`[Cron] Finished in ${Date.now() - start} ms`);
 
   } catch (err) {
     if (err.message === 'Database not initialized') {
       console.log(`[Cron] Database not ready yet, skipping this cycle.`);
+      renewalLogger.warn(`[Cron] Database not ready yet, skipping this cycle.`);
     } else {
       console.error(`[Cron] Unexpected Error:`, err);
+      renewalLogger.error(`[Cron] Unexpected Error: ${err.message}`);
     }
   } finally {
     isJobRunning = false; 
