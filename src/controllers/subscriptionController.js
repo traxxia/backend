@@ -30,47 +30,57 @@ class SubscriptionController {
             // Use snapshotted limits so super-admin plan edits don't affect existing customers
             const limits = await TierService.getCompanyLimits(user.company_id);
 
-            // 1. Count Businesses across whole company
-            const companyUsers = await db.collection('users').find({ company_id: user.company_id }).project({ _id: 1 }).toArray();
+            // Robust counting for businesses and users
+            const companyIdStr = user.company_id.toString();
+            const companyIdObj = new ObjectId(companyIdStr);
+            const companyIdFilter = { $in: [companyIdStr, companyIdObj] };
+
+            // 1. Get all company users (supporting both String and ObjectId for company_id)
+            const companyUsers = await db.collection('users').find({
+                company_id: companyIdFilter
+            }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+
             const companyUserIds = companyUsers.map(u => u._id);
+            const companyUserIdStrs = companyUsers.map(u => u._id.toString());
+            const allUserIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
 
+            // Helper to check if a user is active (explicit 'active' or missing status)
+            const isItemActive = (item) => !item.status || item.status === 'active';
+
+            // 2. Count Businesses (supporting items without a status field as active)
             const currentWorkspaces = await db.collection('user_businesses').countDocuments({
-                user_id: { $in: companyUserIds },
-                status: 'active'
+                user_id: { $in: allUserIds },
+                status: { $in: ['active', null, undefined] }
             });
 
-            // 2. Count Collaborators
+            // 3. Count Roles
             const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
-            const currentCollaborators = await db.collection('users').countDocuments({
-                company_id: user.company_id,
-                role_id: collabRole?._id,
-                status: 'active'
-            });
-
-                        // 2b. Count Viewers
             const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
-            const currentViewers = await db.collection('users').countDocuments({
-                company_id: user.company_id,
-                role_id: viewerRole?._id,
-                status: 'active'
-            });
-
-            // 2c. Count Users (role 'user')
             const userRole = await db.collection('roles').findOne({ role_name: 'user' });
-            const currentUsersWithUserRole = await db.collection('users').countDocuments({
-                company_id: user.company_id,
-                role_id: userRole?._id,
-                status: 'active'
-            });
 
-            // 3. Count Projects across all company businesses
+            const currentCollaborators = companyUsers.filter(u =>
+                isItemActive(u) && u.role_id?.toString() === collabRole?._id.toString()
+            ).length;
+
+            const currentViewers = companyUsers.filter(u =>
+                isItemActive(u) && u.role_id?.toString() === viewerRole?._id.toString()
+            ).length;
+
+            const currentUsersWithUserRole = companyUsers.filter(u =>
+                isItemActive(u) && u.role_id?.toString() === userRole?._id.toString()
+            ).length;
+
+            // 4. Count Projects across all company businesses
             const companyBusinesses = await db.collection('user_businesses')
-                .find({ user_id: { $in: companyUserIds } })
+                .find({ user_id: { $in: allUserIds } })
                 .project({ _id: 1 })
                 .toArray();
             const businessIds = companyBusinesses.map(b => b._id);
+            const businessIdStrs = companyBusinesses.map(b => b._id.toString());
+            const allBusinessIds = [...new Set([...businessIds, ...businessIdStrs])];
+
             const currentProjects = await db.collection('projects').countDocuments({
-                business_id: { $in: businessIds }
+                business_id: { $in: allBusinessIds }
             });
 
             // Available Plans
@@ -139,28 +149,47 @@ class SubscriptionController {
             // Determine if the live plan limits differ from the customer's snapshot
             // so the frontend can show a "limits locked until renewal" notice.
             let planUpdatedSinceSnapshot = false;
-            if (company?.plan_snapshot?.snapshotted_at) {
+            let originalPlanLimits = null;
+            let originalPlanPrice = null;
+
+            if (company?.plan_id) {
                 const livePlan = await db.collection('plans').findOne({ _id: company.plan_id });
                 if (livePlan) {
                     const liveLimits = TierService.getLimitsForPlan(livePlan);
-                    const snap = company.plan_snapshot;
-                    planUpdatedSinceSnapshot = (
-                        liveLimits.max_workspaces    !== snap.max_workspaces    ||
-                        liveLimits.max_collaborators !== snap.max_collaborators ||
-                        liveLimits.max_viewers       !== snap.max_viewers       ||
-                        liveLimits.max_users         !== snap.max_users         ||
-                        liveLimits.project           !== snap.project           ||
-                        liveLimits.insight           !== snap.insight           ||
-                        liveLimits.strategic         !== snap.strategic         ||
-                        liveLimits.pmf               !== snap.pmf
-                    );
+                    originalPlanPrice = livePlan.price || TIER_LIMITS[livePlan.name.toLowerCase()]?.price_usd || 0;
+                    originalPlanLimits = {
+                        workspaces:    liveLimits.max_workspaces,
+                        collaborators: liveLimits.max_collaborators,
+                        viewers:       liveLimits.max_viewers,
+                        users:         liveLimits.max_users,
+                        project:       liveLimits.project,
+                        pmf:           liveLimits.pmf,
+                        insight:       liveLimits.insight,
+                        strategic:     liveLimits.strategic
+                    };
+
+                    if (company.plan_snapshot?.snapshotted_at) {
+                        const snap = company.plan_snapshot;
+                        planUpdatedSinceSnapshot = (
+                            liveLimits.max_workspaces    !== snap.max_workspaces    ||
+                            liveLimits.max_collaborators !== snap.max_collaborators ||
+                            liveLimits.max_viewers       !== snap.max_viewers       ||
+                            liveLimits.max_users         !== snap.max_users         ||
+                            liveLimits.project           !== snap.project           ||
+                            liveLimits.insight           !== snap.insight           ||
+                            liveLimits.strategic         !== snap.strategic         ||
+                            liveLimits.pmf               !== snap.pmf
+                        );
+                    }
                 }
             }
 
             res.json({
                 plan: planName,
                 plan_price: company?.subscription_plan_price || TIER_LIMITS[planName.toLowerCase()]?.price_usd || 0,
+                original_plan_price: originalPlanPrice,
                 plan_limits: limits,
+                original_plan_limits: originalPlanLimits,
                 company_name: company?.company_name,
                 start_date: startDate,
                 end_date: expiresAt,
@@ -198,23 +227,28 @@ class SubscriptionController {
                 usage: {
                     workspaces: {
                         current: currentWorkspaces,
-                        limit: limits.max_workspaces
+                        limit: limits.max_workspaces,
+                        original_limit: originalPlanLimits?.workspaces ?? limits.max_workspaces
                     },
                     collaborators: {
                         current: currentCollaborators,
-                        limit: limits.max_collaborators
+                        limit: limits.max_collaborators,
+                        original_limit: originalPlanLimits?.collaborators ?? limits.max_collaborators
                     },
                     users: {
                         current: currentUsersWithUserRole,
-                        limit: limits.max_users ?? 0
+                        limit: limits.max_users ?? 0,
+                        original_limit: originalPlanLimits?.users ?? limits.max_users ?? 0
                     },
                     viewers: {
                         current: currentViewers,
-                        limit: limits.max_viewers ?? 0
+                        limit: limits.max_viewers ?? 0,
+                        original_limit: originalPlanLimits?.viewers ?? limits.max_viewers ?? 0
                     },
                     projects: {
                         current: currentProjects,
-                        limit: limits.project
+                        limit: limits.project,
+                        original_limit: originalPlanLimits?.project ?? limits.project
                     },
                     pmf:       limits.pmf      ?? false,
                     insight:   limits.insight  ?? false,

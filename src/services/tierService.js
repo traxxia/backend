@@ -219,23 +219,33 @@ class TierService {
 
     static async getCompanyUsage(companyId) {
         const db = getDB();
-        const companyIdObj = new ObjectId(companyId);
+        const companyIdStr = companyId.toString();
+        const companyIdObj = new ObjectId(companyIdStr);
+        const companyIdFilter = { $in: [companyIdStr, companyIdObj] };
 
-        const companyUsers = await db.collection('users').find({ company_id: companyIdObj }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+        const companyUsers = await db.collection('users').find({
+            company_id: companyIdFilter
+        }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+
         const companyUserIds = companyUsers.map(u => u._id);
+        const companyUserIdStrs = companyUsers.map(u => u._id.toString());
+        const allUserIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
+
+        // Helper to check if an item is active (explicit 'active' or missing status)
+        const isItemActive = (item) => !item.status || item.status === 'active';
 
         const workspaces = await db.collection('user_businesses').countDocuments({
-            user_id: { $in: companyUserIds },
-            status: 'active'
+            user_id: { $in: allUserIds },
+            status: { $in: ['active', null, undefined] }
         });
 
         const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
         const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
         const userRole = await db.collection('roles').findOne({ role_name: 'user' });
 
-        const collaborators = companyUsers.filter(u => u.status === 'active' && u.role_id.toString() === collabRole?._id.toString()).length;
-        const viewers = companyUsers.filter(u => u.status === 'active' && u.role_id.toString() === viewerRole?._id.toString()).length;
-        const users = companyUsers.filter(u => u.status === 'active' && u.role_id.toString() === userRole?._id.toString()).length;
+        const collaborators = companyUsers.filter(u => isItemActive(u) && u.role_id?.toString() === collabRole?._id?.toString()).length;
+        const viewers = companyUsers.filter(u => isItemActive(u) && u.role_id?.toString() === viewerRole?._id?.toString()).length;
+        const users = companyUsers.filter(u => isItemActive(u) && u.role_id?.toString() === userRole?._id?.toString()).length;
 
         return {
             workspaces,
@@ -247,13 +257,20 @@ class TierService {
 
     static async getCompanyArchivedUsage(companyId) {
         const db = getDB();
-        const companyIdObj = new ObjectId(companyId);
+        const companyIdStr = companyId.toString();
+        const companyIdObj = new ObjectId(companyIdStr);
+        const companyIdFilter = { $in: [companyIdStr, companyIdObj] };
 
-        const companyUsers = await db.collection('users').find({ company_id: companyIdObj }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+        const companyUsers = await db.collection('users').find({
+            company_id: companyIdFilter
+        }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+
         const companyUserIds = companyUsers.map(u => u._id);
+        const companyUserIdStrs = companyUsers.map(u => u._id.toString());
+        const allUserIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
 
         const archivedWorkspaces = await db.collection('user_businesses').countDocuments({
-            user_id: { $in: companyUserIds },
+            user_id: { $in: allUserIds },
             status: 'archived'
         });
 
@@ -262,9 +279,9 @@ class TierService {
         const viewerRole = roles.find(r => r.role_name === 'viewer');
         const userRole = roles.find(r => r.role_name === 'user');
 
-        const inactiveCollaborators = companyUsers.filter(u => u.status === 'inactive' && u.role_id.toString() === collabRole?._id.toString()).length;
-        const inactiveViewers = companyUsers.filter(u => u.status === 'inactive' && u.role_id.toString() === viewerRole?._id.toString()).length;
-        const inactiveUsers = companyUsers.filter(u => u.status === 'inactive' && u.role_id.toString() === userRole?._id.toString()).length;
+        const inactiveCollaborators = companyUsers.filter(u => u.status === 'inactive' && u.role_id?.toString() === collabRole?._id?.toString()).length;
+        const inactiveViewers = companyUsers.filter(u => u.status === 'inactive' && u.role_id?.toString() === viewerRole?._id?.toString()).length;
+        const inactiveUsers = companyUsers.filter(u => u.status === 'inactive' && u.role_id?.toString() === userRole?._id?.toString()).length;
 
         return {
             workspaces: archivedWorkspaces,
