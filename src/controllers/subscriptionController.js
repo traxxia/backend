@@ -340,7 +340,7 @@ class SubscriptionController {
                     b.collaborators && b.collaborators.length > 0
                 );
 
-                if (workspaceCount > 1 || hasCollaborators) {
+                if (isDowngrade) { // Enforce selection on any downgrade limits
                     // Fetch collaborator emails for better UI
                     const allCollabIds = businesses.reduce((acc, b) => {
                         if (b.collaborators) acc.push(...b.collaborators);
@@ -404,6 +404,14 @@ class SubscriptionController {
                     })
                     .toArray();
 
+                const activeBusinesses = await db.collection('user_businesses')
+                    .find({
+                        user_id: { $in: companyUserIds },
+                        access_mode: 'active',
+                        status: { $ne: 'deleted' }
+                    })
+                    .toArray();
+
                 const roles = await db.collection('roles').find({}).toArray();
                 const roleMap = roles.reduce((acc, r) => {
                     acc[r._id.toString()] = r.role_name;
@@ -416,9 +424,18 @@ class SubscriptionController {
                     inactive_reason: 'plan_downgrade'
                 }).toArray();
 
+                const allActiveUsers = await db.collection('users').find({
+                    company_id: user.company_id,
+                    status: 'active'
+                }).toArray();
+
                 const inactive_collaborators = [];
                 const inactive_users = [];
                 const inactive_viewers = [];
+
+                const active_collaborators = [];
+                const active_users = [];
+                const active_viewers = [];
 
                 allInactiveUsers.forEach(u => {
                     const roleName = roleMap[u.role_id?.toString()];
@@ -436,6 +453,18 @@ class SubscriptionController {
                     else if (roleName === 'viewer') inactive_viewers.push(userData);
                 });
 
+                allActiveUsers.forEach(u => {
+                    const roleName = roleMap[u.role_id?.toString()];
+                    const userData = {
+                        _id: u._id.toString(),
+                        email: u.email,
+                        name: u.name
+                    };
+                    if (roleName === 'collaborator') active_collaborators.push(userData);
+                    else if (roleName === 'user') active_users.push(userData);
+                    else if (roleName === 'viewer') active_viewers.push(userData);
+                });
+
                 if (archivedBusinesses.length > 0 || allInactiveUsers.length > 0) {
                     return res.status(200).json({
                         requires_reactivation_selection: true,
@@ -445,9 +474,16 @@ class SubscriptionController {
                             business_name: b.business_name,
                             collaborators: b.collaborators?.map(id => id.toString()) || []
                         })),
+                        active_businesses: activeBusinesses.map(b => ({
+                            _id: b._id.toString(),
+                            business_name: b.business_name
+                        })),
                         inactive_collaborators,
                         inactive_users,
                         inactive_viewers,
+                        active_collaborators,
+                        active_users,
+                        active_viewers,
                         limits: newLimits,
                         new_plan_name: newPlan.name,
                         plan_id: plan_id
@@ -817,7 +853,13 @@ class SubscriptionController {
             const {
                 plan_id,
                 reactivate_business_ids = [],
-                reactivate_collaborator_ids = []
+                archive_business_ids = [],
+                reactivate_collaborator_ids = [],
+                archive_collaborator_ids = [],
+                reactivate_user_ids = [],
+                archive_user_ids = [],
+                reactivate_viewer_ids = [],
+                archive_viewer_ids = []
             } = req.body;
 
             const db = getDB();
@@ -852,7 +894,7 @@ class SubscriptionController {
                 status: { $ne: 'deleted' }
             });
 
-            if (activeBusinessesCount + reactivate_business_ids.length > limits.max_workspaces) {
+            if (activeBusinessesCount + reactivate_business_ids.length - archive_business_ids.length > limits.max_workspaces) {
                  return res.status(400).json({
                     error: `You can only have ${limits.max_workspaces} active workspaces for this plan.`,
                     plan: newPlan.name,
@@ -875,23 +917,37 @@ class SubscriptionController {
                 await db.collection('projects').updateMany(
                     { business_id: { $in: reactivate_business_ids.map(id => new ObjectId(id)) } },
                     {
-                        $set: {
-                            is_readonly: false,
-                            updated_at: new Date()
-                        },
-                        $unset: {
-                            locked_at: "",
-                            lock_reason: ""
-                        }
+                        $set: { is_readonly: false, updated_at: new Date() },
+                        $unset: { locked_at: "", lock_reason: "" }
                     }
                 );
             }
 
-            // 3. Reactivate Collaborators
-            if (reactivate_collaborator_ids.length > 0) {
+            // 2.1 Archive Businesses
+            if (archive_business_ids.length > 0) {
+                await db.collection('user_businesses').updateMany(
+                    { _id: { $in: archive_business_ids.map(id => new ObjectId(id)) } },
+                    { $set: { access_mode: 'archived', status: 'archived', archived_at: new Date(), archived_reason: 'plan_upgrade_deselect' } }
+                );
+
+                // Lock projects in these businesses
+                await db.collection('projects').updateMany(
+                    { business_id: { $in: archive_business_ids.map(id => new ObjectId(id)) } },
+                    { $set: { is_readonly: true, locked_at: new Date(), lock_reason: 'business_archived' } }
+                );
+            }
+
+            // 3. Reactivate Users (Collaborators, Users, Viewers)
+            const allReactivateUserIds = [
+                ...reactivate_collaborator_ids,
+                ...reactivate_user_ids,
+                ...reactivate_viewer_ids
+            ];
+            
+            if (allReactivateUserIds.length > 0) {
                 await db.collection('users').updateMany(
                     {
-                        _id: { $in: reactivate_collaborator_ids.map(id => new ObjectId(id)) },
+                        _id: { $in: allReactivateUserIds.map(id => new ObjectId(id)) },
                         company_id: user.company_id
                     },
                     {
@@ -903,6 +959,30 @@ class SubscriptionController {
                         $unset: {
                             inactive_reason: "",
                             inactive_at: ""
+                        }
+                    }
+                );
+            }
+
+            // 3.1 Archive Users
+            const allArchiveUserIds = [
+                ...archive_collaborator_ids,
+                ...archive_user_ids,
+                ...archive_viewer_ids
+            ];
+            
+            if (allArchiveUserIds.length > 0) {
+                await db.collection('users').updateMany(
+                    {
+                        _id: { $in: allArchiveUserIds.map(id => new ObjectId(id)) },
+                        company_id: user.company_id
+                    },
+                    {
+                        $set: {
+                            status: 'inactive',
+                            access_mode: 'archived',
+                            inactive_reason: 'plan_upgrade_deselect',
+                            inactive_at: new Date()
                         }
                     }
                 );
