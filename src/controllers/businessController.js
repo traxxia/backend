@@ -84,7 +84,7 @@ class BusinessController {
       let collabs = [];
 
       if (
-        ["company_admin", "viewer"].includes(req.user.role.role_name) &&
+        ["company_admin"].includes(req.user.role.role_name) &&
         !user_id
       ) {
         const companyUsers = await UserModel.getAll({
