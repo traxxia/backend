@@ -5,7 +5,7 @@ class PlanModel {
   static async getAll(includeInactive = false) {
     const db = getDB();
     const query = includeInactive ? {} : { status: 'active' };
-    return await db.collection('plans').find(query).sort({ _id: 1 }).toArray();
+    return await db.collection('plans').find(query).sort({ price: 1 }).toArray();
   }
 
   static async findById(planId) {

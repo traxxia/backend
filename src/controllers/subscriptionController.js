@@ -218,7 +218,7 @@ class SubscriptionController {
                             strategic: planLimits.strategic
                         }
                     };
-                }),
+                }).sort((a, b) => a.price - b.price),
                 billing_history: billingHistory.map(bh => ({
                     date: bh.date,
                     plan_name: bh.plan_name,

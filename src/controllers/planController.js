@@ -1,12 +1,20 @@
 const PlanModel = require('../models/planModel');
 const StripeService = require('../services/stripeService');
 const { logAuditEvent } = require('../services/auditService');
+const { TIER_LIMITS } = require('../config/constants');
 class PlanController {
     static async getAll(req, res) {
         try {
             const includeInactive = req.query.include_inactive === 'true' || req.headers['x-include-inactive'] === 'true';
             const plans = await PlanModel.getAll(includeInactive);
-            res.json({ plans });
+            
+            // Sort by price ascending, ensuring price field is present based on fallback limits
+            const sortedPlans = plans.map(p => ({
+                ...p,
+                price: p.price || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0
+            })).sort((a, b) => a.price - b.price);
+
+            res.json({ plans: sortedPlans });
         } catch (error) {
             console.error('Failed to fetch plans:', error);
             res.status(500).json({ error: 'Failed to fetch plans' });
