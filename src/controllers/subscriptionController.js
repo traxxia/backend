@@ -84,6 +84,8 @@ class SubscriptionController {
             let startDate = company?.subscription_start_date || company?.created_at || user.created_at || new Date();
             let status = company?.subscription_status || company?.status || 'active';
 
+            const isManualAccount = TierService.isStripeAccountNull(company || {});
+
             // If no expiration date (legacy data), set one based on created_at or give 30 days grace from now
             if (!expiresAt) {
                 expiresAt = new Date(startDate);
@@ -98,6 +100,16 @@ class SubscriptionController {
                     { _id: user.company_id },
                     { $set: { status: 'expired' } }
                 );
+            }
+
+            // If manual account and the DB says expired, force it back to active for the response.
+            if (isManualAccount && status === 'expired') {
+                status = 'active';
+            }
+
+            // Set expiresAt to null for unlimited accounts to signal frontend
+            if (isManualAccount) {
+                expiresAt = null;
             }
 
             // Fetch Payment Method Details if available
@@ -149,6 +161,7 @@ class SubscriptionController {
                 end_date: expiresAt,
                 expires_at: expiresAt,
                 status: status,
+                is_unlimited: isManualAccount,
                 plan_updated_since_snapshot: planUpdatedSinceSnapshot,
                 payment_methods: paymentMethods,
                 default_payment_method_id: defaultPaymentMethodId,

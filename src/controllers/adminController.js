@@ -31,8 +31,15 @@ class AdminController {
         if (displayLogo && displayLogo.includes('blob.core.windows.net')) {
           displayLogo = `/api/admin/companies/${company._id}/logo/display`;
         }
+        const isManualAccount = TierService.isStripeAccountNull(company);
+        let displayStatus = company.status;
+        if (isManualAccount && displayStatus === 'expired') {
+          displayStatus = 'active';
+        }
+
         return {
           ...company,
+          status: displayStatus,
           logo: displayLogo,
           admin_name: company.admin_name || "No Admin Assigned",
           admin_email: company.admin_email || "No Email",
