@@ -50,7 +50,7 @@ class SubscriptionController {
             // 2. Count Businesses (supporting items without a status field as active)
             const currentWorkspaces = await db.collection('user_businesses').countDocuments({
                 user_id: { $in: allUserIds },
-                status: { $in: ['active', null, undefined] }
+                status: { $nin: ['deleted', 'archived', 'inactive'] }
             });
 
             // 3. Count Roles
@@ -72,7 +72,7 @@ class SubscriptionController {
 
             // 4. Count Projects across all company businesses
             const companyBusinesses = await db.collection('user_businesses')
-                .find({ user_id: { $in: allUserIds } })
+                .find({ $or: [{ user_id: { $in: allUserIds } }, { company_id: user.company_id }] })
                 .project({ _id: 1 })
                 .toArray();
             const businessIds = companyBusinesses.map(b => b._id);
@@ -361,33 +361,37 @@ class SubscriptionController {
                 (newLimits.max_users > (currentLimits.max_users || 0) && archivedUsage.users > 0)
             );
 
-            if (isDowngrade || isReactivationPossible) {
+            // Always show configuration for new plans or renewals as per user request
+            if (true) {
                 const companyUsers = await db.collection('users')
                     .find({ company_id: user.company_id })
                     .project({ _id: 1 })
                     .toArray();
                 const companyUserIds = companyUsers.map(u => u._id);
+                const companyUserIdStrs = companyUsers.map(u => u._id.toString());
+                const allPotentialOwnerIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
 
-                const archivedBusinesses = await db.collection('user_businesses')
-                    .find({ user_id: { $in: companyUserIds }, access_mode: 'archived' })
-                    .toArray();
+                const companyBusinesses = await db.collection('user_businesses').find({
+                    $or: [
+                        { user_id: { $in: allPotentialOwnerIds } },
+                        { company_id: user.company_id }
+                    ],
+                    status: { $ne: 'deleted' }
+                }).toArray();
 
-                const activeBusinesses = await db.collection('user_businesses')
-                    .find({ user_id: { $in: companyUserIds }, access_mode: 'active', status: { $ne: 'deleted' } })
-                    .toArray();
+                const activeBusinesses = companyBusinesses.filter(b => b.access_mode !== 'archived' && !['archived', 'inactive'].includes(b.status));
+                const archivedBusinesses = companyBusinesses.filter(b => b.access_mode === 'archived' || ['archived', 'inactive'].includes(b.status));
 
                 const roles = await db.collection('roles').find({}).toArray();
                 const roleMap = roles.reduce((acc, r) => { acc[r._id.toString()] = r.role_name; return acc; }, {});
 
-                const allInactiveUsers = await db.collection('users').find({
+                const allCompanyUsers = await db.collection('users').find({
                     company_id: user.company_id,
-                    status: 'inactive'
+                    status: { $ne: 'deleted' }
                 }).toArray();
-
-                const allActiveUsers = await db.collection('users').find({
-                    company_id: user.company_id,
-                    status: 'active'
-                }).toArray();
+                
+                const allActiveUsers = allCompanyUsers.filter(u => !u.status || u.status === 'active');
+                const allInactiveUsers = allCompanyUsers.filter(u => u.status && u.status !== 'active');
 
                 const features = [];
 
@@ -395,7 +399,7 @@ class SubscriptionController {
                     features.push({
                         id: 'workspaces',
                         title: 'Workspaces',
-                        limit: newLimits.max_workspaces || 1,
+                        limit: newLimits.max_workspaces ?? 1,
                         active_items: activeBusinesses.map(b => ({ _id: b._id.toString(), name: b.business_name })),
                         archived_items: archivedBusinesses.map(b => ({ _id: b._id.toString(), name: b.business_name }))
                     });
@@ -544,6 +548,8 @@ class SubscriptionController {
             // Helper to fetch all users in company
             const companyUsers = await db.collection('users').find({ company_id: user.company_id }).project({ _id: 1 }).toArray();
             const companyUserIds = companyUsers.map(u => u._id);
+            const companyUserIdStrs = companyUsers.map(u => u._id.toString());
+            const allPotentialOwnerIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
 
             const newLimits = TierService.getLimitsForPlan(newPlan);
 
@@ -573,7 +579,7 @@ class SubscriptionController {
             // Set selected workspaces to active
             if (activeWorkspaceIds.length > 0) {
                 await db.collection('user_businesses').updateMany(
-                    { _id: { $in: activeWorkspaceIds }, user_id: { $in: companyUserIds } },
+                    { _id: { $in: activeWorkspaceIds }, $or: [{ user_id: { $in: allPotentialOwnerIds } }, { company_id: user.company_id }] },
                     { $set: { access_mode: 'active', status: 'active', updated_at: new Date() } }
                 );
                 await db.collection('projects').updateMany(
@@ -584,13 +590,13 @@ class SubscriptionController {
 
             // Set unselected workspaces to archived
             await db.collection('user_businesses').updateMany(
-                { _id: { $nin: activeWorkspaceIds }, user_id: { $in: companyUserIds }, status: { $ne: 'deleted' } },
+                { _id: { $nin: activeWorkspaceIds }, $or: [{ user_id: { $in: allPotentialOwnerIds } }, { company_id: user.company_id }], status: { $ne: 'deleted' } },
                 { $set: { access_mode: 'archived', status: 'archived', archived_at: new Date(), archived_reason: 'plan_configuration' } }
             );
 
             // Lock projects in archived workspaces
             const archivedBusinessesList = await db.collection('user_businesses')
-                .find({ _id: { $nin: activeWorkspaceIds }, user_id: { $in: companyUserIds }, status: 'archived' })
+                .find({ _id: { $nin: activeWorkspaceIds }, $or: [{ user_id: { $in: allPotentialOwnerIds } }, { company_id: user.company_id }], status: { $in: ['archived', 'inactive'] } })
                 .toArray();
             if (archivedBusinessesList.length > 0) {
                 await db.collection('projects').updateMany(
