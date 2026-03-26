@@ -82,6 +82,8 @@ class BusinessController {
 
       let owned = [];
       let collabs = [];
+      let deletedOwned = [];
+      let deletedCollabs = [];
 
       if (
         ["company_admin"].includes(req.user.role.role_name) &&
@@ -95,9 +97,15 @@ class BusinessController {
 
         owned = await BusinessModel.findByUserIds(companyUserIds);
         collabs = await BusinessModel.findByCollaborator(req.user._id);
+
+        deletedOwned = await BusinessModel.findDeletedByUserIds(companyUserIds);
+        deletedCollabs = await BusinessModel.findDeletedByCollaborator(req.user._id);
       } else {
         owned = await BusinessModel.findByUserId(targetUserId);
         collabs = await BusinessModel.findByCollaborator(targetUserId);
+
+        deletedOwned = await BusinessModel.findDeletedByUserId(targetUserId);
+        deletedCollabs = await BusinessModel.findDeletedByCollaborator(targetUserId);
       }
 
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
@@ -105,21 +113,27 @@ class BusinessController {
         (b) => !ownedIds.has(b._id.toString())
       );
 
+      const deletedOwnedIds = new Set(deletedOwned.map((b) => b._id.toString()));
+      const deleted_collaborating = deletedCollabs.filter(
+        (b) => !deletedOwnedIds.has(b._id.toString())
+      );
+
       // check business with started projects
-      const allBusinesses = [...owned, ...collaborating_businesses];
-      const businessIds = allBusinesses.map((b) => new ObjectId(b._id));
+      const allActiveBusinesses = [...owned, ...collaborating_businesses];
+      const allDeletedBusinesses = [...deletedOwned, ...deleted_collaborating];
+      const allBusinessIds = [...allActiveBusinesses, ...allDeletedBusinesses].map((b) => new ObjectId(b._id));
 
       const businessesWithProjects = await ProjectModel.collection().distinct(
         "business_id",
         {
-          business_id: { $in: businessIds },
+          business_id: { $in: allBusinessIds },
         }
       );
 
       const businessesWithLaunchedProjects = await ProjectModel.collection().distinct(
         "business_id",
         {
-          business_id: { $in: businessIds },
+          business_id: { $in: allBusinessIds },
           launch_status: "launched"
         }
       );
@@ -246,6 +260,8 @@ class BusinessController {
 
       const enhancedOwned = await enhance(owned);
       const enhancedCollaborating = await enhance(collaborating_businesses);
+      const enhancedDeletedOwned = await enhance(deletedOwned);
+      const enhancedDeletedCollaborating = await enhance(deleted_collaborating);
 
       //       console.log("DEBUG companyAdminIds:", companyAdminIds);
       // console.log("DEBUG targetUserId:", targetUserId.toString());
@@ -255,6 +271,7 @@ class BusinessController {
       res.json({
         businesses: enhancedOwned,
         collaborating_businesses: enhancedCollaborating,
+        deleted_businesses: [...enhancedDeletedOwned, ...enhancedDeletedCollaborating],
         overall_stats: {
           total_businesses: owned.filter(b => b.status !== 'deleted').length,
           total_questions_in_system: totalQuestions,
@@ -763,6 +780,10 @@ class BusinessController {
       const business = await BusinessModel.findById(businessId);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
+
+      if (business.status === 'deleted') {
+        return res.status(400).json({ error: "Cannot assign collaborators to a deleted business" });
+      }
 
       const requesterRole = req.user.role.role_name;
       const isAdmin = ["super_admin", "company_admin"].includes(requesterRole);

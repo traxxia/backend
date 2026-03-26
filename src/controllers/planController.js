@@ -50,7 +50,11 @@ class PlanController {
             }
 
             if (planData.name) {
-                const existingPlan = await PlanModel.findByName(planData.name);
+                const name = planData.name.trim();
+                if (!name || !/[a-zA-Z]/.test(name)) {
+                    return res.status(400).json({ error: 'Plan name must contain at least one letter' });
+                }
+                const existingPlan = await PlanModel.findByName(name);
                 if (existingPlan) {
                     return res.status(400).json({ error: 'Plan with this name already exists' });
                 }
@@ -99,6 +103,13 @@ class PlanController {
                 planData.features = planData.features
                     .map(f => typeof f === 'string' ? f.trim() : f)
                     .filter(f => f !== '');
+            }
+
+            if (planData.name !== undefined) {
+                const name = (planData.name || '').trim();
+                if (!name || !/[a-zA-Z]/.test(name)) {
+                    return res.status(400).json({ error: 'Plan name must contain at least one letter' });
+                }
             }
 
             // Capture old plan to check for status transitions
