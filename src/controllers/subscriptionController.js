@@ -27,29 +27,60 @@ class SubscriptionController {
             const company = await db.collection('companies').findOne({ _id: user.company_id });
 
             const planName = await TierService.getUserTier(userId);
-            const limits = TierService.getTierLimits(planName);
+            // Use snapshotted limits so super-admin plan edits don't affect existing customers
+            const limits = await TierService.getCompanyLimits(user.company_id);
 
-            // 1. Count Businesses
+            // Robust counting for businesses and users
+            const companyIdStr = user.company_id.toString();
+            const companyIdObj = new ObjectId(companyIdStr);
+            const companyIdFilter = { $in: [companyIdStr, companyIdObj] };
+
+            // 1. Get all company users (supporting both String and ObjectId for company_id)
+            const companyUsers = await db.collection('users').find({
+                company_id: companyIdFilter
+            }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+
+            const companyUserIds = companyUsers.map(u => u._id);
+            const companyUserIdStrs = companyUsers.map(u => u._id.toString());
+            const allUserIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
+
+            // Helper to check if a user is active (explicit 'active' or missing status)
+            const isItemActive = (item) => !item.status || item.status === 'active';
+
+            // 2. Count Businesses (supporting items without a status field as active)
             const currentWorkspaces = await db.collection('user_businesses').countDocuments({
-                user_id: new ObjectId(userId),
-                status: { $ne: 'deleted' }
+                user_id: { $in: allUserIds },
+                status: { $in: ['active', null, undefined] }
             });
 
-            // 2. Count Collaborators
+            // 3. Count Roles
             const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
-            const currentCollaborators = await db.collection('users').countDocuments({
-                company_id: user.company_id,
-                role_id: collabRole?._id
-            });
+            const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
+            const userRole = await db.collection('roles').findOne({ role_name: 'user' });
 
-            // 3. Count Projects
-            const userBusinesses = await db.collection('user_businesses')
-                .find({ user_id: new ObjectId(userId) })
+            const currentCollaborators = companyUsers.filter(u =>
+                isItemActive(u) && u.role_id?.toString() === collabRole?._id.toString()
+            ).length;
+
+            const currentViewers = companyUsers.filter(u =>
+                isItemActive(u) && u.role_id?.toString() === viewerRole?._id.toString()
+            ).length;
+
+            const currentUsersWithUserRole = companyUsers.filter(u =>
+                isItemActive(u) && u.role_id?.toString() === userRole?._id.toString()
+            ).length;
+
+            // 4. Count Projects across all company businesses
+            const companyBusinesses = await db.collection('user_businesses')
+                .find({ user_id: { $in: allUserIds } })
                 .project({ _id: 1 })
                 .toArray();
-            const businessIds = userBusinesses.map(b => b._id);
+            const businessIds = companyBusinesses.map(b => b._id);
+            const businessIdStrs = companyBusinesses.map(b => b._id.toString());
+            const allBusinessIds = [...new Set([...businessIds, ...businessIdStrs])];
+
             const currentProjects = await db.collection('projects').countDocuments({
-                business_id: { $in: businessIds }
+                business_id: { $in: allBusinessIds }
             });
 
             // Available Plans
@@ -66,23 +97,32 @@ class SubscriptionController {
             let startDate = company?.subscription_start_date || company?.created_at || user.created_at || new Date();
             let status = company?.subscription_status || company?.status || 'active';
 
+            const isManualAccount = TierService.isStripeAccountNull(company || {});
+
             // If no expiration date (legacy data), set one based on created_at or give 30 days grace from now
             if (!expiresAt) {
                 expiresAt = new Date(startDate);
                 expiresAt.setMonth(expiresAt.getMonth() + 1);
             }
 
-            // Check if expired - Bypass if plan is 'unlimited' (e.g. Stripe IDs are null)
-            if (planName !== 'unlimited' && new Date() > new Date(expiresAt) && status !== 'expired') {
+            // Check if expired
+            if (new Date() > new Date(expiresAt) && status !== 'expired') {
                 status = 'expired';
                 // Update specific company status to expired
                 await db.collection('companies').updateOne(
                     { _id: user.company_id },
                     { $set: { status: 'expired' } }
                 );
-            } else if (planName === 'unlimited') {
-                // Ensure status is active for unlimited plans if it was somehow marked expired
+            }
+
+            // If manual account and the DB says expired, force it back to active for the response.
+            if (isManualAccount && status === 'expired') {
                 status = 'active';
+            }
+
+            // Set expiresAt to null for unlimited accounts to signal frontend
+            if (isManualAccount) {
+                expiresAt = null;
             }
 
             // Fetch Payment Method Details if available
@@ -106,21 +146,79 @@ class SubscriptionController {
                 }
             }
 
+            // Determine if the live plan limits differ from the customer's snapshot
+            // so the frontend can show a "limits locked until renewal" notice.
+            let planUpdatedSinceSnapshot = false;
+            let originalPlanLimits = null;
+            let originalPlanPrice = null;
+
+            if (company?.plan_id) {
+                const livePlan = await db.collection('plans').findOne({ _id: company.plan_id });
+                if (livePlan) {
+                    const liveLimits = TierService.getLimitsForPlan(livePlan);
+                    originalPlanPrice = livePlan.price || TIER_LIMITS[livePlan.name.toLowerCase()]?.price_usd || 0;
+                    originalPlanLimits = {
+                        workspaces: liveLimits.max_workspaces,
+                        collaborators: liveLimits.max_collaborators,
+                        viewers: liveLimits.max_viewers,
+                        users: liveLimits.max_users,
+                        project: liveLimits.project,
+                        pmf: liveLimits.pmf,
+                        insight: liveLimits.insight,
+                        strategic: liveLimits.strategic
+                    };
+
+                    if (company.plan_snapshot?.snapshotted_at) {
+                        const snap = company.plan_snapshot;
+                        planUpdatedSinceSnapshot = (
+                            liveLimits.max_workspaces !== snap.max_workspaces ||
+                            liveLimits.max_collaborators !== snap.max_collaborators ||
+                            liveLimits.max_viewers !== snap.max_viewers ||
+                            liveLimits.max_users !== snap.max_users ||
+                            liveLimits.project !== snap.project ||
+                            liveLimits.insight !== snap.insight ||
+                            liveLimits.strategic !== snap.strategic ||
+                            liveLimits.pmf !== snap.pmf
+                        );
+                    }
+                }
+            }
+
             res.json({
                 plan: planName,
+                plan_price: company?.subscription_plan_price || TIER_LIMITS[planName.toLowerCase()]?.price_usd || 0,
+                original_plan_price: originalPlanPrice,
+                plan_limits: limits,
+                original_plan_limits: originalPlanLimits,
                 company_name: company?.company_name,
                 start_date: startDate,
                 end_date: expiresAt,
                 expires_at: expiresAt,
                 status: status,
+                is_unlimited: isManualAccount,
+                plan_updated_since_snapshot: planUpdatedSinceSnapshot,
                 payment_methods: paymentMethods,
                 default_payment_method_id: defaultPaymentMethodId,
-                available_plans: availablePlans.map(p => ({
-                    _id: p._id,
-                    name: p.name,
-                    price: p.price_usd || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
-                    features: p.features || []
-                })),
+                available_plans: availablePlans.map(p => {
+                    const planLimits = TierService.getLimitsForPlan(p);
+                    return {
+                        _id: p._id,
+                        name: p.name,
+                        description: p.description || '',
+                        price: p.price || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
+                        features: p.features || [],
+                        limits: {
+                            workspaces: planLimits.max_workspaces,
+                            collaborators: planLimits.max_collaborators,
+                            viewers: planLimits.max_viewers,
+                            users: planLimits.max_users,
+                            project: planLimits.project,
+                            pmf: planLimits.pmf,
+                            insight: planLimits.insight,
+                            strategic: planLimits.strategic
+                        }
+                    };
+                }).sort((a, b) => a.price - b.price),
                 billing_history: billingHistory.map(bh => ({
                     date: bh.date,
                     plan_name: bh.plan_name,
@@ -129,16 +227,32 @@ class SubscriptionController {
                 usage: {
                     workspaces: {
                         current: currentWorkspaces,
-                        limit: limits.max_workspaces
+                        limit: limits.max_workspaces,
+                        original_limit: originalPlanLimits?.workspaces ?? limits.max_workspaces
                     },
                     collaborators: {
                         current: currentCollaborators,
-                        limit: limits.max_collaborators
+                        limit: limits.max_collaborators,
+                        original_limit: originalPlanLimits?.collaborators ?? limits.max_collaborators
+                    },
+                    users: {
+                        current: currentUsersWithUserRole,
+                        limit: limits.max_users ?? 0,
+                        original_limit: originalPlanLimits?.users ?? limits.max_users ?? 0
+                    },
+                    viewers: {
+                        current: currentViewers,
+                        limit: limits.max_viewers ?? 0,
+                        original_limit: originalPlanLimits?.viewers ?? limits.max_viewers ?? 0
                     },
                     projects: {
                         current: currentProjects,
-                        limit: limits.can_create_projects ? (limits.max_projects || 'unlimited') : 0
-                    }
+                        limit: limits.project,
+                        original_limit: originalPlanLimits?.project ?? limits.project
+                    },
+                    pmf: limits.pmf ?? false,
+                    insight: limits.insight ?? false,
+                    strategic: limits.strategic ?? false
                 }
             });
         } catch (error) {
@@ -227,78 +341,27 @@ class SubscriptionController {
                 return res.status(404).json({ error: 'Selected plan not found' });
             }
 
-            // Detect downgrade from Advanced to Essential
+            const usage = await TierService.getCompanyUsage(user.company_id);
+            const newLimits = TierService.getLimitsForPlan(newPlan);
+
+            // Dynamically detect if configuration is needed based on usage vs new limits
             const isDowngrade = (
-                currentPlan?.name?.toLowerCase() === 'advanced' &&
-                newPlan.name.toLowerCase() === 'essential'
+                usage.workspaces > (newLimits.max_workspaces || 0) ||
+                usage.collaborators > (newLimits.max_collaborators || 0) ||
+                usage.viewers > (newLimits.max_viewers || 0) ||
+                usage.users > (newLimits.max_users || 0)
             );
 
-            if (isDowngrade) {
-                // Check if user has multiple workspaces
-                const workspaceCount = await db.collection('user_businesses').countDocuments({
-                    user_id: new ObjectId(userId),
-                    status: { $ne: 'deleted' }
-                });
-
-                // Get all businesses to check for collaborators
-                const businesses = await db.collection('user_businesses')
-                    .find({
-                        user_id: new ObjectId(userId),
-                        status: { $ne: 'deleted' }
-                    })
-                    .toArray();
-
-                const hasCollaborators = businesses.some(b =>
-                    b.collaborators && b.collaborators.length > 0
-                );
-
-                if (workspaceCount > 1 || hasCollaborators) {
-                    // Fetch collaborator emails for better UI
-                    const allCollabIds = businesses.reduce((acc, b) => {
-                        if (b.collaborators) acc.push(...b.collaborators);
-                        return acc;
-                    }, []);
-
-                    const uniqueCollabIds = [...new Set(allCollabIds.map(id => id.toString()))];
-                    const collabsInfo = await db.collection('users').find(
-                        { _id: { $in: uniqueCollabIds.map(id => new ObjectId(id)) } },
-                        { projection: { _id: 1, email: 1 } }
-                    ).toArray();
-
-                    const collabMap = collabsInfo.reduce((acc, u) => {
-                        acc[u._id.toString()] = u.email;
-                        return acc;
-                    }, {});
-
-                    return res.status(200).json({
-                        requires_selection: true,
-                        action: 'downgrade',
-                        current_plan: currentPlan?.name || 'unknown',
-                        new_plan: newPlan.name,
-                        workspace_count: workspaceCount,
-                        has_collaborators: hasCollaborators,
-                        businesses: businesses.map(b => ({
-                            _id: b._id,
-                            business_name: b.business_name,
-                            collaborator_count: b.collaborators?.length || 0,
-                            collaborators: (b.collaborators || []).map(id => ({
-                                user_id: id,
-                                email: collabMap[id.toString()] || 'Collaborator'
-                            }))
-                        })),
-                        message: 'Please select which workspace to keep active and which collaborators to retain'
-                    });
-                }
-            }
-
-            // 5. Detect if reactivation selection is required (Moving to Advanced)
+            const currentLimits = await TierService.getCompanyLimits(user.company_id);
+            const archivedUsage = await TierService.getCompanyArchivedUsage(user.company_id);
             const isReactivationPossible = (
-                newPlan.name.toLowerCase() === 'advanced' &&
-                (currentPlan?.name?.toLowerCase() === 'essential' || !currentPlan)
+                (newLimits.max_workspaces > (currentLimits.max_workspaces || 0) && archivedUsage.workspaces > 0) ||
+                (newLimits.max_collaborators > (currentLimits.max_collaborators || 0) && archivedUsage.collaborators > 0) ||
+                (newLimits.max_viewers > (currentLimits.max_viewers || 0) && archivedUsage.viewers > 0) ||
+                (newLimits.max_users > (currentLimits.max_users || 0) && archivedUsage.users > 0)
             );
 
-            if (isReactivationPossible) {
-                // Find all users in this company to get their businesses
+            if (isDowngrade || isReactivationPossible) {
                 const companyUsers = await db.collection('users')
                     .find({ company_id: user.company_id })
                     .project({ _id: 1 })
@@ -306,44 +369,74 @@ class SubscriptionController {
                 const companyUserIds = companyUsers.map(u => u._id);
 
                 const archivedBusinesses = await db.collection('user_businesses')
-                    .find({
-                        user_id: { $in: companyUserIds },
-                        access_mode: 'archived'
-                    })
+                    .find({ user_id: { $in: companyUserIds }, access_mode: 'archived' })
                     .toArray();
 
-                const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
-                const inactiveCollaborators = await db.collection('users')
-                    .find({
-                        company_id: user.company_id,
-                        role_id: collabRole?._id,
-                        status: 'inactive',
-                        inactive_reason: 'plan_downgrade'
-                    })
+                const activeBusinesses = await db.collection('user_businesses')
+                    .find({ user_id: { $in: companyUserIds }, access_mode: 'active', status: { $ne: 'deleted' } })
                     .toArray();
 
-                if (archivedBusinesses.length > 0 || inactiveCollaborators.length > 0) {
-                    return res.status(200).json({
-                        requires_reactivation_selection: true,
-                        action: 'upgrade_reactivation',
-                        archived_businesses: archivedBusinesses.map(b => ({
-                            _id: b._id.toString(),
-                            business_name: b.business_name,
-                            collaborators: b.collaborators?.map(id => id.toString()) || []
-                        })),
-                        inactive_collaborators: inactiveCollaborators.map(u => ({
-                            _id: u._id.toString(),
-                            email: u.email,
-                            name: u.name,
-                            // Find archived businesses this collaborator belongs to
-                            associated_business_ids: archivedBusinesses
-                                .filter(b => b.collaborators?.some(cid => cid.toString() === u._id.toString()))
-                                .map(b => b._id.toString())
-                        })),
-                        limits: TIER_LIMITS.advanced,
-                        plan_id: plan_id
+                const roles = await db.collection('roles').find({}).toArray();
+                const roleMap = roles.reduce((acc, r) => { acc[r._id.toString()] = r.role_name; return acc; }, {});
+
+                const allInactiveUsers = await db.collection('users').find({
+                    company_id: user.company_id,
+                    status: 'inactive'
+                }).toArray();
+
+                const allActiveUsers = await db.collection('users').find({
+                    company_id: user.company_id,
+                    status: 'active'
+                }).toArray();
+
+                const features = [];
+
+                if (newLimits.max_workspaces !== undefined || activeBusinesses.length > 0 || archivedBusinesses.length > 0) {
+                    features.push({
+                        id: 'workspaces',
+                        title: 'Workspaces',
+                        limit: newLimits.max_workspaces || 1,
+                        active_items: activeBusinesses.map(b => ({ _id: b._id.toString(), name: b.business_name })),
+                        archived_items: archivedBusinesses.map(b => ({ _id: b._id.toString(), name: b.business_name }))
                     });
                 }
+
+                ['collaborator', 'user', 'viewer'].forEach(roleKey => {
+                    const mapUsers = (u) => ({
+                        _id: u._id.toString(),
+                        name: u.name,
+                        email: u.email,
+                        associated_business_ids: archivedBusinesses
+                            .filter(b => b.collaborators?.some(cid => cid.toString() === u._id.toString()))
+                            .map(b => b._id.toString())
+                    });
+
+                    const activeInRole = allActiveUsers.filter(u => roleMap[u.role_id?.toString()] === roleKey).map(mapUsers);
+                    const inactiveInRole = allInactiveUsers.filter(u => roleMap[u.role_id?.toString()] === roleKey).map(mapUsers);
+
+                    const limitKey = `max_${roleKey}s`;
+                    const limitVal = newLimits[limitKey] || 0;
+
+                    if (limitVal !== undefined || activeInRole.length > 0 || inactiveInRole.length > 0) {
+                        const titles = { collaborator: 'Collaborators', user: 'Standard Users', viewer: 'Viewers' };
+                        features.push({
+                            id: roleKey + 's',
+                            title: titles[roleKey],
+                            limit: limitVal,
+                            active_items: activeInRole,
+                            archived_items: inactiveInRole
+                        });
+                    }
+                });
+
+                return res.status(200).json({
+                    requires_configuration: true,
+                    action: 'plan_configuration',
+                    limits: newLimits,
+                    plan_id: plan_id,
+                    new_plan_name: newPlan.name,
+                    configurable_features: features
+                });
             }
 
             // 6. Sync with Stripe
@@ -385,12 +478,15 @@ class SubscriptionController {
             }
 
             // Normal upgrade/downgrade (no selection needed)
+            // Snapshot current plan limits so existing customer is not affected by future plan edits
+            const planSnapshot = TierService.buildPlanSnapshot(newPlan);
             const result = await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
                         subscription_end_date: periodEnd,
@@ -409,7 +505,7 @@ class SubscriptionController {
             await db.collection('billing_history').insertOne({
                 company_id: user.company_id,
                 plan_name: newPlan.name,
-                amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
+                amount: newPlan.price || newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
                 date: new Date(),
                 type: 'upgrade',
                 stripe_subscription_id: stripeSubscriptionId
@@ -423,20 +519,15 @@ class SubscriptionController {
         }
     }
 
-    static async processDowngrade(req, res) {
+    static async processConfiguration(req, res) {
         try {
             const db = getDB();
             const userId = req.user._id;
-            const {
-                plan_id,
-                active_business_id,
-                active_collaborator_ids = []
-            } = req.body;
+            const { plan_id, selections } = req.body;
+            // selections is an object like: { workspaces: ["id1", "id2"], collaborators: ["id3"], users: [], viewers: [] }
 
-            if (!plan_id || !active_business_id) {
-                return res.status(400).json({
-                    error: 'plan_id and active_business_id are required'
-                });
+            if (!plan_id || !selections) {
+                return res.status(400).json({ error: 'plan_id and selections are required' });
             }
 
             const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
@@ -445,294 +536,94 @@ class SubscriptionController {
             }
 
             const company = await db.collection('companies').findOne({ _id: user.company_id });
-
-            // --- INSTANT RENEWAL TRIGGER ---
-            // If the DB says the plan is expiring soon (or already expired), 
-            // and we have a Stripe subscription, we force Stripe to renew NOW.
-            if (company?.stripe_subscription_id && company.subscription_status === 'active') {
-                const now = new Date();
-                const expiry = company.subscription_end_date ? new Date(company.subscription_end_date) : null;
-
-                // If expiry is missing, or in the past, or expires within 24 hours
-                if (!expiry || expiry < new Date(now.getTime() + 24 * 60 * 60 * 1000)) {
-                    try {
-                        console.log(`Plan for ${company.company_name} is due. Triggering instant Stripe renewal...`);
-
-                        // Tell Stripe to reset the billing cycle to "NOW"
-                        // This forces an immediate invoice and payment attempt.
-                        await StripeService.updateSubscription(company.stripe_subscription_id, {
-                            billing_cycle_anchor: 'now',
-                            proration_behavior: 'always_invoice'
-                        });
-
-                        console.log("Stripe renewal triggered successfully.");
-                        // Note: The Webhook will handle updating the DB with the new dates shortly.
-                    } catch (stripeError) {
-                        console.error("Failed to trigger instant renewal:", stripeError.message);
-                    }
-                }
-            }
-
+            const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
             const currentPlan = await db.collection('plans').findOne({ _id: company?.plan_id });
-            const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
 
-            // 1. Get all user's businesses
-            const allBusinesses = await db.collection('user_businesses').find({
-                user_id: new ObjectId(userId),
-                status: { $ne: 'deleted' }
-            }).toArray();
-
-            // Validate that active_business_id belongs to user
-            const selectedBusiness = allBusinesses.find(b => b._id.toString() === active_business_id);
-            if (!selectedBusiness) {
-                return res.status(400).json({
-                    error: 'Selected business not found or does not belong to you'
-                });
-            }
-
-            // 2. Archive non-selected businesses (set access_mode to 'archived')
-            const businessesToArchive = allBusinesses
-                .filter(b => b._id.toString() !== active_business_id)
-                .map(b => b._id);
-
-            if (businessesToArchive.length > 0) {
-                await db.collection('user_businesses').updateMany(
-                    { _id: { $in: businessesToArchive } },
-                    {
-                        $set: {
-                            access_mode: 'archived',
-                            archived_at: new Date(),
-                            archived_reason: 'plan_downgrade'
-                        }
-                    }
-                );
-            }
-
-            // 3. Set active business to 'active' mode
-            await db.collection('user_businesses').updateOne(
-                { _id: new ObjectId(active_business_id) },
-                { $set: { access_mode: 'active' } }
-            );
-
-            // 4. Archive ALL collaborator access for current company if downgrading to essential
-            // In essential plan, collaborators are not allowed.
-            if (newPlan.name.toLowerCase() === 'essential') {
-                const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
-                const collabsToArchive = await db.collection('users').find({
-                    company_id: user.company_id,
-                    role_id: collabRole?._id
-                }).toArray();
-
-                var archivedCollabCount = collabsToArchive.length;
-
-                await db.collection('users').updateMany(
-                    {
-                        company_id: user.company_id,
-                        role_id: collabRole?._id
-                    },
-                    {
-                        $set: {
-                            status: 'inactive',
-                            access_mode: 'archived',
-                            inactive_reason: 'plan_downgrade',
-                            inactive_at: new Date()
-                        }
-                    }
-                );
-
-                // Also clear collaborators array from the active business
-                await db.collection('user_businesses').updateOne(
-                    { _id: new ObjectId(active_business_id) },
-                    {
-                        $set: {
-                            collaborators: [],
-                            archived_collaborators: selectedBusiness.collaborators || []
-                        }
-                    }
-                );
-            } else {
-                // Handle non-essential downgrades if any (currently only Essential and Advanced exist)
-                // For now, if it's not essential, we follow the previous logic or keep it as is.
-                // But the request specifically mentioned essential and collaborators.
-            }
-
-            // 5. Lock all projects in archived businesses to read-only
-            if (businessesToArchive.length > 0) {
-                await db.collection('projects').updateMany(
-                    { business_id: { $in: businessesToArchive } },
-                    {
-                        $set: {
-                            is_readonly: true,
-                            locked_at: new Date(),
-                            lock_reason: 'business_archived'
-                        }
-                    }
-                );
-            }
-
-            // 6. Sync with Stripe
-            let stripeSubscriptionId = company?.stripe_subscription_id;
-            let periodStart = new Date();
-            let periodEnd = new Date(periodStart);
-            periodEnd.setMonth(periodEnd.getMonth() + 1);
-
-            if (newPlan.stripe_price_id) {
-                try {
-                    if (stripeSubscriptionId) {
-                        console.log(`Updating Stripe subscription ${stripeSubscriptionId} to price ${newPlan.stripe_price_id} (Downgrade)`);
-                        const subscription = await StripeService.updateSubscription(stripeSubscriptionId, {
-                            items: [{
-                                id: (await StripeService.retrieveSubscription(stripeSubscriptionId)).items.data[0].id,
-                                price: newPlan.stripe_price_id,
-                            }],
-                            proration_behavior: 'always_invoice',
-                        });
-                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
-                    }
-                } catch (stripeError) {
-                    console.error('Stripe sync failed during downgrade:', stripeError);
-                }
-            }
-
-            // 7. Update company plan
-            await db.collection('companies').updateOne(
-                { _id: user.company_id },
-                {
-                    $set: {
-                        plan_id: new ObjectId(plan_id),
-                        subscription_plan: newPlan.name,
-                        stripe_subscription_id: stripeSubscriptionId,
-                        subscription_start_date: periodStart,
-                        subscription_end_date: periodEnd,
-                        expires_at: periodEnd,
-                        updated_at: new Date(),
-                        status: 'active'
-                    }
-                }
-            );
-
-            // Record in billing history
-            await db.collection('billing_history').insertOne({
-                company_id: user.company_id,
-                plan_name: newPlan.name,
-                amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
-                date: new Date(),
-                type: 'downgrade',
-                stripe_subscription_id: stripeSubscriptionId
-            });
-
-            // 7. Audit log
-            const { logAuditEvent } = require('../services/auditService');
-            await logAuditEvent(userId, 'plan_downgraded', {
-                from_plan: currentPlan?.name || 'unknown',
-                to_plan: newPlan.name,
-                active_business_id,
-                archived_businesses: businessesToArchive.length,
-                active_collaborators: (active_collaborator_ids || []).length,
-                archived_collaborators: typeof archivedCollabCount !== 'undefined' ? archivedCollabCount : 0
-            });
-
-            // 8. Return updated details
-            return SubscriptionController.getDetails(req, res);
-
-        } catch (error) {
-            console.error('Downgrade processing error:', error);
-            res.status(500).json({ error: 'Failed to process downgrade' });
-        }
-    }
-
-    static async processReactivation(req, res) {
-        try {
-            const {
-                plan_id,
-                reactivate_business_ids = [],
-                reactivate_collaborator_ids = []
-            } = req.body;
-
-            const db = getDB();
-            const userId = req.user._id;
-            console.log('DEBUG: processReactivation selection:', {
-                plan_id,
-                reactivate_business_ids,
-                reactivate_collaborator_ids
-            });
-            const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
-
-            if (!user.company_id) {
-                return res.status(403).json({ error: 'User not associated with a company' });
-            }
-
-            const newPlan = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
             if (!newPlan) return res.status(404).json({ error: 'Plan not found' });
 
-
-            const limits = TIER_LIMITS[newPlan.name.toLowerCase()] || TIER_LIMITS.essential;
-
-            // 1. Validate limits
-            const companyUsers = await db.collection('users')
-                .find({ company_id: user.company_id })
-                .project({ _id: 1 })
-                .toArray();
+            // Helper to fetch all users in company
+            const companyUsers = await db.collection('users').find({ company_id: user.company_id }).project({ _id: 1 }).toArray();
             const companyUserIds = companyUsers.map(u => u._id);
 
-            const activeBusinessesCount = await db.collection('user_businesses').countDocuments({
-                user_id: { $in: companyUserIds },
-                access_mode: 'active'
-            });
+            const newLimits = TierService.getLimitsForPlan(newPlan);
 
-            if (activeBusinessesCount + reactivate_business_ids.length > limits.max_workspaces) {
-                return res.status(400).json({ error: `You can only have ${limits.max_workspaces} active workspaces.` });
+            // 1. Validate Selections against new limits
+            const activeWorkspaceIds = (selections.workspaces || []).map(id => new ObjectId(id));
+            if ((newLimits.max_workspaces || 0) > 0 && activeWorkspaceIds.length > newLimits.max_workspaces) {
+                return res.status(400).json({ error: `Limit exceeded: Maximum ${newLimits.max_workspaces} workspaces allowed.` });
             }
 
-            // 2. Reactivate Businesses
-            if (reactivate_business_ids.length > 0) {
+            const activeCollaboratorIds = (selections.collaborators || []);
+            if ((newLimits.max_collaborators || 0) > 0 && activeCollaboratorIds.length > newLimits.max_collaborators) {
+                return res.status(400).json({ error: `Limit exceeded: Maximum ${newLimits.max_collaborators} collaborators allowed.` });
+            }
+
+            const activeViewerIds = (selections.viewers || []);
+            if ((newLimits.max_viewers || 0) > 0 && activeViewerIds.length > newLimits.max_viewers) {
+                return res.status(400).json({ error: `Limit exceeded: Maximum ${newLimits.max_viewers} viewers allowed.` });
+            }
+
+            const activeUserRoleIds = (selections.users || []);
+            if ((newLimits.max_users || 0) > 0 && activeUserRoleIds.length > newLimits.max_users) {
+                return res.status(400).json({ error: `Limit exceeded: Maximum ${newLimits.max_users} users allowed.` });
+            }
+
+            // 2. Process Workspaces
+            
+            // Set selected workspaces to active
+            if (activeWorkspaceIds.length > 0) {
                 await db.collection('user_businesses').updateMany(
-                    {
-                        _id: { $in: reactivate_business_ids.map(id => new ObjectId(id)) }
-                    },
-                    { $set: { access_mode: 'active', updated_at: new Date() } }
+                    { _id: { $in: activeWorkspaceIds }, user_id: { $in: companyUserIds } },
+                    { $set: { access_mode: 'active', status: 'active', updated_at: new Date() } }
                 );
-
-                // Unlock projects in these businesses
                 await db.collection('projects').updateMany(
-                    { business_id: { $in: reactivate_business_ids.map(id => new ObjectId(id)) } },
-                    {
-                        $set: {
-                            is_readonly: false,
-                            updated_at: new Date()
-                        },
-                        $unset: {
-                            locked_at: "",
-                            lock_reason: ""
-                        }
-                    }
+                    { business_id: { $in: activeWorkspaceIds } },
+                    { $set: { is_readonly: false, updated_at: new Date() }, $unset: { locked_at: "", lock_reason: "" } }
                 );
             }
 
-            // 3. Reactivate Collaborators
-            if (reactivate_collaborator_ids.length > 0) {
+            // Set unselected workspaces to archived
+            await db.collection('user_businesses').updateMany(
+                { _id: { $nin: activeWorkspaceIds }, user_id: { $in: companyUserIds }, status: { $ne: 'deleted' } },
+                { $set: { access_mode: 'archived', status: 'archived', archived_at: new Date(), archived_reason: 'plan_configuration' } }
+            );
+
+            // Lock projects in archived workspaces
+            const archivedBusinessesList = await db.collection('user_businesses')
+                .find({ _id: { $nin: activeWorkspaceIds }, user_id: { $in: companyUserIds }, status: 'archived' })
+                .toArray();
+            if (archivedBusinessesList.length > 0) {
+                await db.collection('projects').updateMany(
+                    { business_id: { $in: archivedBusinessesList.map(b => b._id) } },
+                    { $set: { is_readonly: true, locked_at: new Date(), lock_reason: 'business_archived' } }
+                );
+            }
+
+            // 2. Process Users (Collaborators, Users, Viewers)
+            const activeUserIds = [
+                ...(selections.collaborators || []),
+                ...(selections.users || []),
+                ...(selections.viewers || [])
+            ].map(id => new ObjectId(id));
+
+            // Set selected to active
+            if (activeUserIds.length > 0) {
                 await db.collection('users').updateMany(
-                    {
-                        _id: { $in: reactivate_collaborator_ids.map(id => new ObjectId(id)) },
-                        company_id: user.company_id
-                    },
-                    {
-                        $set: {
-                            status: 'active',
-                            access_mode: 'active',
-                            updated_at: new Date()
-                        },
-                        $unset: {
-                            inactive_reason: "",
-                            inactive_at: ""
-                        }
-                    }
+                    { _id: { $in: activeUserIds }, company_id: user.company_id },
+                    { $set: { status: 'active', access_mode: 'active', updated_at: new Date() }, $unset: { inactive_reason: "", inactive_at: "" } }
                 );
             }
 
-            // 4. Sync with Stripe
-            const company = await db.collection('companies').findOne({ _id: user.company_id });
+            // Set unselected to inactive
+            const restrictedRoles = await db.collection('roles').find({ role_name: { $in: ['collaborator', 'viewer', 'user'] } }).project({ _id: 1 }).toArray();
+            const restrictedRoleIds = restrictedRoles.map(r => r._id);
+
+            await db.collection('users').updateMany(
+                { _id: { $nin: activeUserIds }, company_id: user.company_id, role_id: { $in: restrictedRoleIds } },
+                { $set: { status: 'inactive', access_mode: 'archived', inactive_reason: 'plan_configuration', inactive_at: new Date() } }
+            );
+
+            // 3. Sync with Stripe
             let stripeSubscriptionId = company?.stripe_subscription_id;
             let periodStart = new Date();
             let periodEnd = new Date(periodStart);
@@ -741,7 +632,6 @@ class SubscriptionController {
             if (newPlan.stripe_price_id) {
                 try {
                     if (stripeSubscriptionId) {
-                        console.log(`Updating Stripe subscription ${stripeSubscriptionId} to price ${newPlan.stripe_price_id} (Reactivation)`);
                         const subscription = await StripeService.updateSubscription(stripeSubscriptionId, {
                             items: [{
                                 id: (await StripeService.retrieveSubscription(stripeSubscriptionId)).items.data[0].id,
@@ -752,7 +642,6 @@ class SubscriptionController {
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
                         if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
                     } else if (company?.stripe_customer_id) {
-                        console.log(`Creating Stripe subscription for ${company.stripe_customer_id} (Reactivation)`);
                         const subscription = await StripeService.createSubscription(
                             company.stripe_customer_id,
                             newPlan.stripe_price_id,
@@ -763,17 +652,19 @@ class SubscriptionController {
                         if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
                     }
                 } catch (stripeError) {
-                    console.error('Stripe sync failed during reactivation:', stripeError);
+                    console.error('Stripe sync failed during configuration:', stripeError);
                 }
             }
 
-            // 5. Finally update the plan
+            // 4. Update Company Plan and snapshot limits
+            const planSnapshot = TierService.buildPlanSnapshot(newPlan);
             await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
                         subscription_end_date: periodEnd,
@@ -785,23 +676,195 @@ class SubscriptionController {
             );
 
             // Record in billing history
+            // Use static constant TIER_LIMITS if imported, else fallback
+            const amount = newPlan.price_usd || newPlan.price || 0;
             await db.collection('billing_history').insertOne({
                 company_id: user.company_id,
                 plan_name: newPlan.name,
-                amount: newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
+                amount: amount,
                 date: new Date(),
-                type: 'reactivation',
+                type: 'plan_configuration',
                 stripe_subscription_id: stripeSubscriptionId
             });
 
-            // Return updated details
-            return SubscriptionController.getDetails(req, res);
+            // 5. Audit Log
+            const { logAuditEvent } = require('../services/auditService');
+            await logAuditEvent(userId, 'plan_configured', {
+                from_plan: currentPlan?.name || 'unknown',
+                to_plan: newPlan.name,
+                workspaces_active: selections.workspaces?.length || 0,
+                users_active: (selections.users?.length || 0) + (selections.collaborators?.length || 0) + (selections.viewers?.length || 0)
+            });
 
+            return SubscriptionController.getDetails(req, res);
         } catch (error) {
-            console.error('Reactivation error:', error);
-            res.status(500).json({ error: error.message });
+            console.error('Configuration processing error:', error);
+            res.status(500).json({ error: 'Failed to process configuration' });
+        }
+    }
+
+    static async addPaymentMethod(req, res) {
+        try {
+            const db = getDB();
+            const userId = req.user._id;
+            const { paymentMethodId, setAsDefault = true } = req.body;
+
+            if (!paymentMethodId) {
+                return res.status(400).json({ error: 'paymentMethodId is required' });
+            }
+
+            const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+            if (!user?.company_id) return res.status(404).json({ error: 'Company not found' });
+
+            const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            let customerId = company?.stripe_customer_id;
+
+            if (!customerId) {
+                // Create Stripe customer on first card add
+                const customer = await StripeService.createCustomer(user.email, user.name, paymentMethodId, setAsDefault);
+                customerId = customer.id;
+                await db.collection('companies').updateOne(
+                    { _id: user.company_id },
+                    { $set: { stripe_customer_id: customerId } }
+                );
+            } else {
+                await StripeService.attachPaymentMethod(paymentMethodId, customerId);
+            }
+
+            if (setAsDefault) {
+                await StripeService.updateCustomer(customerId, {
+                    invoice_settings: { default_payment_method: paymentMethodId }
+                });
+                await db.collection('companies').updateOne(
+                    { _id: user.company_id },
+                    { $set: { stripe_customer_id: customerId, stripe_payment_method_id: paymentMethodId } }
+                );
+            } else {
+                await db.collection('companies').updateOne(
+                    { _id: user.company_id },
+                    { $set: { stripe_customer_id: customerId } }
+                );
+            }
+
+            // Return refreshed payment methods list
+            const methods = await StripeService.listPaymentMethods(customerId);
+            const updatedCompany = await db.collection('companies').findOne({ _id: user.company_id });
+            res.json({
+                payment_methods: methods.map(pm => ({
+                    id: pm.id,
+                    brand: pm.card.brand,
+                    last4: pm.card.last4,
+                    exp_month: pm.card.exp_month,
+                    exp_year: pm.card.exp_year
+                })),
+                default_payment_method_id: updatedCompany.stripe_payment_method_id
+            });
+        } catch (error) {
+            console.error('Failed to add payment method:', error);
+            res.status(500).json({ error: error.message || 'Failed to add payment method' });
+        }
+    }
+
+    static async removePaymentMethod(req, res) {
+        try {
+            const db = getDB();
+            const userId = req.user._id;
+            const { paymentMethodId } = req.params;
+
+            const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+            if (!user?.company_id) return res.status(404).json({ error: 'Company not found' });
+
+            const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            if (!company?.stripe_customer_id) {
+                return res.status(400).json({ error: 'No Stripe customer found' });
+            }
+
+            await StripeService.detachPaymentMethod(paymentMethodId);
+
+            // If removed was the default, promote the next available card as default
+            let newDefaultId = company.stripe_payment_method_id;
+            if (company.stripe_payment_method_id === paymentMethodId) {
+                const remaining = await StripeService.listPaymentMethods(company.stripe_customer_id);
+                newDefaultId = remaining[0]?.id || null;
+                if (newDefaultId) {
+                    await StripeService.updateCustomer(company.stripe_customer_id, {
+                        invoice_settings: { default_payment_method: newDefaultId }
+                    });
+                }
+                await db.collection('companies').updateOne(
+                    { _id: user.company_id },
+                    { $set: { stripe_payment_method_id: newDefaultId } }
+                );
+            }
+
+            // Return refreshed payment methods list
+            const methods = await StripeService.listPaymentMethods(company.stripe_customer_id);
+            res.json({
+                payment_methods: methods.map(pm => ({
+                    id: pm.id,
+                    brand: pm.card.brand,
+                    last4: pm.card.last4,
+                    exp_month: pm.card.exp_month,
+                    exp_year: pm.card.exp_year
+                })),
+                default_payment_method_id: newDefaultId
+            });
+        } catch (error) {
+            console.error('Failed to remove payment method:', error);
+            res.status(500).json({ error: error.message || 'Failed to remove payment method' });
+        }
+    }
+
+    static async setDefaultPaymentMethod(req, res) {
+        try {
+            const db = getDB();
+            const userId = req.user._id;
+            const { paymentMethodId } = req.body;
+
+            if (!paymentMethodId) {
+                return res.status(400).json({ error: 'paymentMethodId is required' });
+            }
+
+            const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+            if (!user?.company_id) return res.status(404).json({ error: 'Company not found' });
+
+            const company = await db.collection('companies').findOne({ _id: user.company_id });
+
+            if (!company?.stripe_customer_id) {
+                return res.status(400).json({ error: 'No Stripe customer found' });
+            }
+
+            // Update Stripe customer
+            await StripeService.updateCustomer(company.stripe_customer_id, {
+                invoice_settings: { default_payment_method: paymentMethodId }
+            });
+
+            // Update local DB
+            await db.collection('companies').updateOne(
+                { _id: user.company_id },
+                { $set: { stripe_payment_method_id: paymentMethodId } }
+            );
+
+            // Return refreshed payment methods list
+            const methods = await StripeService.listPaymentMethods(company.stripe_customer_id);
+            res.json({
+                payment_methods: methods.map(pm => ({
+                    id: pm.id,
+                    brand: pm.card.brand,
+                    last4: pm.card.last4,
+                    exp_month: pm.card.exp_month,
+                    exp_year: pm.card.exp_year
+                })),
+                default_payment_method_id: paymentMethodId
+            });
+        } catch (error) {
+            console.error('Failed to set default payment method:', error);
+            res.status(500).json({ error: error.message || 'Failed to set default payment method' });
         }
     }
 }
 
 module.exports = SubscriptionController;
+

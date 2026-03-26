@@ -48,12 +48,6 @@ class AuthController {
         );
       }
 
-      const token = jwt.sign({
-        id: user._id,
-        email: user.email,
-        role: role.role_name
-      }, SECRET_KEY, { expiresIn: '24h' });
-
       await logAuditEvent(user._id, 'login_success', {
         email,
         role: role.role_name,
@@ -61,7 +55,23 @@ class AuthController {
       });
 
       const planName = await TierService.getUserTier(user._id);
+      // Use snapshotted limits so the JWT reflects the customer's purchased plan,
+      // not the live plan that may have been edited by a super admin.
+      const planLimits = user.company_id
+        ? await TierService.getCompanyLimits(user.company_id)
+        : await TierService.getTierLimits(planName);
 
+      const token = jwt.sign({
+        id: user._id,
+        email: user.email,
+        role: role.role_name,
+        limits: {
+          insight:   planLimits.insight   ?? false,
+          strategic: planLimits.strategic ?? false,
+          pmf:       planLimits.pmf       ?? false,
+          project:   planLimits.project   ?? false,
+        }
+      }, SECRET_KEY, { expiresIn: '24h' });
       res.json({
         token,
         user: {
@@ -70,6 +80,7 @@ class AuthController {
           email: user.email,
           role: role.role_name,
           plan_name: planName,
+          limits: planLimits,
           company: company ? {
             id: company._id,
             name: company.company_name,
@@ -116,10 +127,15 @@ class AuthController {
           }
           companyData.plan_id = new ObjectId(plan_id);
 
+          // Build snapshot of the initial plan limits
+          const planDoc = await db.collection('plans').findOne({ _id: companyData.plan_id });
+          if (planDoc) {
+            companyData.plan_snapshot = TierService.buildPlanSnapshot(planDoc);
+          }
+
           // Payment Processing
           if (paymentMethodId) { // Check if payment method is provided
             try {
-              const planDoc = await db.collection('plans').findOne({ _id: new ObjectId(plan_id) });
               if (planDoc && planDoc.stripe_price_id) {
                 // Always save card and set as default for subscriptions
                 const shouldSaveCard = true;

@@ -24,21 +24,21 @@ module.exports = {
   TIER_LIMITS: {
     essential: {
       max_workspaces: 1,
-      can_create_projects: false,
+      project: false,
       max_collaborators: 0,
       price_usd: 29.00
     },
     advanced: {
       max_workspaces: 3,
-      can_create_projects: true,
+      project: true,
       max_collaborators: 3,
       price_usd: 89.00
     },
-    unlimited: {
-      max_workspaces: 1000,
-      can_create_projects: true,
-      max_collaborators: 1000,
-      price_usd: 0
+    team: {
+      max_workspaces: 10,
+      project: true,
+      max_collaborators: 10,
+      price_usd: 100.00
     }
   },
   MAX_BUSINESSES_PER_USER: 5, // Default/Legacy fallback

@@ -11,7 +11,6 @@ const { getDB } = require("../config/database")
 const TierService = require("../services/tierService");
 
 const {
-  MAX_BUSINESSES_PER_USER,
   ALLOWED_PHASES,
 } = require("../config/constants");
 
@@ -85,7 +84,7 @@ class BusinessController {
       let collabs = [];
 
       if (
-        ["company_admin", "viewer"].includes(req.user.role.role_name) &&
+        ["company_admin"].includes(req.user.role.role_name) &&
         !user_id
       ) {
         const companyUsers = await UserModel.getAll({
@@ -428,14 +427,16 @@ class BusinessController {
         });
       }
 
-      const tierName = await TierService.getUserTier(req.user._id);
-      const limits = TierService.getTierLimits(tierName);
-      const existingCount = await BusinessModel.countByUserId(req.user._id);
+      const limits = await TierService.getCompanyLimits(req.user.company_id);
+      const existingCount = await BusinessModel.countByCompanyId(req.user.company_id);
 
       if (existingCount >= limits.max_workspaces) {
-        const upgradeMsg = tierName === 'essential' ? ' Upgrade to Advanced for more workspaces.' : '';
         return res.status(403).json({
-          error: `Workspace limit reached for ${tierName} plan. Maximum ${limits.max_workspaces} workspace(s) allowed.${upgradeMsg}`
+          error: `Workspace limit reached. Maximum ${limits.max_workspaces} workspace(s) allowed. Please upgrade your plan to create more.`,
+          plan: limits.plan_name,
+          limits: {
+            max_workspaces: limits.max_workspaces
+          }
         });
       }
 
@@ -764,38 +765,81 @@ class BusinessController {
         return res.status(404).json({ error: "Business not found" });
 
       const requesterRole = req.user.role.role_name;
-      const isAdmin = VALID_ADMIN_ROLES.includes(requesterRole);
-
-      const tierName = await TierService.getUserTier(req.user._id);
-      const limits = TierService.getTierLimits(tierName);
-      const currentCollaboratorsCount = (business.collaborators || []).length;
+      const isAdmin = ["super_admin", "company_admin"].includes(requesterRole);
 
       if (!isAdmin) {
         return res.status(403).json({
-          error: "Only company_admin or super_admin can assign collaborators",
+          error: "Only company_admin or super_admin can assign members",
         });
       }
 
-      if (currentCollaboratorsCount >= limits.max_collaborators) {
-        return res.status(403).json({
-          error: tierName === 'essential'
-            ? "Your current plan doesn't support collaborators. Upgrade to Advanced to add team members in the User Management panel."
-            : `Collaborator limit reached for ${tierName} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed. Manage your team in the User Management panel.`
-        });
+      // Fetch the target user to check their role
+      const targetUser = await UserModel.findById(collaboratorId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Get target user role name
+      const db = getDB();
+      const roleDoc = await db.collection("roles").findOne({ _id: targetUser.role_id });
+      const targetRoleName = roleDoc?.role_name || "viewer";
+
+      const limits = await TierService.getCompanyLimits(req.user.company_id);
+      
+      // Get all existing assigned users to count by role
+      const existingAssignedIds = (business.collaborators || []).map(id => new ObjectId(id));
+      const assignedUsers = await db.collection("users").aggregate([
+        { $match: { _id: { $in: existingAssignedIds } } },
+        {
+          $lookup: {
+            from: "roles",
+            localField: "role_id",
+            foreignField: "_id",
+            as: "role"
+          }
+        },
+        { $unwind: "$role" },
+        { $project: { _id: 1, role_name: "$role.role_name" } }
+      ]).toArray();
+
+      if (targetRoleName === "collaborator") {
+        const currentCollabCount = assignedUsers.filter(u => u.role_name === "collaborator").length;
+        if (currentCollabCount >= (limits.max_collaborators || 0)) {
+          return res.status(403).json({
+            error: `Collaborator limit reached. Maximum ${limits.max_collaborators} collaborator(s) allowed. Please upgrade your plan to add more team members.`
+          });
+        }
+      } else if (targetRoleName === "viewer") {
+        const currentViewerCount = assignedUsers.filter(u => u.role_name === "viewer").length;
+        // If there's a specific limit for viewers per business, check it here. 
+        // For now, let's use the company-wide limit as a guide or just allow more if max_viewers is high.
+        if (limits.max_viewers > 0 && currentViewerCount >= limits.max_viewers) {
+          return res.status(403).json({
+            error: `Viewer limit reached. Maximum ${limits.max_viewers} viewer(s) allowed. Please upgrade your plan.`
+          });
+        }
+      } else if (targetRoleName === "user") {
+        const currentUserCount = assignedUsers.filter(u => u.role_name === "user").length;
+        if (limits.max_users > 0 && currentUserCount >= limits.max_users) {
+          return res.status(403).json({
+            error: `User limit reached. Maximum ${limits.max_users} user(s) allowed. Please upgrade your plan.`
+          });
+        }
       }
 
       if (business.user_id && business.user_id.toString() === collaboratorId) {
         return res
           .status(400)
-          .json({ error: "Owner cannot be added as collaborator" });
+          .json({ error: "Owner cannot be added as a member" });
       }
+
       const alreadyAssigned = (business.collaborators || []).some(
         (id) => id.toString() === collaboratorId
       );
 
       if (alreadyAssigned) {
         return res.status(400).json({
-          error: "This collaborator already assigned in this business",
+          error: "This user already assigned in this business",
         });
       }
 
@@ -805,16 +849,17 @@ class BusinessController {
       );
 
       if (typeof logAuditEvent === "function") {
-        await logAuditEvent(req.user._id, "collaborator_assigned", {
+        await logAuditEvent(req.user._id, "member_assigned", {
           business_id: businessId,
-          collaborator: collaboratorId,
+          user_id: collaboratorId,
+          role: targetRoleName
         });
       }
 
-      res.json({ message: "Collaborator assigned" });
+      res.json({ message: "User assigned successfully" });
     } catch (err) {
-      console.error("Assign collaborator error:", err);
-      res.status(500).json({ error: "Failed to assign collaborator" });
+      console.error("Assign member error:", err);
+      res.status(500).json({ error: "Failed to assign member" });
     }
   }
 

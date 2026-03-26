@@ -56,9 +56,10 @@ const checkCollaboratorAccess = async (req, res, next) => {
     try {
         const tierName = await TierService.getUserTier(req.user._id);
 
-        if (tierName === 'essential') {
+        const limits = await TierService.getTierLimits(tierName);
+        if (limits.max_collaborators <= 0) {
             return res.status(403).json({
-                error: 'Collaborator features require Advanced plan',
+                error: 'Collaborator features are not supported by your current plan. Please upgrade to access this feature.',
                 upgrade_required: true,
                 feature: 'collaborators'
             });
@@ -77,9 +78,9 @@ const checkCollaboratorAccess = async (req, res, next) => {
 const checkProjectCreation = async (req, res, next) => {
     try {
         const tierName = await TierService.getUserTier(req.user._id);
-        const limits = TierService.getTierLimits(tierName);
+        const limits = await TierService.getTierLimits(tierName);
 
-        if (!limits.can_create_projects) {
+        if (!limits.project) {
             return res.status(403).json({
                 error: 'Project creation requires Advanced plan',
                 upgrade_required: true,

@@ -60,8 +60,31 @@ class BusinessModel {
   }
 
   static async countByUserId(userId) {
+    const idStr = userId.toString();
+    const userIdFilter = { $in: [new ObjectId(idStr), idStr] };
     return await this.collection().countDocuments({
-      user_id: new ObjectId(userId),
+      user_id: userIdFilter,
+      status: { $ne: 'deleted' }
+    });
+  }
+
+  static async countByCompanyId(companyId) {
+    const db = getDB();
+    const companyIdStr = companyId.toString();
+    const companyIdFilter = { $in: [new ObjectId(companyIdStr), companyIdStr] };
+
+    // To count businesses for a company, we find all users in that company 
+    // and count businesses owned by them.
+    const companyUsers = await db.collection('users').find({
+      company_id: companyIdFilter
+    }).project({ _id: 1 }).toArray();
+
+    const companyUserIds = companyUsers.map(u => u._id);
+    const companyUserIdStrs = companyUsers.map(u => u._id.toString());
+    const allUserIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
+
+    return await this.collection().countDocuments({
+      user_id: { $in: allUserIds },
       status: { $ne: 'deleted' }
     });
   }

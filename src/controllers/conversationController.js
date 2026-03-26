@@ -45,7 +45,7 @@ async function getBusinessAndValidateAccess(business_id, currentUser) {
     }
   }
 
-  if (!isOwner && !isCollaborator && !isAdmin && !isViewer) {
+  if (!isOwner && !isCollaborator && !isAdmin) {
     return { error: "Not allowed to access conversations for this business" };
   }
 

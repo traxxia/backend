@@ -1,6 +1,7 @@
 const StripeService = require('../services/stripeService');
 const CompanyModel = require('../models/companyModel');
 const { getDB } = require('../config/database');
+const TierService = require('../services/tierService');
 
 class WebhookController {
     static async handleWebhook(req, res) {
@@ -82,6 +83,24 @@ class WebhookController {
                                 invoice_url: invoice.hosted_invoice_url
                             });
                             console.log(`[Webhook] Billing entry created.`);
+
+                            // Re-snapshot plan limits on renewal so the customer receives
+                            // any plan changes that were made since their last subscription.
+                            if (company.plan_id) {
+                                const { ObjectId } = require('mongodb');
+                                const planObjId = typeof company.plan_id === 'string'
+                                    ? new ObjectId(company.plan_id)
+                                    : company.plan_id;
+                                const plan = await db.collection('plans').findOne({ _id: planObjId });
+                                if (plan) {
+                                    const planSnapshot = TierService.buildPlanSnapshot(plan);
+                                    await db.collection('companies').updateOne(
+                                        { _id: company._id },
+                                        { $set: { plan_snapshot: planSnapshot } }
+                                    );
+                                    console.log(`[Webhook] Plan snapshot refreshed for ${company.company_name}.`);
+                                }
+                            }
                         } else {
                             console.warn(`[Webhook] Company not found for customer ${invoice.customer}`);
                         }
