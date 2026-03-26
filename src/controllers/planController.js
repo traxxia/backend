@@ -62,7 +62,8 @@ class PlanController {
                 stripePriceId = await StripeService.createProductAndPrice(
                     planData.name,
                     planData.description || `Plan ${planData.name}`,
-                    planData.price
+                    planData.price,
+                    planData.interval || planData.period || 'month'
                 );
                 planData.stripe_price_id = stripePriceId;
             }

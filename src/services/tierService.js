@@ -2,6 +2,16 @@ const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
 
 class TierService {
+    static calculateExpiryDate(startDate, interval) {
+        const d = new Date(startDate);
+        if (interval === 'year') {
+            d.setDate(d.getDate() + 365);
+        } else {
+            d.setMonth(d.getMonth() + 1);
+        }
+        return d;
+    }
+
     static async getUserTier(userId) {
         const db = getDB();
 
@@ -179,6 +189,7 @@ class TierService {
         return {
             plan_id:           plan._id,
             plan_name:         plan.name,
+            interval:          plan.interval || plan.period || 'month',
             snapshotted_at:    new Date(),
             max_workspaces:    limits.max_workspaces,
             project:           limits.project,

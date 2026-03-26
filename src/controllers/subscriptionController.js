@@ -100,8 +100,8 @@ class SubscriptionController {
 
             // If no expiration date (legacy data), set one based on created_at or give 30 days grace from now
             if (!expiresAt) {
-                expiresAt = new Date(startDate);
-                expiresAt.setMonth(expiresAt.getMonth() + 1);
+                const interval = company?.plan_snapshot?.interval || 'month';
+                expiresAt = TierService.calculateExpiryDate(startDate, interval);
             }
 
             // Check if expired
@@ -155,7 +155,7 @@ class SubscriptionController {
             if (company?.plan_id) {
                 const livePlan = await db.collection('plans').findOne({ _id: company.plan_id });
                 if (livePlan) {
-                    currentPlanPeriod = livePlan.period || 'month';
+                    currentPlanPeriod = livePlan.interval || livePlan.period || 'month';
                     const liveLimits = TierService.getLimitsForPlan(livePlan);
                     originalPlanPrice = livePlan.price || livePlan.price_usd || 0;
                     originalPlanLimits = {
@@ -220,7 +220,7 @@ class SubscriptionController {
                         name: p.name,
                         description: p.description || '',
                         price: p.price || 0,
-                        period: p.period || 'month',
+                        period: p.interval || p.period || 'month',
                         features: p.features || [],
                         limits: {
                             workspaces: planLimits.max_workspaces,
@@ -470,8 +470,7 @@ class SubscriptionController {
             // 6. Sync with Stripe
             let stripeSubscriptionId = company?.stripe_subscription_id;
             let periodStart = new Date();
-            let periodEnd = new Date(periodStart);
-            periodEnd.setMonth(periodEnd.getMonth() + 1);
+            let periodEnd = TierService.calculateExpiryDate(periodStart, newPlan.interval || newPlan.period || 'month');
 
             if (newPlan.stripe_price_id) {
                 try {
@@ -486,7 +485,16 @@ class SubscriptionController {
                             proration_behavior: 'always_invoice',
                         });
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                        if (subscription.current_period_end) {
+                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
+                            const planInterval = newPlan.interval || newPlan.period || 'month';
+                            // If yearly plan, only trust Stripe if the date is actually set for a year (roughly)
+                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
+                                console.log('[Upgrade] Stripe returned short period for yearly plan, keeping 365 days');
+                            } else {
+                                periodEnd = stripeEndDate;
+                            }
+                        }
                     } else if (company?.stripe_customer_id) {
                         // Create new subscription
                         console.log(`Creating new Stripe subscription for customer ${company.stripe_customer_id} with price ${newPlan.stripe_price_id}`);
@@ -497,7 +505,15 @@ class SubscriptionController {
                         );
                         stripeSubscriptionId = subscription.id;
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                        if (subscription.current_period_end) {
+                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
+                            const planInterval = newPlan.interval || newPlan.period || 'month';
+                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
+                                console.log('[Upgrade] Stripe returned short period for yearly plan, keeping 365 days');
+                            } else {
+                                periodEnd = stripeEndDate;
+                            }
+                        }
                     }
                 } catch (stripeError) {
                     console.error('Stripe sync failed during upgrade:', stripeError);
@@ -657,8 +673,7 @@ class SubscriptionController {
             // 3. Sync with Stripe
             let stripeSubscriptionId = company?.stripe_subscription_id;
             let periodStart = new Date();
-            let periodEnd = new Date(periodStart);
-            periodEnd.setMonth(periodEnd.getMonth() + 1);
+            let periodEnd = TierService.calculateExpiryDate(periodStart, newPlan.interval || newPlan.period || 'month');
 
             if (newPlan.stripe_price_id) {
                 try {
@@ -671,7 +686,15 @@ class SubscriptionController {
                             proration_behavior: 'always_invoice',
                         });
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                        if (subscription.current_period_end) {
+                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
+                            const planInterval = newPlan.interval || newPlan.period || 'month';
+                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
+                                console.log('[Config] Stripe returned short period for yearly plan, keeping 365 days');
+                            } else {
+                                periodEnd = stripeEndDate;
+                            }
+                        }
                     } else if (company?.stripe_customer_id) {
                         const subscription = await StripeService.createSubscription(
                             company.stripe_customer_id,
@@ -680,7 +703,15 @@ class SubscriptionController {
                         );
                         stripeSubscriptionId = subscription.id;
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                        if (subscription.current_period_end) {
+                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
+                            const planInterval = newPlan.interval || newPlan.period || 'month';
+                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
+                                console.log('[Config] Stripe returned short period for yearly plan, keeping 365 days');
+                            } else {
+                                periodEnd = stripeEndDate;
+                            }
+                        }
                     }
                 } catch (stripeError) {
                     console.error('Stripe sync failed during configuration:', stripeError);

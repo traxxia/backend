@@ -162,9 +162,8 @@ class AuthController {
                 companyData.subscription_end_date = subscription.current_period_end
                   ? new Date(subscription.current_period_end * 1000)
                   : (() => {
-                    const d = new Date();
-                    d.setMonth(d.getMonth() + 1);
-                    return d;
+                    const interval = planDoc?.interval || planDoc?.period || 'month';
+                    return TierService.calculateExpiryDate(new Date(), interval);
                   })();
 
                 const registrationAmount = planDoc.price || planDoc.price_usd || 0;

@@ -8,7 +8,7 @@ if (!STRIPE_SECRET_KEY) {
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 class StripeService {
-    static async createProductAndPrice(name, description, priceAmount) {
+    static async createProductAndPrice(name, description, priceAmount, interval = 'month') {
         try {
             const product = await stripe.products.create({
                 name,
@@ -19,7 +19,7 @@ class StripeService {
                 product: product.id,
                 unit_amount: Math.round(priceAmount * 100), // Assumes amount is in dollars
                 currency: 'usd',
-                recurring: { interval: 'month' }, // Assumes monthly billing
+                recurring: { interval: interval || 'month' }, // Supports monthly or yearly billing
             });
 
             return price.id;

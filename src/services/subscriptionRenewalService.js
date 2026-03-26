@@ -82,9 +82,8 @@ renewalLogger.info(`[Auto-Renewal] Triggering Stripe for ${company.company_name}
                 const periodEnd = updatedSub.current_period_end
                     ? new Date(updatedSub.current_period_end * 1000)
                     : (() => {
-                        const d = new Date();
-                        d.setMonth(d.getMonth() + 1);
-                        return d;
+                        const interval = companyPlan?.interval || companyPlan?.period || 'month';
+                        return TierService.calculateExpiryDate(new Date(), interval);
                     })();
 
                 const updateData = {
