@@ -1,6 +1,5 @@
 const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
-const { TIER_LIMITS } = require('../config/constants');
 
 class TierService {
     static async getUserTier(userId) {
@@ -38,13 +37,13 @@ class TierService {
                 limitsObj.workspaces ??
                 plan?.max_workspaces ??
                 plan?.workspace_limit ??
-                1,
+                0,
             project:
                 limitsObj.project ??
                 limitsObj.projects ??
                 plan?.can_create_projects ??
-                plan?.max_projects ??  // Added support for max_projects
-                true,
+                plan?.max_projects ??
+                false,
             max_collaborators:
                 limitsObj.collaborators ??
                 plan?.max_collaborators ??
@@ -124,7 +123,7 @@ class TierService {
             const s = company.plan_snapshot;
             return {
                 plan_name:         s.plan_name         ?? 'Unknown',
-                max_workspaces:    s.max_workspaces    ?? 1,
+                max_workspaces:    s.max_workspaces    ?? 0,
                 project:           s.project           ?? false,
                 max_collaborators: s.max_collaborators ?? 0,
                 max_viewers:       s.max_viewers       ?? 0,

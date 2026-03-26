@@ -2,7 +2,6 @@ const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 const TierService = require('../services/tierService');
 const StripeService = require('../services/stripeService');
-const { TIER_LIMITS } = require('../config/constants');
 
 
 class SubscriptionController {
@@ -14,11 +13,11 @@ class SubscriptionController {
             const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
             if (!user || !user.company_id) {
                 return res.json({
-                    plan: 'essential',
+                    plan: 'None',
                     start_date: user?.created_at || new Date(),
                     end_date: null,
                     expires_at: null,
-                    status: 'active',
+                    status: 'inactive',
                     available_plans: [],
                     billing_history: []
                 });
@@ -156,7 +155,7 @@ class SubscriptionController {
                 const livePlan = await db.collection('plans').findOne({ _id: company.plan_id });
                 if (livePlan) {
                     const liveLimits = TierService.getLimitsForPlan(livePlan);
-                    originalPlanPrice = livePlan.price || TIER_LIMITS[livePlan.name.toLowerCase()]?.price_usd || 0;
+                    originalPlanPrice = livePlan.price || 0;
                     originalPlanLimits = {
                         workspaces: liveLimits.max_workspaces,
                         collaborators: liveLimits.max_collaborators,
@@ -186,7 +185,7 @@ class SubscriptionController {
 
             res.json({
                 plan: planName,
-                plan_price: company?.subscription_plan_price || TIER_LIMITS[planName.toLowerCase()]?.price_usd || 0,
+                plan_price: company?.subscription_plan_price || 0,
                 original_plan_price: originalPlanPrice,
                 plan_limits: limits,
                 original_plan_limits: originalPlanLimits,
@@ -205,7 +204,7 @@ class SubscriptionController {
                         _id: p._id,
                         name: p.name,
                         description: p.description || '',
-                        price: p.price || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
+                        price: p.price || 0,
                         features: p.features || [],
                         limits: {
                             workspaces: planLimits.max_workspaces,
@@ -509,7 +508,7 @@ class SubscriptionController {
             await db.collection('billing_history').insertOne({
                 company_id: user.company_id,
                 plan_name: newPlan.name,
-                amount: newPlan.price || newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
+                amount: newPlan.price || newPlan.price_usd || 0,
                 date: new Date(),
                 type: 'upgrade',
                 stripe_subscription_id: stripeSubscriptionId

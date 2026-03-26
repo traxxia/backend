@@ -6,8 +6,6 @@ const UserModel = require('../models/userModel');
 const CompanyModel = require("../models/companyModel")
 const { logAuditEvent } = require('../services/auditService');
 const TierService = require('../services/tierService');
-const { TIER_LIMITS } = require('../config/constants');
-
 const StripeService = require('../services/stripeService');
 
 class AuthController {
@@ -171,7 +169,7 @@ class AuthController {
                 companyData.expires_at = companyData.subscription_end_date;
 
                 // Log initial billing history
-                const registrationAmount = planDoc.price_usd || (planDoc.name ? TIER_LIMITS[planDoc.name.toLowerCase()]?.price_usd : 0) || 0;
+                const registrationAmount = planDoc.price_usd || planDoc.price || 0;
 
                 await db.collection('billing_history').insertOne({
                   stripe_subscription_id: subscription.id,
