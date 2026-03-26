@@ -621,15 +621,15 @@ class BusinessController {
       const collaboratorIds = business.collaborators || [];
 
       const db = getDB();
-      const collaboratorRole = await db.collection("roles").findOne({ role_name: "collaborator" });
-      if (!collaboratorRole) {
-        return res.status(404).json({ error: "Collaborator role not found" });
-      }
-      const collaboratorRoleId = collaboratorRole._id;
+      const roles = await db.collection("roles").find({ 
+        role_name: { $in: ["collaborator", "user"] } 
+      }).toArray();
+      
+      const roleIds = roles.map(r => r._id);
 
       const collaborators = await UserModel.getAll({
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) },
-        role_id: collaboratorRoleId
+        role_id: { $in: roleIds }
       });
 
       const response = collaborators.map(u => ({
