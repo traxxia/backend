@@ -6,8 +6,6 @@ const UserModel = require('../models/userModel');
 const CompanyModel = require("../models/companyModel")
 const { logAuditEvent } = require('../services/auditService');
 const TierService = require('../services/tierService');
-const { TIER_LIMITS } = require('../config/constants');
-
 const StripeService = require('../services/stripeService');
 
 class AuthController {
@@ -116,10 +114,11 @@ class AuthController {
 
       if (company_name) {
         // Handle new company creation
-        const companyData = {
-          company_name,
-          company_name_normalized: company_name.toLowerCase().trim()
-        };
+          const companyData = {
+            company_name,
+            company_name_normalized: company_name.toLowerCase().trim(),
+            subscription_plan_price: 0 // Default to 0
+          };
 
         if (plan_id) {
           if (!ObjectId.isValid(plan_id)) {
@@ -163,15 +162,12 @@ class AuthController {
                 companyData.subscription_end_date = subscription.current_period_end
                   ? new Date(subscription.current_period_end * 1000)
                   : (() => {
-                    const d = new Date();
-                    d.setMonth(d.getMonth() + 1);
-                    return d;
+                    const interval = planDoc?.interval || planDoc?.period || 'month';
+                    return TierService.calculateExpiryDate(new Date(), interval);
                   })();
 
-                companyData.expires_at = companyData.subscription_end_date;
-
-                // Log initial billing history
-                const registrationAmount = planDoc.price_usd || (planDoc.name ? TIER_LIMITS[planDoc.name.toLowerCase()]?.price_usd : 0) || 0;
+                const registrationAmount = planDoc.price || planDoc.price_usd || 0;
+                companyData.subscription_plan_price = registrationAmount;
 
                 await db.collection('billing_history').insertOne({
                   stripe_subscription_id: subscription.id,

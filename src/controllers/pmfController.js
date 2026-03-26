@@ -110,7 +110,7 @@ class PMFController {
             const tierName = await TierService.getUserTier(req.user._id);
             if (!await TierService.canCreateProject(tierName)) {
                 return res.status(403).json({
-                    error: `Project creation is locked for ${tierName} plan. Upgrade to Advanced to execute your strategy.`
+                    error: `Project creation is locked for ${tierName} plan. Upgrade your plan to execute your strategy.`
                 });
             }
 

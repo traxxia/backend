@@ -1477,7 +1477,6 @@ class ProjectController {
 
       if (scope === "reRanking") {
         await ProjectRankingModel.unlockRankingByBusiness(business_id);
-        await BusinessModel.clearAllowedRankingCollaborators(business_id);
 
         return res.json({
           scope: "business",

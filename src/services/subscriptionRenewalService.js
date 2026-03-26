@@ -82,9 +82,8 @@ renewalLogger.info(`[Auto-Renewal] Triggering Stripe for ${company.company_name}
                 const periodEnd = updatedSub.current_period_end
                     ? new Date(updatedSub.current_period_end * 1000)
                     : (() => {
-                        const d = new Date();
-                        d.setMonth(d.getMonth() + 1);
-                        return d;
+                        const interval = companyPlan?.interval || companyPlan?.period || 'month';
+                        return TierService.calculateExpiryDate(new Date(), interval);
                     })();
 
                 const updateData = {
@@ -111,7 +110,7 @@ renewalLogger.info(`[Auto-Renewal] Triggering Stripe for ${company.company_name}
                 renewalLogger.info(`[Auto-Renewal] Proactive Date Sync Complete for ${company.company_name}. Start: ${periodStart.toISOString()}, End: ${periodEnd.toISOString()}`);
 
                 // PROACTIVE BILLING HISTORY: Log entry immediately
-                const amount = companyPlan?.price || companyPlan?.price_usd || (updatedSub.plan?.amount || updatedSub.items?.data[0]?.price?.unit_amount || 2900) / 100;
+                const amount = (companyPlan?.price !== undefined ? companyPlan.price : (companyPlan?.price_usd !== undefined ? companyPlan.price_usd : 0)) || (updatedSub.plan?.amount || updatedSub.items?.data[0]?.price?.unit_amount || 2900) / 100;
                 await db.collection('billing_history').insertOne({
                     company_id: company._id,
                     stripe_subscription_id: updatedSub.id,

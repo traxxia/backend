@@ -2,7 +2,6 @@ const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 const TierService = require('../services/tierService');
 const StripeService = require('../services/stripeService');
-const { TIER_LIMITS } = require('../config/constants');
 
 
 class SubscriptionController {
@@ -14,11 +13,11 @@ class SubscriptionController {
             const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
             if (!user || !user.company_id) {
                 return res.json({
-                    plan: 'essential',
+                    plan: 'None',
                     start_date: user?.created_at || new Date(),
                     end_date: null,
                     expires_at: null,
-                    status: 'active',
+                    status: 'inactive',
                     available_plans: [],
                     billing_history: []
                 });
@@ -101,8 +100,8 @@ class SubscriptionController {
 
             // If no expiration date (legacy data), set one based on created_at or give 30 days grace from now
             if (!expiresAt) {
-                expiresAt = new Date(startDate);
-                expiresAt.setMonth(expiresAt.getMonth() + 1);
+                const interval = company?.plan_snapshot?.interval || 'month';
+                expiresAt = TierService.calculateExpiryDate(startDate, interval);
             }
 
             // Check if expired
@@ -151,12 +150,14 @@ class SubscriptionController {
             let planUpdatedSinceSnapshot = false;
             let originalPlanLimits = null;
             let originalPlanPrice = null;
+            let currentPlanPeriod = 'month';
 
             if (company?.plan_id) {
                 const livePlan = await db.collection('plans').findOne({ _id: company.plan_id });
                 if (livePlan) {
+                    currentPlanPeriod = livePlan.interval || livePlan.period || 'month';
                     const liveLimits = TierService.getLimitsForPlan(livePlan);
-                    originalPlanPrice = livePlan.price || TIER_LIMITS[livePlan.name.toLowerCase()]?.price_usd || 0;
+                    originalPlanPrice = livePlan.price || livePlan.price_usd || 0;
                     originalPlanLimits = {
                         workspaces: liveLimits.max_workspaces,
                         collaborators: liveLimits.max_collaborators,
@@ -184,9 +185,22 @@ class SubscriptionController {
                 }
             }
 
+            // Calculate total days in current billing cycle
+            let totalDaysCycle = 31;
+            if (startDate && expiresAt) {
+                const s = new Date(startDate);
+                const e = new Date(expiresAt);
+                totalDaysCycle = Math.max(1, Math.round((e - s) / (1000 * 60 * 60 * 24)));
+            }
+
+            // Determine billing cycle label
+            const billingCycle = currentPlanPeriod === 'year' ? 'yearly' : 'monthly';
+
             res.json({
                 plan: planName,
-                plan_price: company?.subscription_plan_price || TIER_LIMITS[planName.toLowerCase()]?.price_usd || 0,
+                billing_cycle: billingCycle,
+                total_days: totalDaysCycle,
+                plan_price: company?.subscription_plan_price || originalPlanPrice || 0,
                 original_plan_price: originalPlanPrice,
                 plan_limits: limits,
                 original_plan_limits: originalPlanLimits,
@@ -205,7 +219,8 @@ class SubscriptionController {
                         _id: p._id,
                         name: p.name,
                         description: p.description || '',
-                        price: p.price || TIER_LIMITS[p.name.toLowerCase()]?.price_usd || 0,
+                        price: p.price || 0,
+                        period: p.interval || p.period || 'month',
                         features: p.features || [],
                         limits: {
                             workspaces: planLimits.max_workspaces,
@@ -285,10 +300,19 @@ class SubscriptionController {
                     let shouldSetDefault = saveCard !== false;
 
                     if (customerId) {
-                        // Check if already attached
+                        // Check if already attached (specific PM ID) or duplicate card (fingerprint)
                         const pm = await StripeService.retrievePaymentMethod(paymentMethodId);
 
                         if (pm.customer !== customerId) {
+                            // Check for fingerprint duplicate
+                            const existingMethods = await StripeService.listPaymentMethods(customerId);
+                            const newFingerprint = pm.card?.fingerprint;
+                            const isDuplicate = existingMethods.some(ex => ex.card?.fingerprint === newFingerprint);
+
+                            if (isDuplicate) {
+                                return res.status(400).json({ error: 'This card is already linked to your account.' });
+                            }
+
                             // Attach new payment method to existing customer
                             await StripeService.attachPaymentMethod(paymentMethodId, customerId);
                         }
@@ -446,8 +470,7 @@ class SubscriptionController {
             // 6. Sync with Stripe
             let stripeSubscriptionId = company?.stripe_subscription_id;
             let periodStart = new Date();
-            let periodEnd = new Date(periodStart);
-            periodEnd.setMonth(periodEnd.getMonth() + 1);
+            let periodEnd = TierService.calculateExpiryDate(periodStart, newPlan.interval || newPlan.period || 'month');
 
             if (newPlan.stripe_price_id) {
                 try {
@@ -462,7 +485,16 @@ class SubscriptionController {
                             proration_behavior: 'always_invoice',
                         });
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                        if (subscription.current_period_end) {
+                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
+                            const planInterval = newPlan.interval || newPlan.period || 'month';
+                            // If yearly plan, only trust Stripe if the date is actually set for a year (roughly)
+                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
+                                console.log('[Upgrade] Stripe returned short period for yearly plan, keeping 365 days');
+                            } else {
+                                periodEnd = stripeEndDate;
+                            }
+                        }
                     } else if (company?.stripe_customer_id) {
                         // Create new subscription
                         console.log(`Creating new Stripe subscription for customer ${company.stripe_customer_id} with price ${newPlan.stripe_price_id}`);
@@ -473,7 +505,15 @@ class SubscriptionController {
                         );
                         stripeSubscriptionId = subscription.id;
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                        if (subscription.current_period_end) {
+                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
+                            const planInterval = newPlan.interval || newPlan.period || 'month';
+                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
+                                console.log('[Upgrade] Stripe returned short period for yearly plan, keeping 365 days');
+                            } else {
+                                periodEnd = stripeEndDate;
+                            }
+                        }
                     }
                 } catch (stripeError) {
                     console.error('Stripe sync failed during upgrade:', stripeError);
@@ -490,6 +530,7 @@ class SubscriptionController {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        subscription_plan_price: newPlan.price || newPlan.price_usd || 0,
                         plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
@@ -509,7 +550,7 @@ class SubscriptionController {
             await db.collection('billing_history').insertOne({
                 company_id: user.company_id,
                 plan_name: newPlan.name,
-                amount: newPlan.price || newPlan.price_usd || TIER_LIMITS[newPlan.name.toLowerCase()]?.price_usd || 0,
+                amount: newPlan.price || newPlan.price_usd || 0,
                 date: new Date(),
                 type: 'upgrade',
                 stripe_subscription_id: stripeSubscriptionId
@@ -632,8 +673,7 @@ class SubscriptionController {
             // 3. Sync with Stripe
             let stripeSubscriptionId = company?.stripe_subscription_id;
             let periodStart = new Date();
-            let periodEnd = new Date(periodStart);
-            periodEnd.setMonth(periodEnd.getMonth() + 1);
+            let periodEnd = TierService.calculateExpiryDate(periodStart, newPlan.interval || newPlan.period || 'month');
 
             if (newPlan.stripe_price_id) {
                 try {
@@ -646,7 +686,15 @@ class SubscriptionController {
                             proration_behavior: 'always_invoice',
                         });
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                        if (subscription.current_period_end) {
+                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
+                            const planInterval = newPlan.interval || newPlan.period || 'month';
+                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
+                                console.log('[Config] Stripe returned short period for yearly plan, keeping 365 days');
+                            } else {
+                                periodEnd = stripeEndDate;
+                            }
+                        }
                     } else if (company?.stripe_customer_id) {
                         const subscription = await StripeService.createSubscription(
                             company.stripe_customer_id,
@@ -655,7 +703,15 @@ class SubscriptionController {
                         );
                         stripeSubscriptionId = subscription.id;
                         if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) periodEnd = new Date(subscription.current_period_end * 1000);
+                        if (subscription.current_period_end) {
+                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
+                            const planInterval = newPlan.interval || newPlan.period || 'month';
+                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
+                                console.log('[Config] Stripe returned short period for yearly plan, keeping 365 days');
+                            } else {
+                                periodEnd = stripeEndDate;
+                            }
+                        }
                     }
                 } catch (stripeError) {
                     console.error('Stripe sync failed during configuration:', stripeError);
@@ -670,6 +726,7 @@ class SubscriptionController {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        subscription_plan_price: newPlan.price || newPlan.price_usd || 0,
                         plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
@@ -682,8 +739,14 @@ class SubscriptionController {
             );
 
             // Record in billing history
-            // Use static constant TIER_LIMITS if imported, else fallback
-            const amount = newPlan.price_usd || newPlan.price || 0;
+            const amount = newPlan.price || newPlan.price_usd || 0;
+            
+            // Also update company record with new price
+            await db.collection('companies').updateOne(
+                { _id: user.company_id },
+                { $set: { subscription_plan_price: amount } }
+            );
+
             await db.collection('billing_history').insertOne({
                 company_id: user.company_id,
                 plan_name: newPlan.name,
@@ -735,6 +798,15 @@ class SubscriptionController {
                     { $set: { stripe_customer_id: customerId } }
                 );
             } else {
+                // Check for duplicate card fingerprint before attaching
+                const newPM = await StripeService.retrievePaymentMethod(paymentMethodId);
+                const existingMethods = await StripeService.listPaymentMethods(customerId);
+                const newFingerprint = newPM.card?.fingerprint;
+
+                if (newFingerprint && existingMethods.some(pm => pm.card?.fingerprint === newFingerprint)) {
+                    return res.status(400).json({ error: 'This card is already linked to your account.' });
+                }
+
                 await StripeService.attachPaymentMethod(paymentMethodId, customerId);
             }
 

@@ -9,6 +9,14 @@ exports.submitFeedback = async (req, res) => {
             return res.status(400).json({ success: false, message: 'articleId and helpful fields are required' });
         }
 
+        if (feedback && feedback.trim().length > 0 && feedback.trim().length < 10) {
+            return res.status(400).json({ success: false, message: 'Feedback must be at least 10 characters long' });
+        }
+
+        if (feedback && !/[A-Za-z]/.test(feedback)) {
+            return res.status(400).json({ success: false, message: 'Feedback must contain at least one alphabetic character' });
+        }
+
         const newFeedback = {
             articleId,
             helpful,
