@@ -236,7 +236,7 @@ class TierService {
 
         const workspaces = await db.collection('user_businesses').countDocuments({
             user_id: { $in: allUserIds },
-            status: { $in: ['active', null, undefined] }
+            status: { $nin: ['deleted', 'archived', 'inactive'] }
         });
 
         const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
