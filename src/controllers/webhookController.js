@@ -36,8 +36,13 @@ class WebhookController {
                         : new Date();
                     const periodEnd = stripeSub.current_period_end
                         ? new Date(stripeSub.current_period_end * 1000)
-                        : (() => {
-                            const interval = 'month'; // Fallback for simple creation
+                        : await (async () => {
+                            const company = await db.collection('companies').findOne({ stripe_subscription_id: stripeSub.id });
+                            let interval = 'month';
+                            if (company && company.plan_id) {
+                                const plan = await db.collection('plans').findOne({ _id: new ObjectId(company.plan_id) });
+                                if (plan) interval = plan.interval || plan.period || 'month';
+                            }
                             return TierService.calculateExpiryDate(new Date(), interval);
                         })();
 
