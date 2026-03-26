@@ -13,8 +13,8 @@ exports.submitFeedback = async (req, res) => {
             return res.status(400).json({ success: false, message: 'Feedback must be at least 10 characters long' });
         }
 
-        if (feedback && !/[A-Za-z]/.test(feedback)) {
-            return res.status(400).json({ success: false, message: 'Feedback must contain at least one alphabetic character' });
+        if (feedback && feedback.trim().length > 0 && !/[A-Za-z]/.test(feedback)) {
+            return res.status(400).json({ success: false, message: 'Feedback must contain at least one letter' });
         }
 
         const newFeedback = {

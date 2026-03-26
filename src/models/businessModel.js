@@ -20,7 +20,10 @@ class BusinessModel {
 
   static async findByUserId(userId) {
     return await this.collection()
-      .find({ user_id: new ObjectId(userId) })
+      .find({ 
+        user_id: new ObjectId(userId),
+        status: { $ne: 'deleted' }
+      })
       .sort({ created_at: -1 })
       .toArray();
   }
@@ -33,8 +36,33 @@ class BusinessModel {
     return await this.collection()
       .find({
         user_id: { $in: userIds },
+        status: { $ne: 'deleted' }
       })
       .sort({ created_at: -1 })
+      .toArray();
+  }
+  
+  static async findDeletedByUserId(userId) {
+    return await this.collection()
+      .find({ 
+        user_id: new ObjectId(userId),
+        status: 'deleted'
+      })
+      .sort({ deleted_at: -1 })
+      .toArray();
+  }
+
+  static async findDeletedByUserIds(userIds) {
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return [];
+    }
+
+    return await this.collection()
+      .find({
+        user_id: { $in: userIds },
+        status: 'deleted'
+      })
+      .sort({ deleted_at: -1 })
       .toArray();
   }
 
@@ -54,8 +82,21 @@ class BusinessModel {
 
   static async findByCollaborator(userId) {
     return await this.collection()
-      .find({ collaborators: new ObjectId(userId) })
+      .find({ 
+        collaborators: new ObjectId(userId),
+        status: { $ne: 'deleted' }
+      })
       .sort({ created_at: -1 })
+      .toArray();
+  }
+
+  static async findDeletedByCollaborator(userId) {
+    return await this.collection()
+      .find({ 
+        collaborators: new ObjectId(userId),
+        status: 'deleted'
+      })
+      .sort({ deleted_at: -1 })
       .toArray();
   }
 

@@ -489,7 +489,8 @@ class AdminController {
             $or: [
               { user_id: { $in: userIds } },
               { company_id: filter.company_id } // Some businesses might have company_id directly
-            ]
+            ],
+            status: { $ne: 'deleted' }
           }
         },
         {
