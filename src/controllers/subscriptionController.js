@@ -150,10 +150,12 @@ class SubscriptionController {
             let planUpdatedSinceSnapshot = false;
             let originalPlanLimits = null;
             let originalPlanPrice = null;
+            let currentPlanPeriod = 'month';
 
             if (company?.plan_id) {
                 const livePlan = await db.collection('plans').findOne({ _id: company.plan_id });
                 if (livePlan) {
+                    currentPlanPeriod = livePlan.period || 'month';
                     const liveLimits = TierService.getLimitsForPlan(livePlan);
                     originalPlanPrice = livePlan.price || 0;
                     originalPlanLimits = {
@@ -183,8 +185,21 @@ class SubscriptionController {
                 }
             }
 
+            // Calculate total days in current billing cycle
+            let totalDaysCycle = 31;
+            if (startDate && expiresAt) {
+                const s = new Date(startDate);
+                const e = new Date(expiresAt);
+                totalDaysCycle = Math.max(1, Math.round((e - s) / (1000 * 60 * 60 * 24)));
+            }
+
+            // Determine billing cycle label
+            const billingCycle = currentPlanPeriod === 'year' ? 'yearly' : 'monthly';
+
             res.json({
                 plan: planName,
+                billing_cycle: billingCycle,
+                total_days: totalDaysCycle,
                 plan_price: company?.subscription_plan_price || 0,
                 original_plan_price: originalPlanPrice,
                 plan_limits: limits,
@@ -205,6 +220,7 @@ class SubscriptionController {
                         name: p.name,
                         description: p.description || '',
                         price: p.price || 0,
+                        period: p.period || 'month',
                         features: p.features || [],
                         limits: {
                             workspaces: planLimits.max_workspaces,
