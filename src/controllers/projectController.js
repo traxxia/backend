@@ -26,8 +26,15 @@ function getProjectPermissions({
   isCollaborator,
   isAdmin,
   isAllowedCollaborator,
+  userRole,
 }) {
   const status = (projectStatus || "").toLowerCase();
+
+  // Viewer role is ALWAYS read-only
+  if (userRole === "viewer") {
+    return { canCreate: false, canEdit: false };
+  }
+
   const canModify = isAdmin || isCollaborator || isOwner;
 
   switch (status) {
@@ -55,7 +62,6 @@ function getProjectPermissions({
       return { canCreate: false, canEdit: canModify };
   }
 }
-
 // Normalize string fields
 function normalizeString(value) {
   return typeof value === "string" ? value : "";
@@ -163,8 +169,15 @@ class ProjectController {
             _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
           }).toArray();
 
-          // Filter non-admins
-          const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+          const roles = await db.collection("roles").find({}).toArray();
+          const roleMap = {};
+          roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
+          // Filter non-admins and non-viewers
+          const nonAdminUsers = users.filter(u => {
+            const roleName = roleMap[u.role_id?.toString()];
+            return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
+          });
           const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
           // Get locked rankings with user info
@@ -378,6 +391,7 @@ class ProjectController {
         isOwner,
         isCollaborator,
         isAdmin,
+        userRole: req.user.role.role_name,
       });
 
       if (!permissions.canCreate) {
@@ -576,6 +590,7 @@ class ProjectController {
         isCollaborator,
         isAdmin,
         isAllowedCollaborator,
+        userRole: req.user.role.role_name,
       });
 
       if (!permissions.canEdit) {
@@ -815,7 +830,26 @@ class ProjectController {
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
-        const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+        const roles = await db.collection("roles").find({}).toArray();
+
+
+        const roleMap = {};
+
+
+        roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
+
+
+        const nonAdminUsers = users.filter(u => {
+
+
+          const roleName = roleMap[u.role_id?.toString()];
+
+
+          return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
+
+
+        });
 
         // Find all projects that have AI ranks OR are being launched now
         const mandatoryProjects = await ProjectModel.collection().find({
@@ -1051,8 +1085,26 @@ class ProjectController {
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
-        const adminUsers = users.filter(u => ADMIN_ROLES.includes(u.role_name));
-        const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+        const roles = await db.collection("roles").find({}).toArray();
+
+
+        const roleMap = {};
+
+
+        roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
+
+
+        const nonAdminUsers = users.filter(u => {
+
+
+          const roleName = roleMap[u.role_id?.toString()];
+
+
+          return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
+
+
+        });
 
         // Mandatory projects are those with an AI rank
         const mandatoryProjects = await ProjectModel.collection().find({
@@ -1547,6 +1599,7 @@ class ProjectController {
       // Check edit access for all projects in this business
       const projects = await ProjectModel.findAll({ business_id: new ObjectId(business_id) });
       const projectsEditAccess = {};
+      const userRole = req.user.role.role_name;
 
       projects.forEach(project => {
         if (isAdmin) {
@@ -1554,16 +1607,24 @@ class ProjectController {
           return;
         }
 
-        const isLaunched = project.launch_status?.toLowerCase() === 'launched';
-        const isActive = project.status?.toLowerCase() === 'active';
+        // Viewer NEVER has edit access
+        if (userRole === "viewer") {
+          projectsEditAccess[project._id.toString()] = false;
+          return;
+        }
+
+        const isLaunched = (project.launch_status || "").toLowerCase() === "launched";
+        const isActive = (project.status || "").toLowerCase() === "active";
 
         const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
           project.allowed_collaborators.some(id => id.toString() === user_id.toString());
 
         if ((isLaunched || isActive) && !project.edit_unlocked) {
-          projectsEditAccess[project._id.toString()] = false;
-        } else {
+          // For launched projects, only those with special access can edit
           projectsEditAccess[project._id.toString()] = isInAllowedCollabs;
+        } else {
+          // For unlaunched projects, any collaborator/user can edit
+          projectsEditAccess[project._id.toString()] = true;
         }
       });
 
@@ -1958,8 +2019,15 @@ class ProjectController {
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
       }).toArray();
 
+      const roles = await db.collection("roles").find({}).toArray();
+      const roleMap = {};
+      roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
       const nonAdminUserIds = users
-        .filter(u => !ADMIN_ROLES.includes(u.role_name))
+        .filter(u => {
+          const roleName = roleMap[u.role_id?.toString()];
+          return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
+        })
         .map(u => u._id.toString());
 
       // Calculate consensus for each project
@@ -2092,7 +2160,26 @@ class ProjectController {
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
       }).toArray();
 
-      const nonAdminUsers = users.filter(u => !ADMIN_ROLES.includes(u.role_name));
+      const roles = await db.collection("roles").find({}).toArray();
+
+
+      const roleMap = {};
+
+
+      roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
+
+
+      const nonAdminUsers = users.filter(u => {
+
+
+        const roleName = roleMap[u.role_id?.toString()];
+
+
+        return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
+
+
+      });
       const nonAdminUserIds = nonAdminUsers.map(u => u._id.toString());
 
       // Create user map for names
@@ -2204,3 +2291,4 @@ class ProjectController {
 }
 
 module.exports = ProjectController;
+
