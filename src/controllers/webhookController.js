@@ -69,7 +69,8 @@ class WebhookController {
                         });
 
                         if (company) {
-                            const amount = (invoice.amount_paid || invoice.total || 0) / 100;
+                            // Use actual amount paid, with a fallback to invoice total
+                            const amount = (invoice.amount_paid !== undefined ? invoice.amount_paid : (invoice.total || 0)) / 100;
                             console.log(`[Webhook] Final Amount to Log: $${amount} for ${company.company_name}`);
 
                             await db.collection('billing_history').insertOne({

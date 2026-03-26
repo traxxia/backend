@@ -157,7 +157,7 @@ class SubscriptionController {
                 if (livePlan) {
                     currentPlanPeriod = livePlan.period || 'month';
                     const liveLimits = TierService.getLimitsForPlan(livePlan);
-                    originalPlanPrice = livePlan.price || 0;
+                    originalPlanPrice = livePlan.price || livePlan.price_usd || 0;
                     originalPlanLimits = {
                         workspaces: liveLimits.max_workspaces,
                         collaborators: liveLimits.max_collaborators,
@@ -200,7 +200,7 @@ class SubscriptionController {
                 plan: planName,
                 billing_cycle: billingCycle,
                 total_days: totalDaysCycle,
-                plan_price: company?.subscription_plan_price || 0,
+                plan_price: company?.subscription_plan_price || originalPlanPrice || 0,
                 original_plan_price: originalPlanPrice,
                 plan_limits: limits,
                 original_plan_limits: originalPlanLimits,
@@ -300,10 +300,19 @@ class SubscriptionController {
                     let shouldSetDefault = saveCard !== false;
 
                     if (customerId) {
-                        // Check if already attached
+                        // Check if already attached (specific PM ID) or duplicate card (fingerprint)
                         const pm = await StripeService.retrievePaymentMethod(paymentMethodId);
 
                         if (pm.customer !== customerId) {
+                            // Check for fingerprint duplicate
+                            const existingMethods = await StripeService.listPaymentMethods(customerId);
+                            const newFingerprint = pm.card?.fingerprint;
+                            const isDuplicate = existingMethods.some(ex => ex.card?.fingerprint === newFingerprint);
+
+                            if (isDuplicate) {
+                                return res.status(400).json({ error: 'This card is already linked to your account.' });
+                            }
+
                             // Attach new payment method to existing customer
                             await StripeService.attachPaymentMethod(paymentMethodId, customerId);
                         }
@@ -505,6 +514,7 @@ class SubscriptionController {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        subscription_plan_price: newPlan.price || newPlan.price_usd || 0,
                         plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
@@ -685,6 +695,7 @@ class SubscriptionController {
                     $set: {
                         plan_id: new ObjectId(plan_id),
                         subscription_plan: newPlan.name,
+                        subscription_plan_price: newPlan.price || newPlan.price_usd || 0,
                         plan_snapshot: planSnapshot,
                         stripe_subscription_id: stripeSubscriptionId,
                         subscription_start_date: periodStart,
@@ -697,8 +708,14 @@ class SubscriptionController {
             );
 
             // Record in billing history
-            // Use static constant TIER_LIMITS if imported, else fallback
-            const amount = newPlan.price_usd || newPlan.price || 0;
+            const amount = newPlan.price || newPlan.price_usd || 0;
+            
+            // Also update company record with new price
+            await db.collection('companies').updateOne(
+                { _id: user.company_id },
+                { $set: { subscription_plan_price: amount } }
+            );
+
             await db.collection('billing_history').insertOne({
                 company_id: user.company_id,
                 plan_name: newPlan.name,
@@ -750,6 +767,15 @@ class SubscriptionController {
                     { $set: { stripe_customer_id: customerId } }
                 );
             } else {
+                // Check for duplicate card fingerprint before attaching
+                const newPM = await StripeService.retrievePaymentMethod(paymentMethodId);
+                const existingMethods = await StripeService.listPaymentMethods(customerId);
+                const newFingerprint = newPM.card?.fingerprint;
+
+                if (newFingerprint && existingMethods.some(pm => pm.card?.fingerprint === newFingerprint)) {
+                    return res.status(400).json({ error: 'This card is already linked to your account.' });
+                }
+
                 await StripeService.attachPaymentMethod(paymentMethodId, customerId);
             }
 

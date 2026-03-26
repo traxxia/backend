@@ -114,10 +114,11 @@ class AuthController {
 
       if (company_name) {
         // Handle new company creation
-        const companyData = {
-          company_name,
-          company_name_normalized: company_name.toLowerCase().trim()
-        };
+          const companyData = {
+            company_name,
+            company_name_normalized: company_name.toLowerCase().trim(),
+            subscription_plan_price: 0 // Default to 0
+          };
 
         if (plan_id) {
           if (!ObjectId.isValid(plan_id)) {
@@ -166,10 +167,8 @@ class AuthController {
                     return d;
                   })();
 
-                companyData.expires_at = companyData.subscription_end_date;
-
-                // Log initial billing history
-                const registrationAmount = planDoc.price_usd || planDoc.price || 0;
+                const registrationAmount = planDoc.price || planDoc.price_usd || 0;
+                companyData.subscription_plan_price = registrationAmount;
 
                 await db.collection('billing_history').insertOne({
                   stripe_subscription_id: subscription.id,
