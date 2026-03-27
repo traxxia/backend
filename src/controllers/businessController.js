@@ -134,7 +134,7 @@ class BusinessController {
         "business_id",
         {
           business_id: { $in: allBusinessIds },
-          launch_status: "launched"
+          launch_status: { $in: ["launched", "pending_launch"] }
         }
       );
 
