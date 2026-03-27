@@ -2,6 +2,8 @@ const StripeService = require('./stripeService');
 const CompanyModel = require('../models/companyModel');
 const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
+const TierService = require('./tierService');
+const renewalLogger = require('../utils/renewalLogger');
 
 class SubscriptionRenewalService {
     /**
@@ -16,25 +18,48 @@ class SubscriptionRenewalService {
         // We also check "last_renewal_attempt" to avoid spamming Stripe if the webhook is slow.
         const expiredCompanies = await db.collection('companies').find({
             stripe_subscription_id: { $ne: null },
-            subscription_status: 'active',
+            subscription_status: { $in: ['active', 'expired'] },
             subscription_end_date: { $lt: now },
             $or: [
                 { last_renewal_attempt: { $exists: false } },
                 { last_renewal_attempt: { $lt: new Date(now.getTime() - 10 * 60 * 1000) } } // Only retry after 10 mins
             ]
-        }).toArray();
+        }).limit(5).toArray();
 
         if (expiredCompanies.length === 0) {
             console.log(`[Auto-Renewal] No expired subscriptions found in this cycle.`);
+            renewalLogger.info(`[Auto-Renewal] No expired subscriptions found in this cycle.`);
             return;
         }
 
         console.log(`[Auto-Renewal] Found ${expiredCompanies.length} subscriptions that need renewal in Stripe...`);
+        renewalLogger.info(`[Auto-Renewal] Found ${expiredCompanies.length} subscriptions that need renewal in Stripe...`);
+
+        // Fetch all plans to check their disabled status
+        const plans = await db.collection('plans').find().toArray();
+        const planMap = plans.reduce((acc, plan) => {
+            acc[plan._id.toString()] = plan;
+            return acc;
+        }, {});
+
+        const delay = ms => new Promise(res => setTimeout(res, ms));
 
         for (const company of expiredCompanies) {
             try {
+                const planIdStr = typeof company.plan_id === 'object' ? company.plan_id.toString() : company.plan_id;
+                const companyPlan = planMap[planIdStr];
+
+                if (companyPlan && companyPlan.status === 'disable') {
+                    console.log(`[Auto-Renewal] Skipping renewal for ${company.company_name} because their plan (${companyPlan.name}) is disabled. Letting it naturally expire.`);
+                    renewalLogger.warn(`[Auto-Renewal] Skipping renewal for ${company.company_name} because their plan (${companyPlan.name}) is disabled. Letting it naturally expire.`);
+                    continue; // Leave it for Stripe to cancel at period end
+                }
+
                 console.log(`[Auto-Renewal] Found Expired: ${company.company_name}`);
                 console.log(`[Auto-Renewal] Triggering Stripe...`);
+
+                renewalLogger.info(`[Auto-Renewal] Found Expired: ${company.company_name}`);
+renewalLogger.info(`[Auto-Renewal] Triggering Stripe for ${company.company_name}...`);
 
                 const updatedSub = await StripeService.updateSubscription(company.stripe_subscription_id, {
                     billing_cycle_anchor: 'now',
@@ -42,9 +67,11 @@ class SubscriptionRenewalService {
                 });
 
                 console.log(`[Auto-Renewal] Stripe Success for ${company.company_name}.`);
+                renewalLogger.info(`[Auto-Renewal] Stripe Success for ${company.company_name}.`);
 
                 // Inspect the response structure to debug the 1970 date issue
                 console.log(`[Auto-Renewal] Stripe Sub Object: Period Start: ${updatedSub.current_period_start}, End: ${updatedSub.current_period_end}`);
+                renewalLogger.info(`[Auto-Renewal] Stripe Sub Object for ${company.company_name}: Period Start: ${updatedSub.current_period_start}, End: ${updatedSub.current_period_end}`);
 
                 // PROACTIVE SYNC: Update DB immediately as a fallback for missing webhooks
                 // Use robust fallbacks to avoid 1970-01-01 (NaN/undefined * 1000)
@@ -55,29 +82,35 @@ class SubscriptionRenewalService {
                 const periodEnd = updatedSub.current_period_end
                     ? new Date(updatedSub.current_period_end * 1000)
                     : (() => {
-                        const d = new Date();
-                        d.setMonth(d.getMonth() + 1);
-                        return d;
+                        const interval = companyPlan?.interval || companyPlan?.period || 'month';
+                        return TierService.calculateExpiryDate(new Date(), interval);
                     })();
+
+                const updateData = {
+                    subscription_start_date: periodStart,
+                    subscription_end_date: periodEnd,
+                    expires_at: periodEnd,
+                    status: 'active',
+                    subscription_status: 'active',
+                    last_renewal_attempt: new Date(),
+                    updated_at: new Date()
+                };
+
+                // Refresh plan snapshot on renewal
+                if (companyPlan) {
+                  updateData.plan_snapshot = TierService.buildPlanSnapshot(companyPlan);
+                  updateData.subscription_plan = companyPlan.name;
+                }
 
                 await db.collection('companies').updateOne(
                     { _id: company._id },
-                    {
-                        $set: {
-                            subscription_start_date: periodStart,
-                            subscription_end_date: periodEnd,
-                            expires_at: periodEnd,
-                            status: 'active',
-                            subscription_status: 'active',
-                            last_renewal_attempt: new Date(),
-                            updated_at: new Date()
-                        }
-                    }
+                    { $set: updateData }
                 );
                 console.log(`[Auto-Renewal] Proactive Date Sync Complete. Start: ${periodStart.toISOString()}, End: ${periodEnd.toISOString()}`);
+                renewalLogger.info(`[Auto-Renewal] Proactive Date Sync Complete for ${company.company_name}. Start: ${periodStart.toISOString()}, End: ${periodEnd.toISOString()}`);
 
                 // PROACTIVE BILLING HISTORY: Log entry immediately
-                const amount = (updatedSub.plan?.amount || updatedSub.items?.data[0]?.price?.unit_amount || 2900) / 100;
+                const amount = (companyPlan?.price !== undefined ? companyPlan.price : (companyPlan?.price_usd !== undefined ? companyPlan.price_usd : 0)) || (updatedSub.plan?.amount || updatedSub.items?.data[0]?.price?.unit_amount || 2900) / 100;
                 await db.collection('billing_history').insertOne({
                     company_id: company._id,
                     stripe_subscription_id: updatedSub.id,
@@ -89,13 +122,17 @@ class SubscriptionRenewalService {
                     invoice_url: updatedSub.latest_invoice?.hosted_invoice_url || null
                 });
                 console.log(`[Auto-Renewal] Proactive Billing Entry Logged. Amount: $${amount}`);
+                renewalLogger.info(`[Auto-Renewal] Proactive Billing Entry Logged for ${company.company_name}. Amount: $${amount}`);
             } catch (error) {
-                console.error(`[Auto-Renewal] Failed for ${company.company_name}:`, error.message);
-                await db.collection('companies').updateOne(
-                    { _id: company._id },
-                    { $set: { last_renewal_attempt: now } }
-                );
-            }
+    console.error(`[Auto-Renewal] Failed for ${company.company_name}:`, error.message);
+    renewalLogger.error(`[Auto-Renewal] Failed for ${company.company_name}: ${error.message}`);
+    await db.collection('companies').updateOne(
+        { _id: company._id },
+        { $set: { last_renewal_attempt: now } }
+    );
+}
+
+await delay(500);
         }
     }
 }

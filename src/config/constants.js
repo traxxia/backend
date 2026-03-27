@@ -21,26 +21,6 @@ module.exports = {
     COMPLETED: 'completed',
     SCALED: 'scaled'
   },
-  TIER_LIMITS: {
-    essential: {
-      max_workspaces: 1,
-      can_create_projects: false,
-      max_collaborators: 0,
-      price_usd: 29.00
-    },
-    advanced: {
-      max_workspaces: 3,
-      can_create_projects: true,
-      max_collaborators: 3,
-      price_usd: 89.00
-    },
-    unlimited: {
-      max_workspaces: 1000,
-      can_create_projects: true,
-      max_collaborators: 1000,
-      price_usd: 0
-    }
-  },
   MAX_BUSINESSES_PER_USER: 5, // Default/Legacy fallback
   FILE_SIZE_LIMITS: {
     LOGO: 5 * 1024 * 1024, // 5MB
