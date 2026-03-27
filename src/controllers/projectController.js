@@ -794,7 +794,14 @@ class ProjectController {
 
       await ProjectModel.collection().updateMany(
         { _id: { $in: project_ids.map(id => new ObjectId(id)) } },
-        { $set: { launch_status: PROJECT_LAUNCH_STATUS.PENDING_LAUNCH, updated_at: new Date() } }
+        { 
+          $set: { 
+            launch_status: PROJECT_LAUNCH_STATUS.PENDING_LAUNCH, 
+            edit_unlocked: false,
+            allowed_collaborators: [],
+            updated_at: new Date() 
+          } 
+        }
       );
 
       // NEW: Unlock rankings to allow collaborators to provide input on the new selection
@@ -1612,17 +1619,16 @@ class ProjectController {
           return;
         }
 
-        const isLaunched = (project.launch_status || "").toLowerCase() === "launched";
-        const isActive = (project.status || "").toLowerCase() === "active";
+        const isLaunchedOrPending = (project.launch_status || "").toLowerCase() === "launched" || (project.launch_status || "").toLowerCase() === "pending_launch";
 
         const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
           project.allowed_collaborators.some(id => id.toString() === user_id.toString());
 
-        if ((isLaunched || isActive) && !project.edit_unlocked) {
-          // For launched projects, only those with special access can edit
+        if (isLaunchedOrPending) {
+          // For launched or pending launch projects, only those with special access can edit
           projectsEditAccess[project._id.toString()] = isInAllowedCollabs;
         } else {
-          // For unlaunched projects, any collaborator/user can edit
+          // For unlaunched/draft projects, any collaborator/user can edit
           projectsEditAccess[project._id.toString()] = true;
         }
       });
@@ -1770,17 +1776,15 @@ class ProjectController {
         });
 
         const updatePromises = projects.map(project => {
-          if (Array.isArray(project.allowed_collaborators)) {
-            const filteredCollaborators = project.allowed_collaborators.filter(
-              id => id.toString() !== user_id.toString()
-            );
+          const currentCols = Array.isArray(project.allowed_collaborators) ? project.allowed_collaborators : [];
+          const filteredCollaborators = currentCols.filter(
+            id => id.toString() !== user_id.toString()
+          );
 
-            return ProjectModel.update(project._id.toString(), {
-              allowed_collaborators: filteredCollaborators,
-              updated_at: new Date()
-            });
-          }
-          return Promise.resolve();
+          return ProjectModel.update(project._id.toString(), {
+            allowed_collaborators: filteredCollaborators,
+            updated_at: new Date()
+          });
         });
 
         await Promise.all(updatePromises);

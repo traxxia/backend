@@ -49,14 +49,47 @@ class PlanController {
                     .filter(f => f !== '');
             }
 
-            if (planData.name) {
-                const name = planData.name.trim();
+            if (planData.name !== undefined) {
+                const name = (planData.name || '').trim();
                 if (!name || !/[a-zA-Z]/.test(name)) {
                     return res.status(400).json({ error: 'Plan name must contain at least one letter' });
                 }
+                
+                // Only check for existing plan on creation if name is provided
                 const existingPlan = await PlanModel.findByName(name);
                 if (existingPlan) {
                     return res.status(400).json({ error: 'Plan with this name already exists' });
+                }
+            } else {
+                return res.status(400).json({ error: 'Plan name is required' });
+            }
+
+            if (!planData.period || !['month', 'year'].includes(planData.period)) {
+                return res.status(400).json({ error: 'Valid billing period (month/year) is required' });
+            }
+
+            if (!planData.description || !planData.description.trim()) {
+                return res.status(400).json({ error: 'Plan description is required' });
+            }
+
+            if (!/[a-zA-Z]/.test(planData.description)) {
+                return res.status(400).json({ error: 'Plan description must contain at least one letter' });
+            }
+
+            // Stricter price validation using regex
+            const priceStr = (planData.price !== undefined && planData.price !== null) ? planData.price.toString().trim() : '';
+            if (!priceStr || !/^\d+(\.\d{1,2})?$/.test(priceStr)) {
+                return res.status(400).json({ error: 'Valid non-negative price is required (e.g. 10.99)' });
+            }
+
+            // Validate limits
+            if (planData.limits) {
+                const { workspaces, collaborators, viewers, users } = planData.limits;
+                if ((workspaces !== undefined && (isNaN(Number(workspaces)) || Number(workspaces) < 0)) ||
+                    (collaborators !== undefined && (isNaN(Number(collaborators)) || Number(collaborators) < 0)) ||
+                    (viewers !== undefined && (isNaN(Number(viewers)) || Number(viewers) < 0)) ||
+                    (users !== undefined && (isNaN(Number(users)) || Number(users) < 0))) {
+                    return res.status(400).json({ error: 'Plan limits must be non-negative numbers' });
                 }
             }
 
@@ -109,6 +142,38 @@ class PlanController {
                 const name = (planData.name || '').trim();
                 if (!name || !/[a-zA-Z]/.test(name)) {
                     return res.status(400).json({ error: 'Plan name must contain at least one letter' });
+                }
+            }
+
+            if (planData.period !== undefined && !['month', 'year'].includes(planData.period)) {
+                return res.status(400).json({ error: 'Invalid billing period' });
+            }
+
+            if (planData.description !== undefined) {
+                const desc = (planData.description || '').trim();
+                if (!desc) {
+                    return res.status(400).json({ error: 'Plan description cannot be empty' });
+                }
+                if (!/[a-zA-Z]/.test(desc)) {
+                    return res.status(400).json({ error: 'Plan description must contain at least one letter' });
+                }
+            }
+
+            if (planData.price !== undefined && planData.price !== null) {
+                const priceStr = planData.price.toString().trim();
+                if (!/^\d+(\.\d{1,2})?$/.test(priceStr)) {
+                    return res.status(400).json({ error: 'Price must be a valid non-negative number' });
+                }
+            }
+
+            // Validate limits
+            if (planData.limits) {
+                const { workspaces, collaborators, viewers, users } = planData.limits;
+                if ((workspaces !== undefined && workspaces !== null && (isNaN(Number(workspaces)) || Number(workspaces) < 0)) ||
+                    (collaborators !== undefined && collaborators !== null && (isNaN(Number(collaborators)) || Number(collaborators) < 0)) ||
+                    (viewers !== undefined && viewers !== null && (isNaN(Number(viewers)) || Number(viewers) < 0)) ||
+                    (users !== undefined && users !== null && (isNaN(Number(users)) || Number(users) < 0))) {
+                    return res.status(400).json({ error: 'Plan limits must be non-negative numbers' });
                 }
             }
 
