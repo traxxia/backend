@@ -1,6 +1,7 @@
 const StripeService = require('../services/stripeService');
 const CompanyModel = require('../models/companyModel');
 const { getDB } = require('../config/database');
+const TierService = require('../services/tierService');
 
 class WebhookController {
     static async handleWebhook(req, res) {
@@ -35,10 +36,14 @@ class WebhookController {
                         : new Date();
                     const periodEnd = stripeSub.current_period_end
                         ? new Date(stripeSub.current_period_end * 1000)
-                        : (() => {
-                            const d = new Date();
-                            d.setMonth(d.getMonth() + 1);
-                            return d;
+                        : await (async () => {
+                            const company = await db.collection('companies').findOne({ stripe_subscription_id: stripeSub.id });
+                            let interval = 'month';
+                            if (company && company.plan_id) {
+                                const plan = await db.collection('plans').findOne({ _id: new ObjectId(company.plan_id) });
+                                if (plan) interval = plan.interval || plan.period || 'month';
+                            }
+                            return TierService.calculateExpiryDate(new Date(), interval);
                         })();
 
                     const result = await CompanyModel.updateSubscriptionByStripeId(stripeSub.id, {
@@ -68,7 +73,8 @@ class WebhookController {
                         });
 
                         if (company) {
-                            const amount = (invoice.amount_paid || invoice.total || 0) / 100;
+                            // Use actual amount paid, with a fallback to invoice total
+                            const amount = (invoice.amount_paid !== undefined ? invoice.amount_paid : (invoice.total || 0)) / 100;
                             console.log(`[Webhook] Final Amount to Log: $${amount} for ${company.company_name}`);
 
                             await db.collection('billing_history').insertOne({
@@ -82,6 +88,24 @@ class WebhookController {
                                 invoice_url: invoice.hosted_invoice_url
                             });
                             console.log(`[Webhook] Billing entry created.`);
+
+                            // Re-snapshot plan limits on renewal so the customer receives
+                            // any plan changes that were made since their last subscription.
+                            if (company.plan_id) {
+                                const { ObjectId } = require('mongodb');
+                                const planObjId = typeof company.plan_id === 'string'
+                                    ? new ObjectId(company.plan_id)
+                                    : company.plan_id;
+                                const plan = await db.collection('plans').findOne({ _id: planObjId });
+                                if (plan) {
+                                    const planSnapshot = TierService.buildPlanSnapshot(plan);
+                                    await db.collection('companies').updateOne(
+                                        { _id: company._id },
+                                        { $set: { plan_snapshot: planSnapshot } }
+                                    );
+                                    console.log(`[Webhook] Plan snapshot refreshed for ${company.company_name}.`);
+                                }
+                            }
                         } else {
                             console.warn(`[Webhook] Company not found for customer ${invoice.customer}`);
                         }

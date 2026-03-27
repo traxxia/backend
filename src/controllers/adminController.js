@@ -7,6 +7,8 @@ const AuditModel = require("../models/auditModel");
 const QuestionModel = require("../models/questionModel");
 const BusinessModel = require("../models/businessModel");
 const ConversationModel = require("../models/conversationModel");
+const AnswerModel = require("../models/answerModel");
+const AnalysisModel = require("../models/analysisModel");
 const TierService = require('../services/tierService');
 const blobService = require("../services/blobService");
 
@@ -31,8 +33,15 @@ class AdminController {
         if (displayLogo && displayLogo.includes('blob.core.windows.net')) {
           displayLogo = `/api/admin/companies/${company._id}/logo/display`;
         }
+        const isManualAccount = TierService.isStripeAccountNull(company);
+        let displayStatus = company.status;
+        if (isManualAccount && displayStatus === 'expired') {
+          displayStatus = 'active';
+        }
+
         return {
           ...company,
+          status: displayStatus,
           logo: displayLogo,
           admin_name: company.admin_name || "No Admin Assigned",
           admin_email: company.admin_email || "No Email",
@@ -62,6 +71,7 @@ class AdminController {
         admin_name,
         admin_email,
         admin_password,
+        plan_id
       } = req.body;
 
       if (!company_name || !admin_name || !admin_email || !admin_password) {
@@ -81,11 +91,29 @@ class AdminController {
         return res.status(400).json({ error: "Company with this name already exists" })
       }
 
-      let logoUrl = null;
+      const db = getDB();
+      const companyData = {
+        company_name,
+        company_name_normalized: normalizedCompanyName,
+        industry: industry || "",
+        size: size || "",
+        logo: null,
+      };
+
+      if (plan_id && ObjectId.isValid(plan_id)) {
+        const planIdObj = new ObjectId(plan_id);
+        const planDoc = await db.collection('plans').findOne({ _id: planIdObj });
+        if (planDoc) {
+          companyData.plan_id = planIdObj;
+          companyData.subscription_plan = planDoc.name;
+          companyData.plan_snapshot = TierService.buildPlanSnapshot(planDoc);
+        }
+      }
+
       if (req.file) {
         try {
           const blobName = `company_logo_${Date.now()}_${req.file.originalname}`;
-          logoUrl = await blobService.uploadBuffer(
+          companyData.logo = await blobService.uploadBuffer(
             blobName,
             req.file.buffer,
             req.file.mimetype
@@ -98,15 +126,8 @@ class AdminController {
         }
       }
 
-      const companyId = await CompanyModel.create({
-        company_name,
-        company_name_normalized: normalizedCompanyName,
-        industry: industry || "",
-        size: size || "",
-        logo: logoUrl,
-      });
+      const companyId = await CompanyModel.create(companyData);
 
-      const db = getDB();
       const companyAdminRole = await db
         .collection("roles")
         .findOne({ role_name: "company_admin" });
@@ -197,19 +218,8 @@ class AdminController {
       // Tier check: Check how many users (collaborators/others) this company already has
       const db = getDB();
       const currentUsersCount = await db.collection('users').countDocuments({ company_id: companyId });
-      const userTier = await TierService.getUserTier(req.user._id);
-      const limits = TierService.getTierLimits(userTier);
-
-      // For essential plan, max_collaborators is 0. 
-      // Total users allowed might be 1 (the owner/admin).
-      // We'll use max_collaborators + 1 (the admin) as the limit for total users if needed, 
-      // or specifically check if they are trying to add a collaborator.
-
-      if (userTier === 'essential' && currentUsersCount >= 1) {
-        return res.status(403).json({
-          error: "Your current plan doesn't support adding more users. Upgrade to Advanced to expand your team."
-        });
-      }
+      // Use snapshotted limits so existing customers keep their purchased limits
+      const limits = await TierService.getCompanyLimits(companyId);
 
       const allowedRoles = ["user", "viewer", "collaborator"];
 
@@ -229,7 +239,7 @@ class AdminController {
           ? role.toLowerCase()
           : "user";
 
-      if (finalRoleName === 'collaborator', 'user', 'viewer') {
+      if (finalRoleName === 'collaborator') {
         const currentCollaboratorsCount = await db.collection('users').aggregate([
           { $match: { company_id: companyId } },
           {
@@ -241,14 +251,62 @@ class AdminController {
             }
           },
           { $unwind: '$role' },
-          { $match: { 'role.role_name': { $in: ['collaborator', 'user', 'viewer'] } } },
+          { $match: { 'role.role_name': 'collaborator' } },
           { $count: 'count' }
         ]).toArray();
 
         const count = currentCollaboratorsCount[0]?.count || 0;
-        if (count >= limits.max_collaborators) {
+        if (count >= (limits.max_collaborators ?? 0)) {
           return res.status(403).json({
-            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed.`
+            error: `Collaborator limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_collaborators ?? 0} collaborator(s) allowed. Upgrade your plan if you need more seats.`
+          });
+        }
+      }
+
+      if (finalRoleName === 'viewer') {
+        const currentViewersCount = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'viewer' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const viewerCount = currentViewersCount[0]?.count || 0;
+        if (viewerCount >= (limits.max_viewers ?? 0)) {
+          return res.status(403).json({
+            error: `Viewer limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_viewers ?? 0} viewer(s) allowed. Upgrade your plan if you need more viewer seats.`
+          });
+        }
+      }
+
+      if (finalRoleName === 'user') {
+        const currentUsersWithUserRole = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'user' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const userCount = currentUsersWithUserRole[0]?.count || 0;
+        if (userCount >= (limits.max_users ?? 0)) {
+          return res.status(403).json({
+            error: `User limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`
           });
         }
       }
@@ -315,10 +373,12 @@ class AdminController {
       const db = getDB();
       const companyId = targetUser.company_id;
 
-      const userTier = await TierService.getUserTier(req.user._id); // Assuming the updating admin's tier is the company's tier
-      const limits = TierService.getTierLimits(userTier);
+      // Use snapshotted limits so existing customers keep their purchased limits
+      const limits = await TierService.getCompanyLimits(companyId);
 
-      if (role.toLowerCase() === 'collaborator') {
+      const normalizedRole = role.toLowerCase();
+
+      if (normalizedRole === 'collaborator') {
         const currentCollaboratorsCount = await db.collection('users').aggregate([
           { $match: { company_id: companyId } },
           {
@@ -335,13 +395,59 @@ class AdminController {
         ]).toArray();
 
         const count = currentCollaboratorsCount[0]?.count || 0;
-        if (count >= limits.max_collaborators) {
+        if (count >= (limits.max_collaborators ?? 0)) {
           return res.status(403).json({
-            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed.`
+            error: `Collaborator limit reached for your current plan. Maximum ${limits.max_collaborators ?? 0} collaborator(s) allowed. Upgrade your plan if you need more seats.`
+          });
+        }
+      }
+       if (normalizedRole === 'viewer') {
+        const currentViewersCount = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'viewer' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const viewerCount = currentViewersCount[0]?.count || 0;
+        if (viewerCount >= (limits.max_viewers ?? 0)) {
+          return res.status(403).json({
+            error: `Viewer limit reached for your current plan. Maximum ${limits.max_viewers ?? 0} viewer(s) allowed. Upgrade your plan if you need more seats.`
           });
         }
       }
 
+      if (normalizedRole === 'user') {
+        const currentUsersWithUserRole = await db.collection('users').aggregate([
+          { $match: { company_id: companyId } },
+          {
+            $lookup: {
+              from: 'roles',
+              localField: 'role_id',
+              foreignField: '_id',
+              as: 'role'
+            }
+          },
+          { $unwind: '$role' },
+          { $match: { 'role.role_name': 'user' } },
+          { $count: 'count' }
+        ]).toArray();
+
+        const userCount = currentUsersWithUserRole[0]?.count || 0;
+        if (userCount >= (limits.max_users ?? 0)) {
+          return res.status(403).json({
+            error: `User limit reached for your current plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`
+          });
+        }
+      }
       await UserModel.updateRole(user_id, role.toLowerCase());
 
       return res.json({
@@ -383,7 +489,8 @@ class AdminController {
             $or: [
               { user_id: { $in: userIds } },
               { company_id: filter.company_id } // Some businesses might have company_id directly
-            ]
+            ],
+            status: { $ne: 'deleted' }
           }
         },
         {
@@ -770,8 +877,23 @@ class AdminController {
         await ConversationModel.findByFilter(conversationFilter);
       const phaseAnalysis =
         await ConversationModel.findByFilter(phaseAnalysisFilter);
+      const savedAnalyses = business_id && ObjectId.isValid(business_id)
+        ? await AnalysisModel.getAll(business_id)
+        : [];
       const businesses = await BusinessModel.findByUserId(targetUserId);
       const questionsFetch = await QuestionModel.findAll({ is_active: true });
+
+      // Fetch saved answers from the answers collection (Source of Truth)
+      const savedAnswers = business_id && ObjectId.isValid(business_id)
+        ? await AnswerModel.getByBusinessId(business_id)
+        : [];
+
+      const savedAnswerMap = new Map();
+      savedAnswers.forEach(ans => {
+        if (ans.question_id) {
+          savedAnswerMap.set(ans.question_id.toString(), ans.answer);
+        }
+      });
 
       // Explicitly sort questions by phase priority and then by order
       const phasePriority = { initial: 1, essential: 2, advanced: 3 };
@@ -900,9 +1022,18 @@ class AdminController {
                 is_followup: entry.is_followup || false,
                 is_edited: entry.metadata?.is_edit === true,
               });
-              finalAnswer = entry.answer_text;
+              
+              // Use user answer as fallback if no saved answer in 'answers' collection
+              if (!savedAnswerMap.has(question._id.toString())) {
+                finalAnswer = entry.answer_text;
+              }
             }
           });
+
+          // Priority: 1. Saved Answer from 'answers' collection, 2. Final answer from conversation
+          if (savedAnswerMap.has(question._id.toString())) {
+            finalAnswer = savedAnswerMap.get(question._id.toString());
+          }
 
           const statusEntries = questionConvs.filter(
             (c) => c.metadata && c.metadata.is_complete !== undefined
@@ -914,8 +1045,10 @@ class AdminController {
               )[0]
               : null;
           const isComplete = latestStatusEntry?.metadata?.is_complete || false;
+          const hasSavedAnswer = savedAnswerMap.has(question._id.toString());
 
-          if (isComplete && finalAnswer) {
+          // Show in history if it's marked complete OR if it has a saved answer in 'answers' collection
+          if ((isComplete || hasSavedAnswer) && finalAnswer) {
             phaseData.questions.push({
               question: question.question_text,
               answer: finalAnswer,
@@ -998,6 +1131,39 @@ class AdminController {
         }
       });
 
+      // Merge saved analyses from Analysis collection (NEW source of truth)
+      savedAnalyses.forEach((saved) => {
+        const analysisPhase = saved.phase || "initial";
+        const analysisType = saved.analysis_type || "unknown";
+
+        if (!analysisResultsByPhase[analysisPhase]) {
+          analysisResultsByPhase[analysisPhase] = {
+            phase: analysisPhase,
+            analyses: [],
+          };
+        }
+
+        const existingIndex = analysisResultsByPhase[
+          analysisPhase
+        ].analyses.findIndex((a) => a.analysis_type === analysisType);
+
+        const analysisData = {
+          analysis_type: analysisType,
+          analysis_name: saved.analysis_name || `${analysisType.toUpperCase()} Analysis`,
+          analysis_data: saved.analysis_data,
+          created_at: saved.created_at,
+          phase: analysisPhase,
+          id: saved._id
+        };
+
+        if (existingIndex !== -1) {
+          // Priority: analysis collection record is newer or preferred over conversation
+          analysisResultsByPhase[analysisPhase].analyses[existingIndex] = analysisData;
+        } else {
+          analysisResultsByPhase[analysisPhase].analyses.push(analysisData);
+        }
+      });
+
       const systemAnalysis = [];
       Object.values(analysisResultsByPhase).forEach((phaseResult) => {
         phaseResult.analyses.forEach((analysis) => {
@@ -1055,51 +1221,17 @@ class AdminController {
         };
       });
 
-      // Calculate statistics
+      // Calculate statistics using saved answers as the Source of Truth
       const totalQuestions = questions.length;
-      const completedQuestions = conversationPhases.reduce(
-        (sum, phase) => sum + phase.questions.length,
-        0
-      );
+      const completedQuestions = business_id 
+        ? savedAnswers.length 
+        : conversationPhases.reduce((sum, phase) => sum + phase.questions.length, 0);
 
       // Enhanced businesses with statistics
       const enhancedBusinesses = await Promise.all(
         businesses.map(async (business) => {
-          const businessConversations = await ConversationModel.findByFilter({
-            user_id: targetUserId,
-            business_id: business._id,
-            conversation_type: "question_answer",
-          });
-
-          const businessQuestionStats = {};
-
-          businessConversations.forEach((conv) => {
-            if (conv.question_id) {
-              const questionId = conv.question_id.toString();
-
-              if (!businessQuestionStats[questionId]) {
-                businessQuestionStats[questionId] = {
-                  hasAnswers: false,
-                  isComplete: false,
-                  answerCount: 0,
-                };
-              }
-
-              if (conv.answer_text && conv.answer_text.trim() !== "") {
-                businessQuestionStats[questionId].hasAnswers = true;
-                businessQuestionStats[questionId].answerCount++;
-              }
-
-              if (conv.metadata && conv.metadata.is_complete === true) {
-                businessQuestionStats[questionId].isComplete =
-                  businessQuestionStats[questionId].isComplete = true;
-              }
-            }
-          });
-
-          const completedQuestionsForBusiness = Object.values(
-            businessQuestionStats
-          ).filter((stat) => stat.isComplete || stat.hasAnswers).length;
+          const businessSavedAnswers = await AnswerModel.getByBusinessId(business._id);
+          const completedQuestionsForBusiness = businessSavedAnswers.length;
 
           const progressPercentage =
             totalQuestions > 0
@@ -1121,10 +1253,7 @@ class AdminController {
               completed_questions: completedQuestionsForBusiness,
               pending_questions: totalQuestions - completedQuestionsForBusiness,
               progress_percentage: progressPercentage,
-              total_answers_given: Object.values(businessQuestionStats).reduce(
-                (sum, stat) => sum + stat.answerCount,
-                0
-              ),
+              total_answers_given: businessSavedAnswers.length,
             },
           };
 

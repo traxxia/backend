@@ -20,7 +20,10 @@ class BusinessModel {
 
   static async findByUserId(userId) {
     return await this.collection()
-      .find({ user_id: new ObjectId(userId) })
+      .find({ 
+        user_id: new ObjectId(userId),
+        status: { $ne: 'deleted' }
+      })
       .sort({ created_at: -1 })
       .toArray();
   }
@@ -33,8 +36,33 @@ class BusinessModel {
     return await this.collection()
       .find({
         user_id: { $in: userIds },
+        status: { $ne: 'deleted' }
       })
       .sort({ created_at: -1 })
+      .toArray();
+  }
+  
+  static async findDeletedByUserId(userId) {
+    return await this.collection()
+      .find({ 
+        user_id: new ObjectId(userId),
+        status: 'deleted'
+      })
+      .sort({ deleted_at: -1 })
+      .toArray();
+  }
+
+  static async findDeletedByUserIds(userIds) {
+    if (!Array.isArray(userIds) || userIds.length === 0) {
+      return [];
+    }
+
+    return await this.collection()
+      .find({
+        user_id: { $in: userIds },
+        status: 'deleted'
+      })
+      .sort({ deleted_at: -1 })
       .toArray();
   }
 
@@ -54,14 +82,50 @@ class BusinessModel {
 
   static async findByCollaborator(userId) {
     return await this.collection()
-      .find({ collaborators: new ObjectId(userId) })
+      .find({ 
+        collaborators: new ObjectId(userId),
+        status: { $ne: 'deleted' }
+      })
       .sort({ created_at: -1 })
       .toArray();
   }
 
+  static async findDeletedByCollaborator(userId) {
+    return await this.collection()
+      .find({ 
+        collaborators: new ObjectId(userId),
+        status: 'deleted'
+      })
+      .sort({ deleted_at: -1 })
+      .toArray();
+  }
+
   static async countByUserId(userId) {
+    const idStr = userId.toString();
+    const userIdFilter = { $in: [new ObjectId(idStr), idStr] };
     return await this.collection().countDocuments({
-      user_id: new ObjectId(userId),
+      user_id: userIdFilter,
+      status: { $ne: 'deleted' }
+    });
+  }
+
+  static async countByCompanyId(companyId) {
+    const db = getDB();
+    const companyIdStr = companyId.toString();
+    const companyIdFilter = { $in: [new ObjectId(companyIdStr), companyIdStr] };
+
+    // To count businesses for a company, we find all users in that company 
+    // and count businesses owned by them.
+    const companyUsers = await db.collection('users').find({
+      company_id: companyIdFilter
+    }).project({ _id: 1 }).toArray();
+
+    const companyUserIds = companyUsers.map(u => u._id);
+    const companyUserIdStrs = companyUsers.map(u => u._id.toString());
+    const allUserIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
+
+    return await this.collection().countDocuments({
+      user_id: { $in: allUserIds },
       status: { $ne: 'deleted' }
     });
   }

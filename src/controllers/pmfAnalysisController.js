@@ -1,6 +1,7 @@
 const { ObjectId } = require("mongodb");
 const PMFAnalysisModel = require("../models/pmfAnalysisModel");
 const PMFExecutiveSummaryModel = require("../models/pmfExecutiveSummaryModel");
+const UserModel = require("../models/userModel");
 
 class PMFAnalysisController {
     static async saveOnboardingData(req, res) {
@@ -10,6 +11,18 @@ class PMFAnalysisController {
 
             if (!businessId || !onboardingData) {
                 return res.status(400).json({ error: "Business ID and onboarding data are required" });
+            }
+
+            const existingAnalysis = await PMFAnalysisModel.findByBusinessId(businessId);
+            if (existingAnalysis && existingAnalysis.onboarding_data) {
+                let userName = "Another user";
+                if (existingAnalysis.user_id) {
+                    const user = await UserModel.findById(existingAnalysis.user_id);
+                    if (user) {
+                        userName = user.name || user.email || "Another user";
+                    }
+                }
+                return res.status(400).json({ error: `${userName} has already started pmf` });
             }
 
             await PMFAnalysisModel.upsertOnboardingData(businessId, userId, onboardingData);

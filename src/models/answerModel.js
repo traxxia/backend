@@ -12,6 +12,34 @@ class AnswerModel {
     return result.insertedId;
   }
 
+  static async bulkCreate(answersData) {
+    const db = getDB();
+    const formattedAnswers = answersData.map(answer => ({
+      ...answer,
+      created_at: new Date(),
+      updated_at: new Date()
+    }));
+    const result = await db.collection('answers').insertMany(formattedAnswers);
+    return result.insertedIds;
+  }
+
+  static async bulkUpdate(answersData) {
+    const db = getDB();
+    const bulkOps = answersData.map(item => ({
+      updateOne: {
+        filter: { _id: new ObjectId(item.answer_id) },
+        update: {
+          $set: {
+            answer: item.answer,
+            updated_at: new Date()
+          }
+        }
+      }
+    }));
+    if (bulkOps.length === 0) return { modifiedCount: 0 };
+    return await db.collection('answers').bulkWrite(bulkOps);
+  }
+
   static async getById(id) {
     const db = getDB();
     return await db.collection('answers').findOne({ _id: new ObjectId(id) });

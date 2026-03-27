@@ -2,6 +2,7 @@ const { ObjectId } = require("mongodb");
 const BusinessModel = require("../models/businessModel");
 const UserModel = require("../models/userModel");
 const ConversationModel = require("../models/conversationModel");
+const AnswerModel = require("../models/answerModel");
 const QuestionModel = require("../models/questionModel");
 const ProjectModel = require("../models/projectModel");
 const ProjectRankingModel = require("../models/projectRankingModel")
@@ -10,7 +11,6 @@ const { getDB } = require("../config/database")
 const TierService = require("../services/tierService");
 
 const {
-  MAX_BUSINESSES_PER_USER,
   ALLOWED_PHASES,
 } = require("../config/constants");
 
@@ -82,9 +82,11 @@ class BusinessController {
 
       let owned = [];
       let collabs = [];
+      let deletedOwned = [];
+      let deletedCollabs = [];
 
       if (
-        ["company_admin", "viewer"].includes(req.user.role.role_name) &&
+        ["company_admin"].includes(req.user.role.role_name) &&
         !user_id
       ) {
         const companyUsers = await UserModel.getAll({
@@ -95,9 +97,15 @@ class BusinessController {
 
         owned = await BusinessModel.findByUserIds(companyUserIds);
         collabs = await BusinessModel.findByCollaborator(req.user._id);
+
+        deletedOwned = await BusinessModel.findDeletedByUserIds(companyUserIds);
+        deletedCollabs = await BusinessModel.findDeletedByCollaborator(req.user._id);
       } else {
         owned = await BusinessModel.findByUserId(targetUserId);
         collabs = await BusinessModel.findByCollaborator(targetUserId);
+
+        deletedOwned = await BusinessModel.findDeletedByUserId(targetUserId);
+        deletedCollabs = await BusinessModel.findDeletedByCollaborator(targetUserId);
       }
 
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
@@ -105,21 +113,27 @@ class BusinessController {
         (b) => !ownedIds.has(b._id.toString())
       );
 
+      const deletedOwnedIds = new Set(deletedOwned.map((b) => b._id.toString()));
+      const deleted_collaborating = deletedCollabs.filter(
+        (b) => !deletedOwnedIds.has(b._id.toString())
+      );
+
       // check business with started projects
-      const allBusinesses = [...owned, ...collaborating_businesses];
-      const businessIds = allBusinesses.map((b) => new ObjectId(b._id));
+      const allActiveBusinesses = [...owned, ...collaborating_businesses];
+      const allDeletedBusinesses = [...deletedOwned, ...deleted_collaborating];
+      const allBusinessIds = [...allActiveBusinesses, ...allDeletedBusinesses].map((b) => new ObjectId(b._id));
 
       const businessesWithProjects = await ProjectModel.collection().distinct(
         "business_id",
         {
-          business_id: { $in: businessIds },
+          business_id: { $in: allBusinessIds },
         }
       );
 
       const businessesWithLaunchedProjects = await ProjectModel.collection().distinct(
         "business_id",
         {
-          business_id: { $in: businessIds },
+          business_id: { $in: allBusinessIds },
           launch_status: "launched"
         }
       );
@@ -165,27 +179,21 @@ class BusinessController {
       const enhance = async (businessList) => {
         return Promise.all(
           businessList.map(async (business) => {
-            const conversations = await ConversationModel.findByFilter({
-              user_id: business.user_id,
-              business_id: business._id,
-              conversation_type: "question_answer",
-            });
+            const answers = await AnswerModel.getByBusinessId(business._id);
 
             const questionStats = {};
-            conversations.forEach((conv) => {
-              if (conv.question_id) {
-                const qid = conv.question_id.toString();
+            answers.forEach((ans) => {
+              if (ans.question_id) {
+                const qid = ans.question_id.toString();
                 if (!questionStats[qid])
                   questionStats[qid] = {
                     hasAnswers: false,
                     isComplete: false,
                     answerCount: 0,
                   };
-                if (conv.answer_text && conv.answer_text.trim() !== "") {
+                if (ans.answer && ans.answer.trim() !== "") {
                   questionStats[qid].hasAnswers = true;
                   questionStats[qid].answerCount++;
-                }
-                if (conv.metadata && conv.metadata.is_complete === true) {
                   questionStats[qid].isComplete = true;
                 }
               }
@@ -252,6 +260,8 @@ class BusinessController {
 
       const enhancedOwned = await enhance(owned);
       const enhancedCollaborating = await enhance(collaborating_businesses);
+      const enhancedDeletedOwned = await enhance(deletedOwned);
+      const enhancedDeletedCollaborating = await enhance(deleted_collaborating);
 
       //       console.log("DEBUG companyAdminIds:", companyAdminIds);
       // console.log("DEBUG targetUserId:", targetUserId.toString());
@@ -261,6 +271,7 @@ class BusinessController {
       res.json({
         businesses: enhancedOwned,
         collaborating_businesses: enhancedCollaborating,
+        deleted_businesses: [...enhancedDeletedOwned, ...enhancedDeletedCollaborating],
         overall_stats: {
           total_businesses: owned.filter(b => b.status !== 'deleted').length,
           total_questions_in_system: totalQuestions,
@@ -313,27 +324,21 @@ class BusinessController {
         phase: { $in: ALLOWED_PHASES },
       });
 
-      const conversations = await ConversationModel.findByFilter({
-        user_id: business.user_id,
-        business_id: business._id,
-        conversation_type: "question_answer",
-      });
+      const answers = await AnswerModel.getByBusinessId(business._id);
 
       const questionStats = {};
-      conversations.forEach((conv) => {
-        if (conv.question_id) {
-          const qid = conv.question_id.toString();
+      answers.forEach((ans) => {
+        if (ans.question_id) {
+          const qid = ans.question_id.toString();
           if (!questionStats[qid])
             questionStats[qid] = {
               hasAnswers: false,
               isComplete: false,
               answerCount: 0,
             };
-          if (conv.answer_text && conv.answer_text.trim() !== "") {
+          if (ans.answer && ans.answer.trim() !== "") {
             questionStats[qid].hasAnswers = true;
             questionStats[qid].answerCount++;
-          }
-          if (conv.metadata && conv.metadata.is_complete === true) {
             questionStats[qid].isComplete = true;
           }
         }
@@ -433,20 +438,22 @@ class BusinessController {
           .json({ error: "Country must be at least 2 characters long" });
       }
 
-      if (req.user.role.role_name === "collaborator" || req.user.role.role_name === "user") {
+      if (req.user.role.role_name === "collaborator") {
         return res.status(403).json({
           error: "Collaborators cannot create businesses. Please contact your admin."
         });
       }
 
-      const tierName = await TierService.getUserTier(req.user._id);
-      const limits = TierService.getTierLimits(tierName);
-      const existingCount = await BusinessModel.countByUserId(req.user._id);
+      const limits = await TierService.getCompanyLimits(req.user.company_id);
+      const existingCount = await BusinessModel.countByCompanyId(req.user.company_id);
 
       if (existingCount >= limits.max_workspaces) {
-        const upgradeMsg = tierName === 'essential' ? ' Upgrade to Advanced for more workspaces.' : '';
         return res.status(403).json({
-          error: `Workspace limit reached for ${tierName} plan. Maximum ${limits.max_workspaces} workspace(s) allowed.${upgradeMsg}`
+          error: `Workspace limit reached. Maximum ${limits.max_workspaces} workspace(s) allowed. Please upgrade your plan to create more.`,
+          plan: limits.plan_name,
+          limits: {
+            max_workspaces: limits.max_workspaces
+          }
         });
       }
 
@@ -631,15 +638,15 @@ class BusinessController {
       const collaboratorIds = business.collaborators || [];
 
       const db = getDB();
-      const collaboratorRole = await db.collection("roles").findOne({ role_name: "collaborator" });
-      if (!collaboratorRole) {
-        return res.status(404).json({ error: "Collaborator role not found" });
-      }
-      const collaboratorRoleId = collaboratorRole._id;
+      const roles = await db.collection("roles").find({ 
+        role_name: { $in: ["collaborator", "user"] } 
+      }).toArray();
+      
+      const roleIds = roles.map(r => r._id);
 
       const collaborators = await UserModel.getAll({
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) },
-        role_id: collaboratorRoleId
+        role_id: { $in: roleIds }
       });
 
       const response = collaborators.map(u => ({
@@ -651,54 +658,6 @@ class BusinessController {
     } catch (err) {
       console.error("GET collaborators error:", err);
       res.status(500).json({ error: "Failed to fetch collaborators" });
-    }
-  }
-
-  static async getEligibleOwners(req, res) {
-    try {
-      const businessId = req.params.id;
-
-      if (!ObjectId.isValid(businessId)) {
-        return res.status(400).json({ error: "Invalid business id" });
-      }
-
-      const business = await BusinessModel.findById(businessId);
-      if (!business) {
-        return res.status(404).json({ error: "Business not found" });
-      }
-
-      // Check if user has access to this business
-      const isOwner = business.user_id && business.user_id.toString() === req.user._id.toString();
-      const isCollaborator = (business.collaborators || []).some(
-        (id) => id.toString() === req.user._id.toString()
-      );
-      const isAdmin = ["super_admin", "company_admin"].includes(req.user.role.role_name);
-
-      if (!isOwner && !isCollaborator && !isAdmin) {
-        return res.status(403).json({ error: "Access denied" });
-      }
-
-      const ownerId = business.user_id;
-      const collaboratorIds = business.collaborators || [];
-      const allEligibleIds = [ownerId, ...collaboratorIds];
-
-      const users = await UserModel.getAll({
-        _id: { $in: allEligibleIds.map(id => new ObjectId(id)) }
-      });
-
-      const response = users.map(u => ({
-  _id: u._id,
-  name: u.name || u.email,
-  email: u.email,
-  role: u.role_name,
-  is_business_owner: u._id.toString() === ownerId.toString(),
-  is_company_admin: u.role_name === "company_admin"
-}));
-
-      res.json({ eligible_owners: response });
-    } catch (err) {
-      console.error("GET eligible owners error:", err);
-      res.status(500).json({ error: "Failed to fetch eligible owners" });
     }
   }
 
@@ -822,39 +781,86 @@ class BusinessController {
       if (!business)
         return res.status(404).json({ error: "Business not found" });
 
-      const requesterRole = req.user.role.role_name;
-      const isAdmin = VALID_ADMIN_ROLES.includes(requesterRole);
+      if (business.status === 'deleted') {
+        return res.status(400).json({ error: "Cannot assign collaborators to a deleted business" });
+      }
 
-      const tierName = await TierService.getUserTier(req.user._id);
-      const limits = TierService.getTierLimits(tierName);
-      const currentCollaboratorsCount = (business.collaborators || []).length;
+      const requesterRole = req.user.role.role_name;
+      const isAdmin = ["super_admin", "company_admin"].includes(requesterRole);
 
       if (!isAdmin) {
         return res.status(403).json({
-          error: "Only company_admin or super_admin can assign collaborators",
+          error: "Only company_admin or super_admin can assign members",
         });
       }
 
-      if (currentCollaboratorsCount >= limits.max_collaborators) {
-        return res.status(403).json({
-          error: tierName === 'essential'
-            ? "Your current plan doesn't support collaborators. Upgrade to Advanced to add team members in the User Management panel."
-            : `Collaborator limit reached for ${tierName} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed. Manage your team in the User Management panel.`
-        });
+      // Fetch the target user to check their role
+      const targetUser = await UserModel.findById(collaboratorId);
+      if (!targetUser) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Get target user role name
+      const db = getDB();
+      const roleDoc = await db.collection("roles").findOne({ _id: targetUser.role_id });
+      const targetRoleName = roleDoc?.role_name || "viewer";
+
+      const limits = await TierService.getCompanyLimits(req.user.company_id);
+      
+      // Get all existing assigned users to count by role
+      const existingAssignedIds = (business.collaborators || []).map(id => new ObjectId(id));
+      const assignedUsers = await db.collection("users").aggregate([
+        { $match: { _id: { $in: existingAssignedIds } } },
+        {
+          $lookup: {
+            from: "roles",
+            localField: "role_id",
+            foreignField: "_id",
+            as: "role"
+          }
+        },
+        { $unwind: "$role" },
+        { $project: { _id: 1, role_name: "$role.role_name" } }
+      ]).toArray();
+
+      if (targetRoleName === "collaborator") {
+        const currentCollabCount = assignedUsers.filter(u => u.role_name === "collaborator").length;
+        if (currentCollabCount >= (limits.max_collaborators || 0)) {
+          return res.status(403).json({
+            error: `Collaborator limit reached. Maximum ${limits.max_collaborators} collaborator(s) allowed. Please upgrade your plan to add more team members.`
+          });
+        }
+      } else if (targetRoleName === "viewer") {
+        const currentViewerCount = assignedUsers.filter(u => u.role_name === "viewer").length;
+        // If there's a specific limit for viewers per business, check it here. 
+        // For now, let's use the company-wide limit as a guide or just allow more if max_viewers is high.
+        if (limits.max_viewers > 0 && currentViewerCount >= limits.max_viewers) {
+          return res.status(403).json({
+            error: `Viewer limit reached. Maximum ${limits.max_viewers} viewer(s) allowed. Please upgrade your plan.`
+          });
+        }
+      } else if (targetRoleName === "user") {
+        const currentUserCount = assignedUsers.filter(u => u.role_name === "user").length;
+        if (limits.max_users > 0 && currentUserCount >= limits.max_users) {
+          return res.status(403).json({
+            error: `User limit reached. Maximum ${limits.max_users} user(s) allowed. Please upgrade your plan.`
+          });
+        }
       }
 
       if (business.user_id && business.user_id.toString() === collaboratorId) {
         return res
           .status(400)
-          .json({ error: "Owner cannot be added as collaborator" });
+          .json({ error: "Owner cannot be added as a member" });
       }
+
       const alreadyAssigned = (business.collaborators || []).some(
         (id) => id.toString() === collaboratorId
       );
 
       if (alreadyAssigned) {
         return res.status(400).json({
-          error: "This collaborator already assigned in this business",
+          error: "This user already assigned in this business",
         });
       }
 
@@ -864,16 +870,17 @@ class BusinessController {
       );
 
       if (typeof logAuditEvent === "function") {
-        await logAuditEvent(req.user._id, "collaborator_assigned", {
+        await logAuditEvent(req.user._id, "member_assigned", {
           business_id: businessId,
-          collaborator: collaboratorId,
+          user_id: collaboratorId,
+          role: targetRoleName
         });
       }
 
-      res.json({ message: "Collaborator assigned" });
+      res.json({ message: "User assigned successfully" });
     } catch (err) {
-      console.error("Assign collaborator error:", err);
-      res.status(500).json({ error: "Failed to assign collaborator" });
+      console.error("Assign member error:", err);
+      res.status(500).json({ error: "Failed to assign member" });
     }
   }
 
