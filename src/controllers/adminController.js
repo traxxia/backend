@@ -241,7 +241,7 @@ class AdminController {
 
       if (finalRoleName === 'collaborator') {
         const currentCollaboratorsCount = await db.collection('users').aggregate([
-          { $match: { company_id: companyId } },
+          { $match: { company_id: companyId, status: { $nin: ['deleted', 'archived', 'inactive'] } } },
           {
             $lookup: {
               from: 'roles',
@@ -265,7 +265,7 @@ class AdminController {
 
       if (finalRoleName === 'viewer') {
         const currentViewersCount = await db.collection('users').aggregate([
-          { $match: { company_id: companyId } },
+          { $match: { company_id: companyId, status: { $nin: ['deleted', 'archived', 'inactive'] } } },
           {
             $lookup: {
               from: 'roles',
@@ -289,7 +289,7 @@ class AdminController {
 
       if (finalRoleName === 'user') {
         const currentUsersWithUserRole = await db.collection('users').aggregate([
-          { $match: { company_id: companyId } },
+          { $match: { company_id: companyId, status: { $nin: ['deleted', 'archived', 'inactive'] } } },
           {
             $lookup: {
               from: 'roles',
@@ -380,7 +380,7 @@ class AdminController {
 
       if (normalizedRole === 'collaborator') {
         const currentCollaboratorsCount = await db.collection('users').aggregate([
-          { $match: { company_id: companyId } },
+          { $match: { company_id: companyId, status: { $nin: ['deleted', 'archived', 'inactive'] } } },
           {
             $lookup: {
               from: 'roles',
@@ -402,8 +402,8 @@ class AdminController {
         }
       }
        if (normalizedRole === 'viewer') {
-        const currentViewersCount = await db.collection('users').aggregate([
-          { $match: { company_id: companyId } },
+         const currentViewersCount = await db.collection('users').aggregate([
+          { $match: { company_id: companyId, status: { $nin: ['deleted', 'archived', 'inactive'] } } },
           {
             $lookup: {
               from: 'roles',
@@ -427,7 +427,7 @@ class AdminController {
 
       if (normalizedRole === 'user') {
         const currentUsersWithUserRole = await db.collection('users').aggregate([
-          { $match: { company_id: companyId } },
+          { $match: { company_id: companyId, status: { $nin: ['deleted', 'archived', 'inactive'] } } },
           {
             $lookup: {
               from: 'roles',

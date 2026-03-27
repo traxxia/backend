@@ -810,7 +810,7 @@ class BusinessController {
       // Get all existing assigned users to count by role
       const existingAssignedIds = (business.collaborators || []).map(id => new ObjectId(id));
       const assignedUsers = await db.collection("users").aggregate([
-        { $match: { _id: { $in: existingAssignedIds } } },
+        { $match: { _id: { $in: existingAssignedIds }, status: { $nin: ['deleted', 'archived', 'inactive'] } } },
         {
           $lookup: {
             from: "roles",

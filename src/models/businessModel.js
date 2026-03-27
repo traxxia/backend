@@ -105,7 +105,7 @@ class BusinessModel {
     const userIdFilter = { $in: [new ObjectId(idStr), idStr] };
     return await this.collection().countDocuments({
       user_id: userIdFilter,
-      status: { $ne: 'deleted' }
+      status: { $nin: ['deleted', 'archived', 'inactive'] }
     });
   }
 
@@ -126,7 +126,7 @@ class BusinessModel {
 
     return await this.collection().countDocuments({
       user_id: { $in: allUserIds },
-      status: { $ne: 'deleted' }
+      status: { $nin: ['deleted', 'archived', 'inactive'] }
     });
   }
 
