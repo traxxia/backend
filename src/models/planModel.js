@@ -37,8 +37,8 @@ class PlanModel {
   static async create(planData) {
     const db = getDB();
     const result = await db.collection('plans').insertOne({
-      ...planData,
       status: 'active',
+      ...planData,
       created_at: new Date()
     });
     return result.insertedId;
