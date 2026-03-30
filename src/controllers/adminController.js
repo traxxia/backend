@@ -306,7 +306,8 @@ class AdminController {
         const userCount = currentUsersWithUserRole[0]?.count || 0;
         if (userCount >= (limits.max_users ?? 0)) {
           return res.status(403).json({
-            error: `User limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`
+            error: `User limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`,
+            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed.`
           });
         }
       }
