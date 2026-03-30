@@ -379,10 +379,16 @@ class ProjectController {
       res.json({
         total,
         count: projects.length,
-        projects: projects.map(p => ({
-          ...p,
-          is_stale: isProjectStale(p.next_review_date)
-        })),
+        projects: projects.map(p => {
+          const actualCadence = p.review_cadence || "Monthly";
+          const nextReview = p.next_review_date || calculateNextReviewDate(p.last_reviewed || p.created_at, actualCadence);
+          return {
+            ...p,
+            review_cadence: actualCadence,
+            next_review_date: nextReview,
+            is_stale: p.launch_status === 'launched' ? isProjectStale(nextReview) : false
+          };
+        }),
         business_status: businessStatus,
         business_access_mode: businessAccessMode,
         ranking_lock_summary,
@@ -404,7 +410,12 @@ class ProjectController {
       if (!raw) return res.status(404).json({ error: "Project not found" });
 
       const [project] = await ProjectModel.populateCreatedBy(raw);
-      project.is_stale = isProjectStale(project.next_review_date);
+      
+      const actualCadence = project.review_cadence || "Monthly";
+      const nextReview = project.next_review_date || calculateNextReviewDate(project.last_reviewed || project.created_at, actualCadence);
+      project.review_cadence = actualCadence;
+      project.next_review_date = nextReview;
+      project.is_stale = project.launch_status === 'launched' ? isProjectStale(nextReview) : false;
 
       const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames([project]);
       project.accountable_owner = ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap);
@@ -985,7 +996,7 @@ class ProjectController {
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
-      project.is_stale = isProjectStale(project.next_review_date);
+      project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
       res.json({
         message: "Project updated successfully",
@@ -1434,8 +1445,11 @@ class ProjectController {
 
       const responseProjects = ordered.map(({ ranking, project: rawProject }) => {
         const project = populatedProjects.find(p => p._id.toString() === rawProject._id.toString()) || rawProject;
+        const actualCadence = project.review_cadence || "Monthly";
+        const nextReview = project.next_review_date || calculateNextReviewDate(project.last_reviewed || project.created_at, actualCadence);
         return {
           ...project,
+          review_cadence: actualCadence,
           project_id: project._id,
           project_name: project.project_name,
           accountable_owner: ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap),
@@ -1444,7 +1458,8 @@ class ProjectController {
           locked: ranking.locked || false,
           ai_rank: project.ai_rank || null,
           ai_rank_score: project.ai_rank_score || null,
-          is_stale: isProjectStale(project.next_review_date),
+          next_review_date: nextReview,
+          is_stale: project.launch_status === 'launched' ? isProjectStale(nextReview) : false,
         };
       });
 
@@ -1499,16 +1514,20 @@ class ProjectController {
       const unranked = [];
 
       populatedProjects.forEach(p => {
+        const actualCadence = p.review_cadence || "Monthly";
+        const nextReview = p.next_review_date || calculateNextReviewDate(p.last_reviewed || p.created_at, actualCadence);
         const rank = rankMap[p._id.toString()] ?? null;
         const item = {
           ...p,
+          review_cadence: actualCadence,
           admin_user_id: admin_user_id,
           business_id,
           project_id: p._id,
           accountable_owner: ProjectController._resolveOwner(p, ownerNameMap, bizOwnerFallbackMap),
           rank,
           created_at: p.created_at,
-          is_stale: isProjectStale(p.next_review_date),
+          next_review_date: nextReview,
+          is_stale: p.launch_status === 'launched' ? isProjectStale(nextReview) : false,
         };
 
         if (rank !== null) {
@@ -2585,7 +2604,7 @@ class ProjectController {
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
-      project.is_stale = isProjectStale(project.next_review_date);
+      project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
       // Log the decision
       const db = getDB();
@@ -2603,6 +2622,15 @@ class ProjectController {
         timestamp: new Date()
       });
 
+      await DecisionLogModel.create({
+        project_id: new ObjectId(id),
+        changed_at: new Date(),
+        from_status: existing.status || "Draft",
+        to_status: status || existing.status || "Draft",
+        justification,
+        user_id: new ObjectId(req.user._id)
+      });
+
       res.json({ message: "Ad-hoc update processed", project });
     } catch (err) {
       console.error("ADHOC UPDATE ERR:", err);
@@ -2613,7 +2641,7 @@ class ProjectController {
   static async performReview(req, res) {
     try {
       const { id } = req.params;
-      const { status, learning_state, justification, no_changes } = req.body;
+      const { status, learning_state, justification, no_changes, decision } = req.body;
 
       if (!justification) {
         return res.status(400).json({ error: "Justification is mandatory for reviews" });
@@ -2635,10 +2663,12 @@ class ProjectController {
       }
 
       const now = new Date();
+      const actualCadence = existing.review_cadence || "Monthly";
       const updateData = {
         last_reviewed: now,
         updated_at: now,
-        next_review_date: calculateNextReviewDate(now, existing.review_cadence)
+        review_cadence: actualCadence,
+        next_review_date: calculateNextReviewDate(now, actualCadence)
       };
 
       if (!no_changes) {
@@ -2650,7 +2680,7 @@ class ProjectController {
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
-      project.is_stale = isProjectStale(project.next_review_date);
+      project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
       // Log the decision
       const db = getDB();
@@ -2669,6 +2699,15 @@ class ProjectController {
           }
         },
         timestamp: new Date()
+      });
+
+      await DecisionLogModel.create({
+        project_id: new ObjectId(id),
+        changed_at: new Date(),
+        from_status: existing.status || "Draft",
+        to_status: no_changes ? (existing.status || "Draft") : (status || existing.status || "Draft"),
+        justification: decision ? `[Cadence Review - ${decision}] ${justification}` : `[Cadence Review] ${justification}`,
+        user_id: new ObjectId(req.user._id)
       });
 
       res.json({ message: "Review processed", project });
