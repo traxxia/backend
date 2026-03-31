@@ -2637,11 +2637,10 @@ class ProjectController {
       res.status(500).json({ error: "Server error" });
     }
   }
-
   static async performReview(req, res) {
     try {
       const { id } = req.params;
-      const { status, learning_state, justification, no_changes, decision } = req.body;
+      const { status, learning_state, justification, no_changes } = req.body;
 
       if (!justification) {
         return res.status(400).json({ error: "Justification is mandatory for reviews" });
@@ -2706,7 +2705,9 @@ class ProjectController {
         changed_at: new Date(),
         from_status: existing.status || "Draft",
         to_status: no_changes ? (existing.status || "Draft") : (status || existing.status || "Draft"),
-        justification: decision ? `[Cadence Review - ${decision}] ${justification}` : `[Cadence Review] ${justification}`,
+        from_learning_state: existing.learning_state || "Testing",
+        to_learning_state: no_changes ? (existing.learning_state || "Testing") : (learning_state || existing.learning_state || "Testing"),
+        justification: `[Cadence Review] ${justification}`,
         user_id: new ObjectId(req.user._id)
       });
 
