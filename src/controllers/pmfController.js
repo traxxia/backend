@@ -47,6 +47,9 @@ class PMFController {
             }
 
             const summaryDoc = await PMFExecutiveSummaryModel.findByBusinessId(businessId);
+            const business = await BusinessModel.findById(businessId);
+            const hasCollaborators = Array.isArray(business?.collaborators) && business.collaborators.length > 0;
+
             if (!summaryDoc || !summaryDoc.summary) {
                 return res.status(404).json({ error: "Executive summary not found" });
             }
@@ -80,7 +83,7 @@ class PMFController {
                 };
             });
 
-            res.json({ priorities: kickstartData });
+            res.json({ priorities: kickstartData, hasCollaborators });
         } catch (error) {
             console.error("Error fetching kickstart data:", error);
             res.status(500).json({ error: "Failed to fetch kickstart data" });
@@ -171,11 +174,6 @@ class PMFController {
                 }
             }
 
-            if (isAdmin && (!Array.isArray(business.collaborators) || business.collaborators.length === 0)) {
-                return res.status(400).json({
-                    error: "Please add at least one collaborator before creating a project",
-                });
-            }
 
             const permissions = getProjectPermissions({
                 projectStatus: PROJECT_STATES.DRAFT,
