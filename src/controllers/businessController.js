@@ -686,21 +686,41 @@ class BusinessController {
       }
 
       const ownerId = business.user_id;
+      const ownerUser = await UserModel.findById(ownerId);
+      const companyId = ownerUser?.company_id;
+
       const collaboratorIds = business.collaborators || [];
-      const allEligibleIds = [ownerId, ...collaboratorIds];
+      
+      // Building a pool of eligible IDs
+      let queryFilter = {
+        $or: [
+          { _id: { $in: [new ObjectId(ownerId), ...collaboratorIds.map(id => new ObjectId(id))] } }
+        ]
+      };
 
-      const users = await UserModel.getAll({
-        _id: { $in: allEligibleIds.map(id => new ObjectId(id)) }
-      });
+      if (companyId) {
+        queryFilter.$or.push({ company_id: companyId });
+      }
 
-      const response = users.map(u => ({
-  _id: u._id,
-  name: u.name || u.email,
-  email: u.email,
-  role: u.role_name,
-  is_business_owner: u._id.toString() === ownerId.toString(),
-  is_company_admin: u.role_name === "company_admin"
-}));
+      const users = await UserModel.getAll(queryFilter);
+
+      // Filter: Only collaborator, user, and company_admin roles
+      // Explicitly exclude super_admin, viewer, deleted, and archived users
+      const response = users
+        .filter(u => {
+          const role = (u.role_name || '').toLowerCase();
+          const isRoleAllowed = ['collaborator', 'user', 'company_admin', 'org_admin'].includes(role);
+          const isActive = u.status !== 'deleted' && u.status !== 'inactive' && u.access_mode !== 'archived';
+          return isRoleAllowed && isActive;
+        })
+        .map(u => ({
+          _id: u._id,
+          name: u.name || u.email,
+          email: u.email,
+          role: u.role_name,
+          is_business_owner: u._id.toString() === ownerId.toString(),
+          is_company_admin: u.role_name === "company_admin"
+        }));
 
       res.json({ eligible_owners: response });
     } catch (err) {
