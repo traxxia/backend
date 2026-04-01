@@ -691,26 +691,38 @@ class BusinessController {
 
       const collaboratorIds = business.collaborators || [];
       
-      // Building a pool of eligible IDs
+      // Filter: Only owner, collaborators, and company admins (they have oversight)
+      // This ensures we are "part that particular business" context.
       let queryFilter = {
         $or: [
-          { _id: { $in: [new ObjectId(ownerId), ...collaboratorIds.map(id => new ObjectId(id))] } }
+          { _id: ownerId ? new ObjectId(ownerId) : null },
+          { _id: { $in: collaboratorIds.map(id => new ObjectId(id)) } }
         ]
       };
 
+      // Add company admins to the eligible pool if company exists
       if (companyId) {
-        queryFilter.$or.push({ company_id: companyId });
+        const db = getDB();
+        const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
+        if (companyAdminRole) {
+          queryFilter.$or.push({ 
+            company_id: companyId, 
+            role_id: companyAdminRole._id 
+          });
+        }
       }
 
       const users = await UserModel.getAll(queryFilter);
 
-      // Filter: Only collaborator, user, and company_admin roles
-      // Explicitly exclude super_admin, viewer, deleted, and archived users
+      // Filter: Only collaborator, user, and admin roles who are active
       const response = users
         .filter(u => {
           const role = (u.role_name || '').toLowerCase();
           const isRoleAllowed = ['collaborator', 'user', 'company_admin', 'org_admin'].includes(role);
+          
+          // "Active" check: not deleted, not inactive, not archived
           const isActive = u.status !== 'deleted' && u.status !== 'inactive' && u.access_mode !== 'archived';
+          
           return isRoleAllowed && isActive;
         })
         .map(u => ({
@@ -718,7 +730,7 @@ class BusinessController {
           name: u.name || u.email,
           email: u.email,
           role: u.role_name,
-          is_business_owner: u._id.toString() === ownerId.toString(),
+          is_business_owner: u._id.toString() === (ownerId?.toString() || ""),
           is_company_admin: u.role_name === "company_admin"
         }));
 
