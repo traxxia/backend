@@ -306,7 +306,8 @@ class AdminController {
         const userCount = currentUsersWithUserRole[0]?.count || 0;
         if (userCount >= (limits.max_users ?? 0)) {
           return res.status(403).json({
-            error: `User limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`
+            error: `User limit reached for your ${limits.plan_name} plan. Maximum ${limits.max_users ?? 0} user(s) allowed. Upgrade your plan if you need more seats.`,
+            error: `Collaborator limit reached for ${userTier} plan. Maximum ${limits.max_collaborators} collaborator(s) allowed.`
           });
         }
       }
@@ -1491,6 +1492,95 @@ class AdminController {
     } catch (error) {
       console.error("[serveLogo] Error serving company logo:", error);
       res.status(500).json({ error: "Failed to serve logo" });
+    }
+  }
+
+  static async getStaleProjects(req, res) {
+    try {
+      const db = getDB();
+      let filter = {};
+      
+      // If company admin, only get businesses in their company
+      if (req.user.role.role_name === "company_admin") {
+        filter.company_id = req.user.company_id;
+      } else if (req.user.role.role_name !== "super_admin") {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      // Find relevant businesses
+      let businesses;
+      if (filter.company_id) {
+         const users = await db.collection("users").find(filter).toArray();
+         const userIds = users.map(u => u._id);
+         businesses = await db.collection("user_businesses").find({
+           $or: [
+             { user_id: { $in: userIds } },
+             { company_id: filter.company_id }
+           ],
+           status: { $ne: 'deleted' }
+         }).toArray();
+      } else {
+         businesses = await db.collection("user_businesses").find({
+           status: { $ne: 'deleted' }
+         }).toArray();
+      }
+
+      const businessIds = businesses.map(b => b._id);
+      const businessMap = businesses.reduce((acc, b) => {
+        acc[b._id.toString()] = b;
+        return acc;
+      }, {});
+
+      // Find launched projects in those businesses
+      const projects = await db.collection("projects").find({
+        business_id: { $in: businessIds },
+        launch_status: 'launched'
+      }).toArray();
+
+      const { isProjectStale } = require('../utils/helpers');
+      
+      const staleProjects = [];
+      
+      for (const project of projects) {
+        if (project.next_review_date && isProjectStale(project.next_review_date)) {
+          const business = businessMap[project.business_id.toString()];
+          
+          let ownerName = "Unknown";
+          if (project.accountable_owner) {
+            ownerName = project.accountable_owner;
+          } else if (project.created_by) {
+             const user = await db.collection("users").findOne({ _id: project.created_by });
+             if (user) ownerName = user.name;
+             else if (business && business.user_id) {
+               const bUser = await db.collection("users").findOne({ _id: business.user_id });
+               if (bUser) ownerName = bUser.name;
+             }
+          }
+
+          staleProjects.push({
+            project_id: project._id,
+            project_name: project.project_name,
+            business_name: business ? business.business_name : "Unknown",
+            owner_name: ownerName,
+            review_cadence: project.review_cadence || "Not Set",
+            status: project.status || "Unknown",
+            last_reviewed: project.last_reviewed,
+            next_review_date: project.next_review_date
+          });
+        }
+      }
+
+      // Sort by next_review_date ascending (most stale first)
+      staleProjects.sort((a, b) => new Date(a.next_review_date) - new Date(b.next_review_date));
+
+      res.json({
+        stale_projects: staleProjects,
+        total_count: staleProjects.length
+      });
+
+    } catch (error) {
+      console.error("Error fetching stale projects:", error);
+      res.status(500).json({ error: "Failed to fetch stale projects" });
     }
   }
 }

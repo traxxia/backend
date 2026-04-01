@@ -661,6 +661,86 @@ class BusinessController {
     }
   }
 
+  static async getEligibleOwners(req, res) {
+    try {
+      const businessId = req.params.id;
+
+      if (!ObjectId.isValid(businessId)) {
+        return res.status(400).json({ error: "Invalid business id" });
+      }
+
+      const business = await BusinessModel.findById(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Check if user has access to this business
+      const isOwner = business.user_id && business.user_id.toString() === req.user._id.toString();
+      const isCollaborator = (business.collaborators || []).some(
+        (id) => id.toString() === req.user._id.toString()
+      );
+      const isAdmin = ["super_admin", "company_admin"].includes(req.user.role.role_name);
+
+      if (!isOwner && !isCollaborator && !isAdmin) {
+        return res.status(403).json({ error: "Access denied" });
+      }
+
+      const ownerId = business.user_id;
+      const ownerUser = await UserModel.findById(ownerId);
+      const companyId = ownerUser?.company_id;
+
+      const collaboratorIds = business.collaborators || [];
+      
+      // Filter: Only owner, collaborators, and company admins (they have oversight)
+      // This ensures we are "part that particular business" context.
+      let queryFilter = {
+        $or: [
+          { _id: ownerId ? new ObjectId(ownerId) : null },
+          { _id: { $in: collaboratorIds.map(id => new ObjectId(id)) } }
+        ]
+      };
+
+      // Add company admins to the eligible pool if company exists
+      if (companyId) {
+        const db = getDB();
+        const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
+        if (companyAdminRole) {
+          queryFilter.$or.push({ 
+            company_id: companyId, 
+            role_id: companyAdminRole._id 
+          });
+        }
+      }
+
+      const users = await UserModel.getAll(queryFilter);
+
+      // Filter: Only collaborator, user, and admin roles who are active
+      const response = users
+        .filter(u => {
+          const role = (u.role_name || '').toLowerCase();
+          const isRoleAllowed = ['collaborator', 'user', 'company_admin', 'org_admin'].includes(role);
+          
+          // "Active" check: not deleted, not inactive, not archived
+          const isActive = u.status !== 'deleted' && u.status !== 'inactive' && u.access_mode !== 'archived';
+          
+          return isRoleAllowed && isActive;
+        })
+        .map(u => ({
+          _id: u._id,
+          name: u.name || u.email,
+          email: u.email,
+          role: u.role_name,
+          is_business_owner: u._id.toString() === (ownerId?.toString() || ""),
+          is_company_admin: u.role_name === "company_admin"
+        }));
+
+      res.json({ eligible_owners: response });
+    } catch (err) {
+      console.error("GET eligible owners error:", err);
+      res.status(500).json({ error: "Failed to fetch eligible owners" });
+    }
+  }
+
   static async setAllowedCollaborators(req, res) {
     try {
       const { businessId, projectId } = req.params;
