@@ -75,12 +75,12 @@ class NotificationModel {
     });
   }
 
-  static async findExistingUnreadNotification(userId, type, projectId) {
+  static async findExistingNotificationForTarget(userId, type, projectId, targetDateStr) {
     return await this.collection().findOne({
       user_id: new ObjectId(String(userId)),
       type: type,
-      is_read: false,
-      "action_data.project_id": projectId.toString()
+      "action_data.project_id": projectId.toString(),
+      "action_data.target_date": new Date(targetDateStr).toISOString()
     });
   }
 }

@@ -3,16 +3,12 @@ const { getDB } = require('../config/database');
 const NotificationModel = require('../models/notificationModel');
 const { ObjectId } = require('mongodb');
 
-const getDaysDifference = (targetDateStr) => {
-  const target = new Date(targetDateStr);
+const getHoursDifference = (targetDate) => {
+  const target = new Date(targetDate);
   const now = new Date();
 
-  // Normalize both dates to midnight to only compare calendar days
-  const targetMidnight = new Date(target.getFullYear(), target.getMonth(), target.getDate());
-  const nowMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-
-  const diffTime = targetMidnight - nowMidnight;
-  return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  const diffTime = target.getTime() - now.getTime();
+  return diffTime / (1000 * 60 * 60);
 };
 
 const runStaleBetCheck = async () => {
@@ -32,19 +28,19 @@ const runStaleBetCheck = async () => {
 
     const projects = await db.collection("projects").find({
       launch_status: 'launched',
-      status: { $ne: 'archived' }
+      status: { $nin: ['archived', 'deleted'] }
     }).toArray();
 
     for (const project of projects) {
       if (!project.next_review_date) continue;
 
-      const diffDays = getDaysDifference(project.next_review_date);
+      const diffHours = getHoursDifference(project.next_review_date);
 
       let notificationType = null;
 
-      if (diffDays === 1) {
+      if (diffHours <= 24 && diffHours > 0) {
         notificationType = 'review_reminder';
-      } else if (diffDays <= 0) {
+      } else if (diffHours <= 0) {
         notificationType = 'stale_bet';
       }
 
@@ -53,12 +49,17 @@ const runStaleBetCheck = async () => {
         let companyId = null;
         let businessName = "Unknown Business";
 
-        const business = await db.collection("user_businesses").findOne({ _id: new ObjectId(String(project.business_id)) });
-        if (business) {
-          companyId = business.company_id;
-          ownerId = business.user_id;
-          businessName = business.business_name || businessName;
-        }
+        const business = await db.collection("user_businesses").findOne({
+          _id: new ObjectId(String(project.business_id)),
+          status: { $ne: 'deleted' }
+        });
+
+        // Skip projects if their parent business was soft-deleted
+        if (!business) continue;
+
+        companyId = business.company_id;
+        ownerId = business.user_id;
+        businessName = business.business_name || businessName;
 
         let title = '';
         let message = '';
@@ -71,8 +72,10 @@ const runStaleBetCheck = async () => {
           message = `Project "${project.project_name}" under "${businessName}" is stale and requires an immediate review.`;
         }
 
-        // Project often stores user_id for the owner
-        if (project.user_id) {
+        // Prioritize accountable_owner_id if assigned, otherwise fallback to project creator (user_id)
+        if (project.accountable_owner_id) {
+          ownerId = new ObjectId(String(project.accountable_owner_id));
+        } else if (project.user_id) {
           ownerId = new ObjectId(String(project.user_id));
         }
 
@@ -96,10 +99,11 @@ const runStaleBetCheck = async () => {
         }
 
         for (const recipientId of notificationRecipients) {
-          const existing = await NotificationModel.findExistingUnreadNotification(
+          const existing = await NotificationModel.findExistingNotificationForTarget(
             recipientId,
             notificationType,
-            project._id
+            project._id,
+            project.next_review_date
           );
 
           if (!existing) {
@@ -108,7 +112,10 @@ const runStaleBetCheck = async () => {
               type: notificationType,
               title: title,
               message: message,
-              action_data: { project_id: project._id.toString() }
+              action_data: {
+                project_id: project._id.toString(),
+                target_date: new Date(project.next_review_date).toISOString()
+              }
             });
             console.log(`[Cron] Sent ${notificationType} to user ${recipientId} for project ${project._id}`);
           }
@@ -124,6 +131,9 @@ const runStaleBetCheck = async () => {
     }
   }
 };
-cron.schedule('* * * * *', runStaleBetCheck);
+
+// For robust global timezones, the cron *must* run reliably every hour ('0 * * * *')
+// Testing phase: running every minute
+cron.schedule('0 * * * *', runStaleBetCheck);
 
 module.exports = { runStaleBetCheck };
