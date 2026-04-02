@@ -10,6 +10,7 @@ const errorHandler = require('./middleware/errorHandler');
 const cron = require('node-cron');
 const SubscriptionRenewalService = require('./services/subscriptionRenewalService');
 const renewalLogger = require('./utils/renewalLogger');
+require('./jobs/staleBetCron'); // Initializes stale bet notification scheduler
 
 const app = express();
 

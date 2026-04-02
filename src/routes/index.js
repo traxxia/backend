@@ -18,6 +18,7 @@ const pmfAnalysisRoutes = require("./pmfAnalysisRoutes")
 const pmfRoutes = require("./pmfRoutes");
 const academyFeedbackRoutes = require("./academyFeedbackRoutes");
 const answerRoutes = require("./answerRoutes");
+const notificationRoutes = require("./notificationRoutes");
 
 router.use("/api", authRoutes);
 router.use("/api/plans", planRoutes);
@@ -40,6 +41,7 @@ router.use("/api/pmf", pmfRoutes);
 router.use("/api/subscription", subscriptionRoutes);
 router.use("/api/academy-feedback", academyFeedbackRoutes);
 router.use("/api/answers", answerRoutes);
+router.use("/api/notifications", notificationRoutes);
 
 const aiChatRoutes = require('./aiChatRoutes');
 
