@@ -84,6 +84,8 @@ class UserModel {
       {
         $set: {
           role_id: roleDoc._id,
+          status: 'active',
+          access_mode: 'active',
           updated_at: new Date(),
         },
       }
