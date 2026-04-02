@@ -1,4 +1,3 @@
-const cron = require('node-cron');
 const { getDB } = require('../config/database');
 const NotificationModel = require('../models/notificationModel');
 const { ObjectId } = require('mongodb');
@@ -132,8 +131,21 @@ const runStaleBetCheck = async () => {
   }
 };
 
-// For robust global timezones, the cron *must* run reliably every hour ('0 * * * *')
-// Testing phase: running every minute
-cron.schedule('0 * * * *', runStaleBetCheck);
+const EVERY_HOUR = '0 * * * *';
+const EVERY_MINUTE = '* * * * *';
+
+// ---------------------------------------------------------
+// SCHEDULING CONFIGURATION
+// ---------------------------------------------------------
+// Using standard Javascript interval timers instead of cron asterisks.
+
+const ONE_MINUTE_MS = 60 * 1000;
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
+// Testing phase: running every 1 minute 
+setInterval(runStaleBetCheck, ONE_HOUR_MS);
+
+// Production phase: For robust checks, run every 1 hour (uncomment below)
+// setInterval(runStaleBetCheck, ONE_HOUR_MS);
 
 module.exports = { runStaleBetCheck };
