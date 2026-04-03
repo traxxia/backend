@@ -1164,8 +1164,16 @@ class ProjectController {
 
         // Check if project is already launched
         if (project.launch_status === PROJECT_LAUNCH_STATUS.LAUNCHED) {
-          results.push({ id, status: "already_launched", is_ranked: true });
-          continue;
+          // If already launched, we only allow "re-launching" if the project is currently 
+          // at-risk or paused, to move it back to active.
+          const currentStatus = (project.status || "").toLowerCase().trim();
+          const isAtRisk = currentStatus === "at risk" || currentStatus === "at_risk";
+          const isPaused = currentStatus === "paused";
+
+          if (!isAtRisk && !isPaused) {
+            results.push({ id, status: "already_launched", is_ranked: true });
+            continue;
+          }
         }
 
         // Perform launch
