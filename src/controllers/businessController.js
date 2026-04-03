@@ -657,7 +657,7 @@ class BusinessController {
 
       const db = getDB();
       const roles = await db.collection("roles").find({ 
-        role_name: { $in: ["collaborator", "user"] } 
+        role_name: { $in: ["collaborator", "user", "viewer"] } 
       }).toArray();
       
       const roleIds = roles.map(r => r._id);
