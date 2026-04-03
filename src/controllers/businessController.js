@@ -138,12 +138,24 @@ class BusinessController {
         }
       );
 
+      const businessesWithProjectGrants = await ProjectModel.collection().distinct(
+        "business_id",
+        {
+          business_id: { $in: allBusinessIds },
+          allowed_collaborators: { $exists: true, $not: { $size: 0 } }
+        }
+      );
+
       const businessHasProjectSet = new Set(
         businessesWithProjects.map((id) => id.toString())
       );
 
       const businessHasLaunchedProjectSet = new Set(
         businessesWithLaunchedProjects.map((id) => id.toString())
+      );
+
+      const businessHasProjectGrantsSet = new Set(
+        businessesWithProjectGrants.map((id) => id.toString())
       );
 
       const totalQuestions = await QuestionModel.countDocuments({
@@ -253,6 +265,8 @@ class BusinessController {
               access,
               has_projects: businessHasProjectSet.has(business._id.toString()),
               has_launched_projects: businessHasLaunchedProjectSet.has(business._id.toString()),
+              has_access_grants: (business.allowed_ranking_collaborators?.length > 0) || 
+                                 businessHasProjectGrantsSet.has(business._id.toString()),
             };
           })
         );
@@ -458,6 +472,8 @@ class BusinessController {
       }
 
       // Deletion cooldown check for creation (Rate-limiting replacements)
+      // Only applies when a user tries to create MORE businesses than their plan allows
+      // within 30 days of a deletion. Users on higher plans can still use their full quota.
       const lastDeleted = await BusinessModel.findLastDeleted(req.user._id);
 
       // Fetch company to check Stripe IDs for bypass
@@ -472,10 +488,12 @@ class BusinessController {
 
         if (timeSinceLastDeleted < cooldownMs) {
           const createdAfterCount = await BusinessModel.countCreatedAfter(req.user._id, lastDeleted.deleted_at);
-          if (createdAfterCount >= 1) {
+          // Only block if user has already created as many (or more) businesses as their plan allows
+          // since the last deletion. This lets users on higher plans use their full quota.
+          if (createdAfterCount >= limits.max_workspaces) {
             const remainingDays = Math.ceil((cooldownMs - timeSinceLastDeleted) / (1000 * 60 * 60 * 24));
             return res.status(403).json({
-              error: `You cannot create more than one business within 30 days of a deletion. Please wait ${remainingDays} more day(s).`
+              error: `You cannot create more than ${limits.max_workspaces} business(es) within 30 days of a deletion. Please wait ${remainingDays} more day(s).`
             });
           }
         }

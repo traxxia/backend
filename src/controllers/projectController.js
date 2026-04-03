@@ -380,7 +380,7 @@ class ProjectController {
         total,
         count: projects.length,
         projects: projects.map(p => {
-          const actualCadence = p.review_cadence || "Monthly";
+          const actualCadence = p.review_cadence || "";
           const nextReview = p.next_review_date || calculateNextReviewDate(p.last_reviewed || p.created_at, actualCadence);
           return {
             ...p,
@@ -411,7 +411,7 @@ class ProjectController {
 
       const [project] = await ProjectModel.populateCreatedBy(raw);
       
-      const actualCadence = project.review_cadence || "Monthly";
+      const actualCadence = project.review_cadence || "";
       const nextReview = project.next_review_date || calculateNextReviewDate(project.last_reviewed || project.created_at, actualCadence);
       project.review_cadence = actualCadence;
       project.next_review_date = nextReview;
@@ -1164,17 +1164,28 @@ class ProjectController {
 
         // Check if project is already launched
         if (project.launch_status === PROJECT_LAUNCH_STATUS.LAUNCHED) {
-          results.push({ id, status: "already_launched", is_ranked: true });
-          continue;
+          // If already launched, we only allow "re-launching" if the project is currently 
+          // at-risk or paused, to move it back to active.
+          const currentStatus = (project.status || "").toLowerCase().trim();
+          const isAtRisk = currentStatus === "at risk" || currentStatus === "at_risk";
+          const isPaused = currentStatus === "paused";
+
+          if (!isAtRisk && !isPaused) {
+            results.push({ id, status: "already_launched", is_ranked: true });
+            continue;
+          }
         }
 
         // Perform launch
         const now = new Date();
+        const cadenceToUse = (project.review_cadence || "").trim();
+
         await ProjectModel.update(id, {
           status: PROJECT_STATES.ACTIVE,
           launch_status: PROJECT_LAUNCH_STATUS.LAUNCHED,
+          review_cadence: cadenceToUse,
           last_reviewed: now,
-          next_review_date: calculateNextReviewDate(now, project.review_cadence),
+          next_review_date: calculateNextReviewDate(now, cadenceToUse),
           updated_at: now
         });
 
@@ -1244,8 +1255,10 @@ class ProjectController {
         business_id: new ObjectId(business_id)
       }).toArray();
 
-      const killedProjectIds = allBusinessProjects
-        .filter(p => p.status === PROJECT_STATES.KILLED)
+      const terminalStates = [PROJECT_STATES.KILLED, PROJECT_STATES.COMPLETED, PROJECT_STATES.SCALED];
+
+      const excludedProjectIds = allBusinessProjects
+        .filter(p => terminalStates.includes(p.status))
         .map(p => p._id.toString());
 
       const incomingRankMap = {};
@@ -1256,10 +1269,10 @@ class ProjectController {
       const finalProjectsToProcess = [...projects];
       const processedIds = new Set(projects.map(p => p.project_id.toString()));
 
-      killedProjectIds.forEach(killedId => {
-        if (!processedIds.has(killedId)) {
+      excludedProjectIds.forEach(exId => {
+        if (!processedIds.has(exId)) {
           finalProjectsToProcess.push({
-            project_id: killedId,
+            project_id: exId,
             rank: null,
             rationals: ""
           });
@@ -1275,9 +1288,8 @@ class ProjectController {
         .map(p => {
           const projIdStr = p.project_id;
           const projectStatus = projectStatusMap[projIdStr];
-          const existing = existingRankings.find(r => r.project_id.toString() === projIdStr);
 
-          const rank = projectStatus === PROJECT_STATES.KILLED ? null : p.rank;
+          const rank = terminalStates.includes(projectStatus) ? null : p.rank;
 
           return {
             user_id: new ObjectId(user_id),
@@ -1445,7 +1457,7 @@ class ProjectController {
 
       const responseProjects = ordered.map(({ ranking, project: rawProject }) => {
         const project = populatedProjects.find(p => p._id.toString() === rawProject._id.toString()) || rawProject;
-        const actualCadence = project.review_cadence || "Monthly";
+        const actualCadence = project.review_cadence || "";
         const nextReview = project.next_review_date || calculateNextReviewDate(project.last_reviewed || project.created_at, actualCadence);
         return {
           ...project,
@@ -1514,7 +1526,7 @@ class ProjectController {
       const unranked = [];
 
       populatedProjects.forEach(p => {
-        const actualCadence = p.review_cadence || "Monthly";
+        const actualCadence = p.review_cadence || "";
         const nextReview = p.next_review_date || calculateNextReviewDate(p.last_reviewed || p.created_at, actualCadence);
         const rank = rankMap[p._id.toString()] ?? null;
         const item = {

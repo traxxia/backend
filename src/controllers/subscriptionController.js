@@ -670,6 +670,41 @@ class SubscriptionController {
                 { $set: { status: 'inactive', access_mode: 'archived', inactive_reason: 'plan_configuration', inactive_at: new Date() } }
             );
 
+            // Remove archived users from businesses and projects collaborator lists
+            const archivedUsersList = await db.collection('users').find(
+                { company_id: user.company_id, status: 'inactive', access_mode: 'archived' }
+            ).project({ _id: 1 }).toArray();
+
+            const archivedUserIdsList = archivedUsersList.map(u => u._id);
+
+            if (archivedUserIdsList.length > 0) {
+                // Find all businesses associated with this company/potential owners
+                const companyBusinessesList = await db.collection('user_businesses').find({
+                    $or: [
+                        { user_id: { $in: allPotentialOwnerIds } },
+                        { company_id: user.company_id }
+                    ]
+                }).project({ _id: 1 }).toArray();
+                const businessIdsList = companyBusinessesList.map(b => b._id);
+
+                // Remove from user_businesses collaborators and allowed_ranking_collaborators
+                await db.collection('user_businesses').updateMany(
+                    { _id: { $in: businessIdsList } },
+                    {
+                        $pull: {
+                            collaborators: { $in: archivedUserIdsList },
+                            allowed_ranking_collaborators: { $in: archivedUserIdsList }
+                        }
+                    }
+                );
+
+                // Remove from projects allowed_collaborators
+                await db.collection('projects').updateMany(
+                    { business_id: { $in: businessIdsList } },
+                    { $pull: { allowed_collaborators: { $in: archivedUserIdsList } } }
+                );
+            }
+
             // 3. Sync with Stripe
             let stripeSubscriptionId = company?.stripe_subscription_id;
             let periodStart = new Date();
