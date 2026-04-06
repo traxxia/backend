@@ -667,10 +667,14 @@ class BusinessController {
         role_id: { $in: roleIds }
       });
 
-      const response = collaborators.map(u => ({
-        _id: u._id,
-        name: u.name,
-      }));
+      const response = collaborators.map(u => {
+        const roleObj = roles.find(r => r._id?.toString() === u.role_id?.toString());
+        return {
+          _id: u._id,
+          name: u.name,
+          role_name: u.role_name || roleObj?.role_name
+        };
+      });
 
       res.json({ collaborators: response });
     } catch (err) {
