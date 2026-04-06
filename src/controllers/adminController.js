@@ -523,6 +523,7 @@ class AdminController {
                 input: "$collaborator_details",
                 as: "collab",
                 in: {
+                  id: "$$collab._id",
                   name: "$$collab.name",
                   email: "$$collab.email"
                 }
@@ -540,6 +541,50 @@ class AdminController {
     } catch (error) {
       console.error("Error fetching company businesses:", error);
       res.status(500).json({ error: "Failed to fetch businesses" });
+    }
+  }
+
+  static async removeParticipant(req, res) {
+    try {
+      const { business_id, user_id } = req.params;
+
+      if (!ObjectId.isValid(business_id) || !ObjectId.isValid(user_id)) {
+        return res.status(400).json({ error: "Invalid business ID or user ID" });
+      }
+
+      const db = getDB();
+
+      // Check if business exists
+      const business = await db.collection("user_businesses").findOne({
+        _id: new ObjectId(business_id)
+      });
+
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      // Authorization check for company_admin
+      if (req.user.role.role_name === "company_admin") {
+        const busOwner = await db.collection("users").findOne({ _id: business.user_id });
+        if (!busOwner || busOwner.company_id.toString() !== req.user.company_id.toString()) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      }
+
+      // Remove user from collaborators array
+      const result = await db.collection("user_businesses").updateOne(
+        { _id: new ObjectId(business_id) },
+        { $pull: { collaborators: new ObjectId(user_id) } }
+      );
+
+      if (result.modifiedCount === 0) {
+        return res.status(400).json({ error: "Participant not found in this business or already removed" });
+      }
+
+      res.json({ message: "Participant removed successfully" });
+    } catch (error) {
+      console.error("Error removing participant:", error);
+      res.status(500).json({ error: "Failed to remove participant" });
     }
   }
 
