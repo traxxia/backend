@@ -472,6 +472,8 @@ class BusinessController {
       }
 
       // Deletion cooldown check for creation (Rate-limiting replacements)
+      // Only applies when a user tries to create MORE businesses than their plan allows
+      // within 30 days of a deletion. Users on higher plans can still use their full quota.
       const lastDeleted = await BusinessModel.findLastDeleted(req.user._id);
 
       // Fetch company to check Stripe IDs for bypass
@@ -486,10 +488,12 @@ class BusinessController {
 
         if (timeSinceLastDeleted < cooldownMs) {
           const createdAfterCount = await BusinessModel.countCreatedAfter(req.user._id, lastDeleted.deleted_at);
-          if (createdAfterCount >= 1) {
+          // Only block if user has already created as many (or more) businesses as their plan allows
+          // since the last deletion. This lets users on higher plans use their full quota.
+          if (createdAfterCount >= limits.max_workspaces) {
             const remainingDays = Math.ceil((cooldownMs - timeSinceLastDeleted) / (1000 * 60 * 60 * 24));
             return res.status(403).json({
-              error: `You cannot create more than one business within 30 days of a deletion. Please wait ${remainingDays} more day(s).`
+              error: `You cannot create more than ${limits.max_workspaces} business(es) within 30 days of a deletion. Please wait ${remainingDays} more day(s).`
             });
           }
         }
@@ -653,7 +657,7 @@ class BusinessController {
 
       const db = getDB();
       const roles = await db.collection("roles").find({ 
-        role_name: { $in: ["collaborator", "user"] } 
+        role_name: { $in: ["collaborator", "user", "viewer"] } 
       }).toArray();
       
       const roleIds = roles.map(r => r._id);
