@@ -566,14 +566,6 @@ class ProjectController {
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
 
 
-      if (
-        isAdmin &&
-        (!Array.isArray(business.collaborators) || business.collaborators.length === 0)
-      ) {
-        return res.status(400).json({
-          error: "Please add at least one collaborator before creating a project",
-        });
-      }
 
       // Permission
       const permissions = getProjectPermissions({
