@@ -39,7 +39,7 @@ const runStaleBetCheck = async () => {
 
       if (diffHours <= 24 && diffHours > 0) {
         notificationType = 'review_reminder';
-      } else if (diffHours <= 0) {
+      } else if (diffHours <= -24) {
         notificationType = 'stale_bet';
       }
 
