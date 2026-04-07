@@ -471,33 +471,7 @@ class BusinessController {
         });
       }
 
-      // Deletion cooldown check for creation (Rate-limiting replacements)
-      // Only applies when a user tries to create MORE businesses than their plan allows
-      // within 30 days of a deletion. Users on higher plans can still use their full quota.
-      const lastDeleted = await BusinessModel.findLastDeleted(req.user._id);
 
-      // Fetch company to check Stripe IDs for bypass
-      const db = getDB();
-      const company = req.user.company_id ? await db.collection('companies').findOne({ _id: req.user.company_id }) : null;
-      const isStripeNull = company ? TierService.isStripeAccountNull(company) : true;
-
-      if (lastDeleted && lastDeleted.deleted_at && !isStripeNull) {
-        const cooldownDays = 30;
-        const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
-        const timeSinceLastDeleted = new Date() - new Date(lastDeleted.deleted_at);
-
-        if (timeSinceLastDeleted < cooldownMs) {
-          const createdAfterCount = await BusinessModel.countCreatedAfter(req.user._id, lastDeleted.deleted_at);
-          // Only block if user has already created as many (or more) businesses as their plan allows
-          // since the last deletion. This lets users on higher plans use their full quota.
-          if (createdAfterCount >= limits.max_workspaces) {
-            const remainingDays = Math.ceil((cooldownMs - timeSinceLastDeleted) / (1000 * 60 * 60 * 24));
-            return res.status(403).json({
-              error: `You cannot create more than ${limits.max_workspaces} business(es) within 30 days of a deletion. Please wait ${remainingDays} more day(s).`
-            });
-          }
-        }
-      }
 
       const existingBusinesses = await BusinessModel.findByUserId(req.user._id);
       const duplicateName = existingBusinesses.some(
@@ -566,29 +540,7 @@ class BusinessController {
         return res.status(400).json({ error: "This business is already deleted" });
       }
 
-      // 30-day cooldown check
-      const lastDeleted = await BusinessModel.findLastDeleted(userId);
 
-      // Fetch company to check Stripe IDs for bypass
-      const dbInstance = getDB();
-      const companyInstance = req.user.company_id ? await dbInstance.collection('companies').findOne({ _id: req.user.company_id }) : null;
-      const isStripeNullDelete = companyInstance ? TierService.isStripeAccountNull(companyInstance) : true;
-
-      if (lastDeleted && lastDeleted.deleted_at && !isStripeNullDelete) {
-        const cooldownDays = 30;
-        const cooldownMs = cooldownDays * 24 * 60 * 60 * 1000;
-        const lastDeletedDate = new Date(lastDeleted.deleted_at);
-        const now = new Date();
-        const timeSinceLastDeleted = now - lastDeletedDate;
-
-        if (timeSinceLastDeleted < cooldownMs) {
-          const remainingMs = cooldownMs - timeSinceLastDeleted;
-          const remainingDays = Math.ceil(remainingMs / (1000 * 60 * 60 * 24));
-          return res.status(403).json({
-            error: `You cannot delete a business within 30 days of your last deletion. Please wait ${remainingDays} more day(s).`
-          });
-        }
-      }
       // Check if user has permission to delete
       const isOwner = business.user_id && business.user_id.toString() === userId.toString();
       const isAdmin = VALID_ADMIN_ROLES.includes(req.user.role.role_name);
