@@ -194,12 +194,26 @@ class PMFController {
                 });
             }
 
+            // Fetch existing projects to prevent duplicates
+            const existingProjects = await ProjectModel.findAll({ business_id: new ObjectId(businessId) });
+            const existingProjectNames = new Set(existingProjects.map(p => p.project_name.toLowerCase().trim()));
+
             const createdProjectIds = [];
 
             for (const actionObj of actions) {
                 const actionText = typeof actionObj === 'object' ? actionObj.action : actionObj;
 
                 if (!actionText) continue;
+
+                const normalizedActionText = actionText.toLowerCase().trim();
+                
+                // Skip if this project was already kickstarted
+                if (existingProjectNames.has(normalizedActionText)) {
+                    continue;
+                }
+                
+                // Add to set to prevent duplicates within the same batch
+                existingProjectNames.add(normalizedActionText);
 
                 const projectData = {
                     business_id: new ObjectId(businessId),
