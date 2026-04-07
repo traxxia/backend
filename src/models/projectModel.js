@@ -138,6 +138,12 @@ class ProjectModel {
       .sort({ ai_rank: 1 }) // Sort by AI rank
       .toArray();
   }
+  static async removeFromAllowedCollaborators(businessId, userId) {
+    return await this.collection().updateMany(
+      { business_id: new ObjectId(businessId) },
+      { $pull: { allowed_collaborators: new ObjectId(userId) }, $set: { updated_at: new Date() } }
+    );
+  }
 }
 
 module.exports = ProjectModel;

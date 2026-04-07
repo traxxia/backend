@@ -130,21 +130,7 @@ class BusinessModel {
     });
   }
 
-  static async findLastDeleted(userId) {
-    return await this.collection()
-      .find({ user_id: new ObjectId(userId), status: 'deleted' })
-      .sort({ deleted_at: -1 })
-      .limit(1)
-      .next();
-  }
 
-  static async countCreatedAfter(userId, date) {
-    return await this.collection().countDocuments({
-      user_id: new ObjectId(userId),
-      created_at: { $gt: date },
-      status: { $ne: 'deleted' }
-    });
-  }
 
   static async delete(businessId, userId) {
     return await this.collection().updateOne(
@@ -207,7 +193,10 @@ class BusinessModel {
     return await this.collection().updateOne(
       { _id: new ObjectId(businessId) },
       {
-        $pull: { collaborators: new ObjectId(collaboratorUserId) },
+        $pull: { 
+          collaborators: new ObjectId(collaboratorUserId),
+          allowed_ranking_collaborators: new ObjectId(collaboratorUserId)
+        },
         $set: { updated_at: new Date() },
       }
     );
