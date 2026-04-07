@@ -207,7 +207,10 @@ class BusinessModel {
     return await this.collection().updateOne(
       { _id: new ObjectId(businessId) },
       {
-        $pull: { collaborators: new ObjectId(collaboratorUserId) },
+        $pull: { 
+          collaborators: new ObjectId(collaboratorUserId),
+          allowed_ranking_collaborators: new ObjectId(collaboratorUserId)
+        },
         $set: { updated_at: new Date() },
       }
     );

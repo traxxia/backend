@@ -1013,6 +1013,10 @@ class BusinessController {
       }
 
       await BusinessModel.removeCollaborator(businessId, collabId);
+      
+      // Also remove project-level edit access for this user in this business
+      await ProjectModel.removeFromAllowedCollaborators(businessId, collabId);
+
       if (typeof logAuditEvent === "function") {
         await logAuditEvent(req.user._id, "collaborator_removed", {
           business_id: businessId,

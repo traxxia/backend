@@ -5,6 +5,7 @@ const CompanyModel = require("../models/companyModel");
 const UserModel = require("../models/userModel");
 const AuditModel = require("../models/auditModel");
 const QuestionModel = require("../models/questionModel");
+const ProjectModel = require("../models/projectModel");
 const BusinessModel = require("../models/businessModel");
 const ConversationModel = require("../models/conversationModel");
 const AnswerModel = require("../models/answerModel");
@@ -571,15 +572,11 @@ class AdminController {
         }
       }
 
-      // Remove user from collaborators array
-      const result = await db.collection("user_businesses").updateOne(
-        { _id: new ObjectId(business_id) },
-        { $pull: { collaborators: new ObjectId(user_id) } }
-      );
+      // Remove user from collaborators and allowed_ranking_collaborators arrays
+      await BusinessModel.removeCollaborator(business_id, user_id);
 
-      if (result.modifiedCount === 0) {
-        return res.status(400).json({ error: "Participant not found in this business or already removed" });
-      }
+      // Also remove project-level edit access for this user in this business
+      await ProjectModel.removeFromAllowedCollaborators(business_id, user_id);
 
       res.json({ message: "Participant removed successfully" });
     } catch (error) {
