@@ -664,7 +664,9 @@ class BusinessController {
 
       const collaborators = await UserModel.getAll({
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) },
-        role_id: { $in: roleIds }
+        role_id: { $in: roleIds },
+        status: { $nin: ['deleted', 'inactive', 'archived'] },
+        access_mode: { $ne: 'archived' }
       });
 
       const response = collaborators.map(u => {

@@ -343,7 +343,8 @@ class ProjectController {
           // Filter non-admins and non-viewers
           const nonAdminUsers = users.filter(u => {
             const roleName = roleMap[u.role_id?.toString()];
-            return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
+            const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
+            return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
           });
           const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
@@ -1098,14 +1099,9 @@ class ProjectController {
 
 
         const nonAdminUsers = users.filter(u => {
-
-
           const roleName = roleMap[u.role_id?.toString()];
-
-
-          return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
-
-
+          const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
+          return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
         });
 
         // Find all projects that have AI ranks OR are being launched now
