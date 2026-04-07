@@ -4,6 +4,7 @@ const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const DecisionLogModel = require("../models/decisionLogModel");
+const NotificationModel = require("../models/notificationModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
 
@@ -1302,6 +1303,71 @@ class ProjectController {
         });
 
       await ProjectRankingModel.bulkUpsert(rankingDocs);
+
+      // Notification Logic
+      try {
+        const db = getDB();
+        if (isAdmin) {
+          // Notify non-admin collaborators
+          const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+          const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+
+          if (uniqueCollaboratorIds.length > 0) {
+            const users = await db.collection("users").find({
+              _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+            }).toArray();
+
+            const roles = await db.collection("roles").find({}).toArray();
+            const roleMap = {};
+            roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
+            const nonAdminUsers = users.filter(u => {
+              const roleName = roleMap[u.role_id?.toString()];
+              return !["company_admin", "super_admin", "viewer"].includes(roleName);
+            });
+
+            for (const u of nonAdminUsers) {
+              await NotificationModel.create({
+                user_id: u._id,
+                type: 'admin_ranked_projects',
+                title: 'Time to Rank Projects',
+                message: `The admin has ranked the projects for "${business.business_name || 'the business'}". Please review and rank your projects.`,
+                action_data: { business_id: business_id.toString() }
+              });
+            }
+          }
+        } else {
+          // Notify company_admins
+          let resolvedCompanyId = business.company_id;
+          if (!resolvedCompanyId) {
+            resolvedCompanyId = req.user.company_id;
+          }
+
+          if (resolvedCompanyId) {
+            const companyAdmins = await db.collection("users").aggregate([
+              { $match: { company_id: { $in: [new ObjectId(String(resolvedCompanyId)), String(resolvedCompanyId)] } } },
+              { $lookup: { from: 'roles', localField: 'role_id', foreignField: '_id', as: 'role' } },
+              { $unwind: '$role' },
+              { $match: { 'role.role_name': { $in: ['company_admin', 'super_admin'] } } }
+            ]).toArray();
+
+            for (const admin of companyAdmins) {
+              await NotificationModel.create({
+                user_id: admin._id,
+                type: 'collaborator_ranked_projects',
+                title: 'Collaborator Ranked Projects',
+                message: `Collaborator ${req.user.name || req.user.email || 'A user'} has ranked their projects for "${business.business_name || 'the business'}".`,
+                action_data: { 
+                  business_id: business_id.toString(), 
+                  collaborator_id: user_id.toString() 
+                }
+              });
+            }
+          }
+        }
+      } catch (notifErr) {
+        console.error("Failed to send ranking notifications:", notifErr);
+      }
 
       // NEW: Grant rerank access to this collaborator for restricted states
       if (!isAdmin) {
