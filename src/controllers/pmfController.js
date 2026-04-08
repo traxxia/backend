@@ -47,6 +47,9 @@ class PMFController {
             }
 
             const summaryDoc = await PMFExecutiveSummaryModel.findByBusinessId(businessId);
+            const business = await BusinessModel.findById(businessId);
+            const hasCollaborators = Array.isArray(business?.collaborators) && business.collaborators.length > 0;
+
             if (!summaryDoc || !summaryDoc.summary) {
                 return res.status(404).json({ error: "Executive summary not found" });
             }
@@ -80,7 +83,7 @@ class PMFController {
                 };
             });
 
-            res.json({ priorities: kickstartData });
+            res.json({ priorities: kickstartData, hasCollaborators });
         } catch (error) {
             console.error("Error fetching kickstart data:", error);
             res.status(500).json({ error: "Failed to fetch kickstart data" });
@@ -171,11 +174,6 @@ class PMFController {
                 }
             }
 
-            if (isAdmin && (!Array.isArray(business.collaborators) || business.collaborators.length === 0)) {
-                return res.status(400).json({
-                    error: "Please add at least one collaborator before creating a project",
-                });
-            }
 
             const permissions = getProjectPermissions({
                 projectStatus: PROJECT_STATES.DRAFT,
@@ -196,12 +194,26 @@ class PMFController {
                 });
             }
 
+            // Fetch existing projects to prevent duplicates
+            const existingProjects = await ProjectModel.findAll({ business_id: new ObjectId(businessId) });
+            const existingProjectNames = new Set(existingProjects.map(p => p.project_name.toLowerCase().trim()));
+
             const createdProjectIds = [];
 
             for (const actionObj of actions) {
                 const actionText = typeof actionObj === 'object' ? actionObj.action : actionObj;
 
                 if (!actionText) continue;
+
+                const normalizedActionText = actionText.toLowerCase().trim();
+                
+                // Skip if this project was already kickstarted
+                if (existingProjectNames.has(normalizedActionText)) {
+                    continue;
+                }
+                
+                // Add to set to prevent duplicates within the same batch
+                existingProjectNames.add(normalizedActionText);
 
                 const projectData = {
                     business_id: new ObjectId(businessId),

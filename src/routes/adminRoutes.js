@@ -24,6 +24,7 @@ router.get('/audit-trail/event-types', authenticateToken, requireAdmin, AdminCon
 // User data route
 router.get('/user-data/:user_id', authenticateToken, requireAdmin, AdminController.getUserData);
 router.get('/businesses', authenticateToken, requireAdmin, AdminController.getCompanyBusinesses);
+router.delete('/businesses/:business_id/participants/:user_id', authenticateToken, requireAdmin, AdminController.removeParticipant);
 router.get('/stale-projects', authenticateToken, requireAdmin, AdminController.getStaleProjects);
 router.put('/users/:user_id/role', authenticateToken, requireAdmin, AdminController.updateUserRole);
 
