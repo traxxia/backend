@@ -18,11 +18,10 @@ class ProjectRankingModel {
           $set: {
             rank: r.rank,
             rationals: r.rationals,
-            ...(r.rank !== undefined ? { rank: r.rank } : {}),
+            locked: r.locked !== undefined ? r.locked : true,
             updated_at: new Date(),
           },
           $setOnInsert: {
-            locked: r.locked || false,
             created_at: new Date(),
           },
         },
@@ -59,9 +58,51 @@ class ProjectRankingModel {
       .toArray();
   }
 
+  static async lockRankingByUserAndBusiness(userId, businessId) {
+    const db = getDB();
+    const projects = await db.collection("projects").find({ 
+      business_id: new ObjectId(businessId) 
+    }).toArray();
+    
+    if (projects.length === 0) return;
+
+    const ops = projects.map(p => ({
+      updateOne: {
+        filter: { 
+          user_id: new ObjectId(userId), 
+          business_id: new ObjectId(businessId),
+          project_id: p._id 
+        },
+        update: { 
+          $set: { locked: true, updated_at: new Date() },
+          $setOnInsert: { created_at: new Date() }
+        },
+        upsert: true
+      }
+    }));
+    
+    return this.collection().bulkWrite(ops);
+  }
+
+  static async deleteRankingsByBusiness(businessId) {
+    return this.collection().deleteMany({
+      business_id: new ObjectId(businessId)
+    });
+  }
+
   static async unlockRankingByBusiness(businessId) {
     return this.collection().updateMany(
       { business_id: new ObjectId(businessId) },
+      { $set: { locked: false } }
+    );
+  }
+
+  static async unlockRankingByUserAndBusiness(userId, businessId) {
+    return this.collection().updateMany(
+      { 
+        user_id: new ObjectId(userId), 
+        business_id: new ObjectId(businessId) 
+      },
       { $set: { locked: false } }
     );
   }
@@ -81,8 +122,5 @@ class ProjectRankingModel {
   }
 
 }
-
-
-
 
 module.exports = ProjectRankingModel;

@@ -1356,11 +1356,7 @@ class ProjectController {
       } catch (notifErr) {
         console.error("Failed to send ranking notifications:", notifErr);
       }
-
-      // NEW: Grant rerank access to this collaborator for restricted states
-      if (!isAdmin) {
-        await BusinessModel.addAllowedRankingCollaborator(business_id, user_id);
-      }
+ 
 
       const rankedProjects =
         await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
@@ -1910,11 +1906,9 @@ class ProjectController {
           const rankings = await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
           const hasLockedRanking = rankings.some(r => r.locked === true);
 
-          if (isRestrictedRankingState) {
-            hasRerankAccess = isAllowedToRank && !hasLockedRanking;
-          } else {
-            hasRerankAccess = !hasLockedRanking;
-          }
+          // Unified Access Logic: Fresh flow OR Explicit Rerank
+          // Access is true if explicitly allowed OR if rankings are not currently locked
+          hasRerankAccess = isAllowedToRank || !hasLockedRanking;
         }
       } catch (err) {
         console.error("Error checking rerank access:", err);
@@ -2084,6 +2078,9 @@ class ProjectController {
           { _id: new ObjectId(business_id) },
           { $set: { allowed_ranking_collaborators: filteredCollaborators } }
         );
+
+        // NEW: Explicitly lock their rankings to ensure they lose "default" access too
+        await ProjectRankingModel.lockRankingByUserAndBusiness(user_id, business_id);
 
         revokedAccess.push("rerank");
       }
