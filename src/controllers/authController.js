@@ -18,11 +18,12 @@ class AuthController {
       }
 
       const user = await UserModel.findByEmail(email);
-      if (!user || !await UserModel.comparePassword(password, user.password)) {
-        if (user) {
-          await logAuditEvent(user._id, 'login_failed', { email });
-        }
-        return res.status(400).json({ error: 'Invalid credentials' });
+      if (!user) {
+        return res.status(400).json({ error: 'incorrect_email', message: 'Incorrect email address' });
+      }
+      if (!await UserModel.comparePassword(password, user.password)) {
+        await logAuditEvent(user._id, 'login_failed', { email });
+        return res.status(400).json({ error: 'incorrect_password', message: 'Incorrect password' });
       }
 
       if (
@@ -77,6 +78,7 @@ class AuthController {
           name: user.name,
           email: user.email,
           role: role.role_name,
+          tour_completed: user.tour_completed !== undefined ? user.tour_completed : true,
           plan_name: planName,
           limits: planLimits,
           company: company ? {
@@ -271,6 +273,28 @@ class AuthController {
     } catch (error) {
       console.error('Logout error:', error);
       res.status(500).json({ error: 'Logout failed' });
+    }
+  }
+  static async completeTour(req, res) {
+    try {
+      if (!req.user || !req.user._id) {
+        console.warn('[AuthController] Unauthorized completeTour attempt');
+        return res.status(401).json({ error: 'Unauthorized' });
+      }
+
+      console.log(`[AuthController] Incoming complete-tour request for user: ${req.user.email} (${req.user._id})`);
+      
+      const result = await UserModel.completeTour(req.user._id);
+      
+      console.log(`[AuthController] DB Update Result - matched: ${result.matchedCount}, modified: ${result.modifiedCount}`);
+
+      res.json({ 
+        message: 'Tour completed successfully',
+        updated: result.modifiedCount > 0 
+      });
+    } catch (error) {
+      console.error('[AuthController] Complete tour error:', error);
+      res.status(500).json({ error: 'Failed to update tour status' });
     }
   }
 }
