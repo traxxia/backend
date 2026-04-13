@@ -7,5 +7,6 @@ router.post('/login', AuthController.login);
 router.post('/register', AuthController.register);
 router.post('/check-email', AuthController.checkEmail);
 router.post('/logout', authenticateToken, AuthController.logout);
+router.post('/complete-tour', authenticateToken, AuthController.completeTour);
 
-module.exports = router;  
+module.exports = router;
