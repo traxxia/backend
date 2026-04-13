@@ -1035,7 +1035,26 @@ class ProjectController {
         return res.status(404).json({ error: "No valid projects found to launch" });
       }
 
-      // 2. Persist the selection: Mark selected as PENDING_LAUNCH, reset others (if not already LAUNCHED)
+      // 3. Admin Ranking Check: Admin must have ranked all selected projects
+      const adminRankings = await ProjectRankingModel.collection().find({
+        user_id: new ObjectId(req.user._id),
+        project_id: { $in: project_ids.map(id => new ObjectId(id)) },
+        rank: { $ne: null }
+      }).toArray();
+
+      if (adminRankings.length < project_ids.length) {
+        const rankedIds = new Set(adminRankings.map(r => r.project_id.toString()));
+        const unrankedProjectNames = projectsToLaunch
+          .filter(p => !rankedIds.has(p._id.toString()))
+          .map(p => p.project_name);
+
+        const bulletedList = unrankedProjectNames.map(name => `• ${name}`).join("\n");
+        return res.status(400).json({
+          error: `Launch failed: Numerical ranks are mandatory for all projects moved to 'Launched'. The following projects are not ranked:\n${bulletedList}\n\nPlease assign ranks before launching.`
+        });
+      }
+
+      // 4. Persist the selection: Mark selected as PENDING_LAUNCH, reset others (if not already LAUNCHED)
       await ProjectModel.collection().updateMany(
         {
           business_id: new ObjectId(businessId),
@@ -1059,26 +1078,7 @@ class ProjectController {
       // NEW: Unlock rankings to allow collaborators to provide input on the new selection
       await ProjectRankingModel.unlockRankingByBusiness(businessId);
 
-      // 3. Admin Ranking Check: Admin must have ranked all selected projects
-      const adminRankings = await ProjectRankingModel.collection().find({
-        user_id: new ObjectId(req.user._id),
-        project_id: { $in: project_ids.map(id => new ObjectId(id)) },
-        rank: { $ne: null }
-      }).toArray();
-
-      if (adminRankings.length < project_ids.length) {
-        const rankedIds = new Set(adminRankings.map(r => r.project_id.toString()));
-        const unrankedProjectNames = projectsToLaunch
-          .filter(p => !rankedIds.has(p._id.toString()))
-          .map(p => p.project_name);
-
-        const bulletedList = unrankedProjectNames.map(name => `• ${name}`).join("\n");
-        return res.status(400).json({
-          error: `Launch failed: Numerical ranks are mandatory for all projects moved to 'Launched'. The following projects are not ranked:\n${bulletedList}\n\nPlease assign ranks before launching.`
-        });
-      }
-
-      // 4. Consensus check: All non-admin collaborators must have a rank for ALL launched/pending projects
+      // 5. Consensus check: All non-admin collaborators must have a rank for ALL launched/pending projects
       const business = await BusinessModel.findById(businessId);
       if (business) {
         const collaboratorIds = (business.collaborators || []).map(id => id.toString());
