@@ -10,6 +10,7 @@ const BusinessModel = require("../models/businessModel");
 const ConversationModel = require("../models/conversationModel");
 const AnswerModel = require("../models/answerModel");
 const AnalysisModel = require("../models/analysisModel");
+const InitiativeModel = require("../models/initiativeModel");
 const TierService = require('../services/tierService');
 const blobService = require("../services/blobService");
 
@@ -577,6 +578,16 @@ class AdminController {
 
       // Also remove project-level edit access for this user in this business
       await ProjectModel.removeFromAllowedCollaborators(business_id, user_id);
+
+      // CRITICAL: Reassign ownership of any projects/bets owned by this participant back to the business owner
+      const businessOwnerId = business.user_id;
+      if (businessOwnerId.toString() !== user_id.toString()) {
+        const busOwner = await db.collection("users").findOne({ _id: businessOwnerId });
+        const newOwnerName = busOwner ? (busOwner.name || busOwner.email || "Business Owner") : "Business Owner";
+        
+        await ProjectModel.reassignOwnership(business_id, user_id, businessOwnerId, newOwnerName);
+        await InitiativeModel.reassignOwnership(business_id, user_id, businessOwnerId, newOwnerName);
+      }
 
       res.json({ message: "Participant removed successfully" });
     } catch (error) {

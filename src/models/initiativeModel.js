@@ -71,6 +71,21 @@ class InitiativeModel {
       created_by: userMap[initiative.user_id?.toString()] || "Unknown User",
     }));
   }
+
+  static async reassignOwnership(businessId, oldOwnerId, newOwnerId, newOwnerName = "") {
+    return await this.collection().updateMany(
+      { 
+        business_id: new ObjectId(businessId), 
+        user_id: new ObjectId(oldOwnerId) 
+      },
+      { 
+        $set: { 
+          user_id: new ObjectId(newOwnerId), 
+          updated_at: new Date() 
+        } 
+      }
+    );
+  }
 }
 
 module.exports = InitiativeModel;
