@@ -19,6 +19,7 @@ const pmfRoutes = require("./pmfRoutes");
 const academyFeedbackRoutes = require("./academyFeedbackRoutes");
 const answerRoutes = require("./answerRoutes");
 const notificationRoutes = require("./notificationRoutes");
+const decisionLogRoutes = require("./decisionLogRoutes");
 
 router.use("/api", authRoutes);
 router.use("/api/plans", planRoutes);
@@ -42,6 +43,7 @@ router.use("/api/subscription", subscriptionRoutes);
 router.use("/api/academy-feedback", academyFeedbackRoutes);
 router.use("/api/answers", answerRoutes);
 router.use("/api/notifications", notificationRoutes);
+router.use("/api/decision-logs", decisionLogRoutes);
 
 const aiChatRoutes = require('./aiChatRoutes');
 

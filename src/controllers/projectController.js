@@ -6,6 +6,7 @@ const UserModel = require("../models/userModel")
 const DecisionLogModel = require("../models/decisionLogModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
+const DecisionLogService = require("../services/decisionLogService");
 
 const {
   PROJECT_STATES,
@@ -801,6 +802,7 @@ class ProjectController {
       const updateData = {
         updated_at: new Date(),
       };
+      let decisionJustification = "";
 
       if (Array.isArray(req.body.allowed_collaborators)) {
         updateData.allowed_collaborators = req.body.allowed_collaborators;
@@ -908,16 +910,7 @@ class ProjectController {
               });
             }
 
-            const logEntry = {
-              project_id: new ObjectId(id),
-              from_status: existing.status,
-              to_status: found,
-              justification: justification,
-              changed_by: new ObjectId(req.user._id),
-              changed_at: new Date()
-            };
-
-            await DecisionLogModel.create(logEntry);
+            decisionJustification = justification;
           }
 
           updateData.status = found;
@@ -993,6 +986,14 @@ class ProjectController {
       delete updateData.created_at;
 
       await ProjectModel.update(id, updateData);
+
+      await DecisionLogService.logProjectUpdateIfSignificant({
+        projectBefore: existing,
+        updateData,
+        actorId: req.user._id,
+        justification: decisionJustification,
+        source: "project_update",
+      });
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -2598,6 +2599,14 @@ class ProjectController {
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
+      const permissions = getProjectPermissions({
+        projectStatus: existing.status,
+        isOwner,
+        isCollaborator,
+        isAdmin,
+        isAllowedCollaborator: false,
+        userRole: req.user.role.role_name,
+      });
 
       const isOwnerAccountable = existing.accountable_owner_id && existing.accountable_owner_id.toString() === req.user._id.toString();
 
@@ -2618,29 +2627,25 @@ class ProjectController {
       const [project] = await ProjectModel.populateCreatedBy(updated);
       project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
-      // Log the decision
-      const db = getDB();
-      await db.collection("audit_trail").insertOne({
-        user_id: new ObjectId(req.user._id),
-        event_type: "project_decision_log",
-        event_data: {
-          project_id: new ObjectId(id),
-          business_id: existing.business_id,
-          action: "adhoc_update",
-          justification,
-          old_state: { status: existing.status, learning_state: existing.learning_state },
-          new_state: { status: status || existing.status, learning_state: learning_state || existing.learning_state }
-        },
-        timestamp: new Date()
-      });
-
-      await DecisionLogModel.create({
-        project_id: new ObjectId(id),
-        changed_at: new Date(),
-        from_status: existing.status || "Draft",
-        to_status: status || existing.status || "Draft",
+      await DecisionLogService.createManualDecisionLog({
+        project: existing,
+        actorId: req.user._id,
+        logType: "adhoc_update",
+        decision: "adhoc_update",
+        executionState: status || existing.status || null,
+        assumptionState: learning_state || existing.learning_state || null,
         justification,
-        user_id: new ObjectId(req.user._id)
+        metadata: {
+          source: "project_adhoc_update",
+        },
+        beforeSnapshot: {
+          status: existing.status || null,
+          learning_state: existing.learning_state || null,
+        },
+        afterSnapshot: {
+          status: status || existing.status || null,
+          learning_state: learning_state || existing.learning_state || null,
+        },
       });
 
       res.json({ message: "Ad-hoc update processed", project });
@@ -2666,6 +2671,14 @@ class ProjectController {
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
+      const permissions = getProjectPermissions({
+        projectStatus: existing.status,
+        isOwner,
+        isCollaborator,
+        isAdmin,
+        isAllowedCollaborator: false,
+        userRole: req.user.role.role_name,
+      });
 
       const isOwnerAccountable = existing.accountable_owner_id && existing.accountable_owner_id.toString() === req.user._id.toString();
 
@@ -2693,34 +2706,30 @@ class ProjectController {
       const [project] = await ProjectModel.populateCreatedBy(updated);
       project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
-      // Log the decision
-      const db = getDB();
-      await db.collection("audit_trail").insertOne({
-        user_id: new ObjectId(req.user._id),
-        event_type: "project_decision_log",
-        event_data: {
-          project_id: new ObjectId(id),
-          business_id: existing.business_id,
-          action: no_changes ? "no_change_review" : "cadence_review",
-          justification,
-          old_state: { status: existing.status, learning_state: existing.learning_state },
-          new_state: {
-            status: no_changes ? existing.status : (status || existing.status),
-            learning_state: no_changes ? existing.learning_state : (learning_state || existing.learning_state)
-          }
-        },
-        timestamp: new Date()
-      });
-
-      await DecisionLogModel.create({
-        project_id: new ObjectId(id),
-        changed_at: new Date(),
-        from_status: existing.status || "Draft",
-        to_status: no_changes ? (existing.status || "Draft") : (status || existing.status || "Draft"),
-        from_learning_state: existing.learning_state || "Testing",
-        to_learning_state: no_changes ? (existing.learning_state || "Testing") : (learning_state || existing.learning_state || "Testing"),
+      await DecisionLogService.createManualDecisionLog({
+        project: existing,
+        actorId: req.user._id,
+        logType: no_changes ? "review_no_change" : "review_update",
+        decision: no_changes ? "cadence_review_no_change" : "cadence_review_update",
+        executionState: no_changes ? existing.status : (status || existing.status),
+        assumptionState: no_changes
+          ? existing.learning_state
+          : (learning_state || existing.learning_state),
         justification: `[Cadence Review] ${justification}`,
-        user_id: new ObjectId(req.user._id)
+        metadata: {
+          source: "project_review",
+          no_changes: Boolean(no_changes),
+        },
+        beforeSnapshot: {
+          status: existing.status || null,
+          learning_state: existing.learning_state || null,
+        },
+        afterSnapshot: {
+          status: no_changes ? (existing.status || null) : (status || existing.status || null),
+          learning_state: no_changes
+            ? (existing.learning_state || null)
+            : (learning_state || existing.learning_state || null),
+        },
       });
 
       res.json({ message: "Review processed", project });
