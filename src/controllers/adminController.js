@@ -689,15 +689,12 @@ class AdminController {
         };
       }
 
-      const auditEntries = await AuditModel.find(filter, {
+      const { entries: auditEntries, totalCount, analysisStats } = await AuditModel.getAuditTrailPaged(filter, {
         skip,
         limit: parseInt(limit),
         projection,
         searchFilter
       });
-
-      const totalCount = await AuditModel.countDocuments(filter, searchFilter);
-      const analysisStats = await AuditModel.getAnalysisStats(filter, searchFilter);
 
       res.json({
         audit_entries: auditEntries,

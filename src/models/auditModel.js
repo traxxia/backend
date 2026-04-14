@@ -176,6 +176,100 @@ class AuditModel {
 
     return await db.collection('audit_trail').aggregate(pipeline).toArray();
   }
+
+  static async getAuditTrailPaged(filter, options = {}) {
+    const db = getDB();
+    const { skip = 0, limit = 100, projection = {}, searchFilter = {} } = options;
+
+    const pipeline = [
+      { $match: filter },
+      // Lookups for enriched data
+      {
+        $lookup: {
+          from: 'users',
+          localField: 'user_id',
+          foreignField: '_id',
+          as: 'user'
+        }
+      },
+      {
+        $lookup: {
+          from: 'companies',
+          localField: 'user.company_id',
+          foreignField: '_id',
+          as: 'company'
+        }
+      },
+      { $unwind: { path: '$user', preserveNullAndEmptyArrays: true } },
+      { $unwind: { path: '$company', preserveNullAndEmptyArrays: true } },
+      {
+        $addFields: {
+          temp_business_id: {
+            $cond: {
+              if: { $ne: ["$event_data.business_id", null] },
+              then: { $toObjectId: "$event_data.business_id" },
+              else: {
+                $cond: {
+                  if: { $ne: ["$additional_info.business_id", null] },
+                  then: { $toObjectId: "$additional_info.business_id" },
+                  else: null
+                }
+              }
+            }
+          }
+        }
+      },
+      {
+        $lookup: {
+          from: 'businesses',
+          localField: 'temp_business_id',
+          foreignField: '_id',
+          as: 'business'
+        }
+      },
+      { $unwind: { path: '$business', preserveNullAndEmptyArrays: true } },
+      {
+        $addFields: {
+          user_name: "$user.name",
+          user_email: "$user.email",
+          company_name: "$company.company_name",
+          business_name: "$business.business_name"
+        }
+      },
+      { $match: searchFilter },
+      {
+        $facet: {
+          entries: [
+            { $sort: { timestamp: -1 } },
+            { $skip: skip },
+            { $limit: limit },
+            { $project: projection }
+          ],
+          totalCount: [
+            { $count: "count" }
+          ],
+          analysisStats: [
+            { $match: { event_type: 'analysis_generated' } },
+            {
+              $group: {
+                _id: '$event_data.analysis_type',
+                count: { $sum: 1 },
+                latest: { $max: '$timestamp' }
+              }
+            }
+          ]
+        }
+      }
+    ];
+
+    const result = await db.collection('audit_trail').aggregate(pipeline).toArray();
+    
+    return {
+      entries: result[0]?.entries || [],
+      totalCount: result[0]?.totalCount[0]?.count || 0,
+      analysisStats: result[0]?.analysisStats || []
+    };
+  }
 }
 
 module.exports = AuditModel;

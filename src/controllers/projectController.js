@@ -7,6 +7,8 @@ const DecisionLogModel = require("../models/decisionLogModel");
 const NotificationModel = require("../models/notificationModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
+const cacheUtil = require("../utils/cache");
+
 
 const {
   PROJECT_STATES,
@@ -328,55 +330,66 @@ class ProjectController {
       };
 
       if (business_id && ObjectId.isValid(business_id)) {
-        const business = await BusinessModel.findById(business_id);
-        if (business) {
-          const collaboratorIds = (business.collaborators || []).map(id => id.toString());
-          const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+        const cacheKey = cacheUtil.getCompanyKey('ranking_lock', business_id);
+        const cachedSummary = cacheUtil.get(cacheKey);
+        
+        if (cachedSummary) {
+          ranking_lock_summary = cachedSummary;
+        } else {
+          const business = await BusinessModel.findById(business_id);
+          if (business) {
+            const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+            const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
 
-          const users = await db.collection("users").find({
-            _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
-          }).toArray();
+            const users = await db.collection("users").find({
+              _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+            }).toArray();
 
-          const roles = await db.collection("roles").find({}).toArray();
-          const roleMap = {};
-          roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+            const roles = await ProjectController._getRolesCached();
+            const roleMap = {};
+            roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
 
-          // Filter non-admins and non-viewers
-          const nonAdminUsers = users.filter(u => {
-            const roleName = roleMap[u.role_id?.toString()];
-            const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
-            return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
-          });
-          const nonAdminUserIds = nonAdminUsers.map(u => u._id);
+            // Filter non-admins and non-viewers
+            const nonAdminUsers = users.filter(u => {
+              const roleName = roleMap[u.role_id?.toString()];
+              const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
+              return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
+            });
+            const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
-          // Get locked rankings with user info
-          const lockedRankings = await ProjectRankingModel.collection()
-            .find({
-              business_id: new ObjectId(business_id),
-              locked: true,
-              user_id: { $in: nonAdminUserIds }
-            })
-            .toArray();
+            // Get locked rankings with user info
+            const lockedRankings = await ProjectRankingModel.collection()
+              .find({
+                business_id: new ObjectId(business_id),
+                locked: true,
+                user_id: { $in: nonAdminUserIds }
+              })
+              .toArray();
 
-          // Get unique locked user IDs
-          const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
+            // Get unique locked user IDs
+            const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
 
-          // Build locked users list with details
-          const lockedUsers = nonAdminUsers
-            .filter(u => lockedUserIds.includes(u._id.toString()))
-            .map(u => ({
-              user_id: u._id,
-              name: u.name,
-              email: u.email,
-            }));
+            // Build locked users list with details
+            const lockedUsers = nonAdminUsers
+              .filter(u => lockedUserIds.includes(u._id.toString()))
+              .map(u => ({
+                user_id: u._id,
+                name: u.name,
+                email: u.email,
+              }));
 
-          ranking_lock_summary = {
-            total_users: nonAdminUsers.length,
-            locked_users_count: lockedUsers.length,
-            locked_users: lockedUsers,
-          };
+            ranking_lock_summary = {
+              total_users: nonAdminUsers.length,
+              locked_users_count: lockedUsers.length,
+              locked_users: lockedUsers,
+            };
+            
+            // Cache for 60 seconds
+            cacheUtil.set(cacheKey, ranking_lock_summary, 60);
+          }
         }
       }
+
 
       res.json({
         total,
@@ -397,6 +410,82 @@ class ProjectController {
       });
     } catch (err) {
       console.error("PROJECT GET ALL ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async getRankingsSummary(req, res) {
+    try {
+      const { business_id } = req.query;
+      if (!business_id || !ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Valid business_id is required" });
+      }
+
+      const db = getDB();
+      const cacheKey = cacheUtil.getCompanyKey('ranking_lock', business_id);
+      const cachedSummary = cacheUtil.get(cacheKey);
+
+      if (cachedSummary) {
+        return res.json(cachedSummary);
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+      const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+
+      const users = await db.collection("users").find({
+        _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+      }).toArray();
+
+      const roles = await ProjectController._getRolesCached();
+      const roleMap = {};
+      roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
+      // Filter non-admins and non-viewers
+      const nonAdminUsers = users.filter(u => {
+        const roleName = roleMap[u.role_id?.toString()];
+        const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
+        return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
+      });
+      const nonAdminUserIds = nonAdminUsers.map(u => u._id);
+
+      // Get locked rankings with user info
+      const lockedRankings = await ProjectRankingModel.collection()
+        .find({
+          business_id: new ObjectId(business_id),
+          locked: true,
+          user_id: { $in: nonAdminUserIds }
+        })
+        .toArray();
+
+      // Get unique locked user IDs
+      const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
+
+      // Build locked users list with details
+      const lockedUsers = nonAdminUsers
+        .filter(u => lockedUserIds.includes(u._id.toString()))
+        .map(u => ({
+          user_id: u._id,
+          name: u.name,
+          email: u.email,
+        }));
+
+      const ranking_lock_summary = {
+        total_users: nonAdminUsers.length,
+        locked_users_count: lockedUsers.length,
+        locked_users: lockedUsers,
+      };
+
+      // Cache for 60 seconds
+      cacheUtil.set(cacheKey, ranking_lock_summary, 60);
+
+      res.json(ranking_lock_summary);
+    } catch (err) {
+      console.error("RANKINGS SUMMARY ERR:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
@@ -497,7 +586,7 @@ class ProjectController {
 
           const db = getDB();
 
-          const roleDoc = await db.collection("roles").findOne({ _id: ownerUser.role_id });
+          const roleDoc = await ProjectController._getRoleByIdCached(ownerUser.role_id);
 
           const ownerRoleName = roleDoc?.role_name;
 
@@ -530,10 +619,7 @@ class ProjectController {
 
         let ownerRoleName = null;
         if (ownerUser?.role_id) {
-          const db = getDB();
-          const roleDoc = await db
-            .collection("roles")
-            .findOne({ _id: ownerUser.role_id });
+          const roleDoc = await ProjectController._getRoleByIdCached(ownerUser.role_id);
           ownerRoleName = roleDoc?.role_name;
         }
 
@@ -1089,7 +1175,7 @@ class ProjectController {
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
-        const roles = await db.collection("roles").find({}).toArray();
+        const roles = await ProjectController._getRolesCached();
 
 
         const roleMap = {};
@@ -1305,7 +1391,7 @@ class ProjectController {
               _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
             }).toArray();
 
-            const roles = await db.collection("roles").find({}).toArray();
+            const roles = await ProjectController._getRolesCached();
             const roleMap = {};
             roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
 
@@ -1415,7 +1501,7 @@ class ProjectController {
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
-        const roles = await db.collection("roles").find({}).toArray();
+        const roles = await ProjectController._getRolesCached();
 
 
         const roleMap = {};
@@ -1436,10 +1522,10 @@ class ProjectController {
 
         });
 
-        // Mandatory projects are those with an AI rank
+        // Mandatory projects are those with a launched or pending_launch status
         const mandatoryProjects = await ProjectModel.collection().find({
           business_id: new ObjectId(business_id),
-          ai_rank: { $exists: true, $ne: null }
+          launch_status: { $in: ['launched', 'pending_launch'] }
         }).toArray();
         const mandatoryProjectIds = mandatoryProjects.map(p => p._id);
         const mandatoryProjectIdStrs = mandatoryProjectIds.map(id => id.toString());
@@ -2338,7 +2424,7 @@ class ProjectController {
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
       }).toArray();
 
-      const roles = await db.collection("roles").find({}).toArray();
+      const roles = await ProjectController._getRolesCached();
       const roleMap = {};
       roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
 
@@ -2479,11 +2565,9 @@ class ProjectController {
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
       }).toArray();
 
-      const roles = await db.collection("roles").find({}).toArray();
-
+      const roles = await ProjectController._getRolesCached();
 
       const roleMap = {};
-
 
       roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
 
@@ -2779,6 +2863,23 @@ class ProjectController {
       console.error("PERFORM REVIEW ERR:", err);
       res.status(500).json({ error: "Server error" });
     }
+  }
+
+  static async _getRolesCached() {
+    const cacheKey = "global_roles";
+    let roles = cacheUtil.get(cacheKey);
+    if (!roles) {
+      const db = getDB();
+      roles = await db.collection("roles").find({}).toArray();
+      cacheUtil.set(cacheKey, roles, 600); // 10 minutes
+    }
+    return roles;
+  }
+
+  static async _getRoleByIdCached(roleId) {
+    if (!roleId) return null;
+    const roles = await this._getRolesCached();
+    return roles.find((r) => r._id.toString() === roleId.toString()) || null;
   }
 }
 

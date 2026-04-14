@@ -16,6 +16,7 @@ router.post("/lock-rank", authenticateToken, ProjectController.lockRank);
 router.get("/check-access", authenticateToken, ProjectController.checkUserAccess);
 router.get("/check-all-access", authenticateToken, ProjectController.checkAllAccess);
 router.get("/granted-access", authenticateToken, ProjectController.getGrantedAccess);
+router.get("/access-control", authenticateToken, ProjectController.getGrantedAccess);
 router.post("/revoke-access", authenticateToken, ProjectController.revokeAccess);
 
 // AI Ranking routes - FIXED: Use authenticateToken instead of authenticate
