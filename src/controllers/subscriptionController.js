@@ -612,7 +612,12 @@ class SubscriptionController {
                     // Remove from allowed_ranking_collaborators in businesses
                     await db.collection('user_businesses').updateMany(
                         { _id: { $in: businessIds } },
-                        { $pull: { allowed_ranking_collaborators: { $in: archivedUserIds } } }
+                        {
+                            $pull: {
+                                allowed_ranking_collaborators: { $in: archivedUserIds },
+                                collaborators: { $in: archivedUserIds }
+                            }
+                        }
                     );
 
                     // Remove from allowed_collaborators in projects

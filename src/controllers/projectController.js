@@ -1134,7 +1134,13 @@ class ProjectController {
       delete updateData.business_id;
       delete updateData.created_at;
 
+      // Revoke special edit access for collaborators if terminal state
+      if (['killed', 'completed', 'scaled'].includes(updateData.status?.toLowerCase())) {
+        updateData.allowed_collaborators = [];
+      }
+
       await ProjectModel.update(id, updateData);
+
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -1878,8 +1884,10 @@ class ProjectController {
 
       await ProjectModel.update(id, {
         status: PROJECT_STATES.KILLED,
+        allowed_collaborators: [],
         updated_at: new Date()
       });
+
 
       res.json({
         message: "Project killed successfully and rankings cleared",
@@ -1928,6 +1936,11 @@ class ProjectController {
       }
 
       const updateUpdate = { status, updated_at: new Date() };
+
+      if (['killed', 'completed', 'scaled'].includes(status.toLowerCase())) {
+        updateUpdate.allowed_collaborators = [];
+      }
+
 
       await ProjectModel.collection().updateOne(
         { _id: new ObjectId(id) },
@@ -2127,11 +2140,15 @@ class ProjectController {
         }
 
         const isLaunchedOrPending = (project.launch_status || "").toLowerCase() === "launched" || (project.launch_status || "").toLowerCase() === "pending_launch";
+        const isTerminal = ['killed', 'completed', 'scaled'].includes((project.status || "").toLowerCase());
 
         const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
           project.allowed_collaborators.some(id => id.toString() === user_id.toString());
 
-        if (isLaunchedOrPending) {
+        if (isTerminal) {
+          // Terminal projects are NEVER editable by collaborators/users
+          projectsEditAccess[project._id.toString()] = false;
+        } else if (isLaunchedOrPending) {
           // For launched or pending launch projects, only those with special access can edit
           projectsEditAccess[project._id.toString()] = isInAllowedCollabs;
         } else {
@@ -2139,6 +2156,7 @@ class ProjectController {
           projectsEditAccess[project._id.toString()] = true;
         }
       });
+
 
       res.json({
         business_id,
@@ -2860,7 +2878,12 @@ class ProjectController {
       if (status) updateData.status = status;
       if (learning_state) updateData.learning_state = learning_state;
 
+      if (status && ['killed', 'completed', 'scaled'].includes(status.toLowerCase())) {
+        updateData.allowed_collaborators = [];
+      }
+
       await ProjectModel.update(id, updateData);
+
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -2933,9 +2956,14 @@ class ProjectController {
       if (!no_changes) {
         if (status) updateData.status = status;
         if (learning_state) updateData.learning_state = learning_state;
+        
+        if (status && ['killed', 'completed', 'scaled'].includes(status.toLowerCase())) {
+          updateData.allowed_collaborators = [];
+        }
       }
 
       await ProjectModel.update(id, updateData);
+
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
