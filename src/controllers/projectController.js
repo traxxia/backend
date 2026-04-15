@@ -988,6 +988,14 @@ class ProjectController {
       if (req.body.review_cadence !== undefined)
         updateData.review_cadence = normalizeString(req.body.review_cadence);
 
+      // --- Detect status and learning_state changes, create ONE decision log entry ---
+      let statusChanged = false;
+      let learningStateChanged = false;
+      let resolvedStatus = null;
+      let newLearningState = null;
+      const oldLearningState = existing.learning_state || "Testing";
+
+      // Process status
       if (req.body.status !== undefined) {
         const val = req.body.status;
         if (val === "" || val === null) {
@@ -1007,40 +1015,13 @@ class ProjectController {
           }
 
           if (found !== existing.status) {
-
-            if (!req.body.justification || String(req.body.justification).trim() === "") {
-              return res.status(400).json({
-                error: "Justification is required when changing project status."
-              });
-            }
-
-            const justification = String(req.body.justification).trim();
-
-            // Allow alphabets + spaces + punctuation
-            const validSentence = /^[A-Za-z\s.,'-]+$/;
-
-            if (!validSentence.test(justification)) {
-              return res.status(400).json({
-                error: "Justification must contain only letters and valid sentence punctuation."
-              });
-            }
-
-            const logEntry = {
-              project_id: new ObjectId(id),
-              from_status: existing.status,
-              to_status: found,
-              justification: justification,
-              changed_by: new ObjectId(req.user._id),
-              changed_at: new Date()
-            };
-
-            await DecisionLogModel.create(logEntry);
+            statusChanged = true;
+            resolvedStatus = found;
           }
 
           updateData.status = found;
         }
       }
-
 
       if (req.body.impact !== undefined)
         updateData.impact = normalizeString(req.body.impact);
@@ -1090,8 +1071,52 @@ class ProjectController {
         }
       }
 
+      // Process learning_state
       if (req.body.learning_state !== undefined) {
-        updateData.learning_state = normalizeString(req.body.learning_state);
+        newLearningState = normalizeString(req.body.learning_state);
+
+        if (newLearningState && oldLearningState.toLowerCase() !== newLearningState.toLowerCase()) {
+          learningStateChanged = true;
+        }
+
+        updateData.learning_state = newLearningState;
+      }
+
+      // Create a single decision log entry if either status or learning_state changed
+      if (statusChanged || learningStateChanged) {
+        if (!req.body.justification || String(req.body.justification).trim() === "") {
+          return res.status(400).json({
+            error: "Justification is required when changing project status or learning state."
+          });
+        }
+
+        const justification = String(req.body.justification).trim();
+        const validSentence = /^[A-Za-z\s.,'-]+$/;
+
+        if (!validSentence.test(justification)) {
+          return res.status(400).json({
+            error: "Justification must contain only letters and valid sentence punctuation."
+          });
+        }
+
+        const logEntry = {
+          project_id: new ObjectId(id),
+          justification: justification,
+          changed_by: new ObjectId(req.user._id),
+          changed_at: new Date()
+        };
+
+        if (statusChanged) {
+          logEntry.from_status = existing.status;
+          logEntry.to_status = resolvedStatus;
+        }
+
+        if (learningStateChanged) {
+          logEntry.from_learning_state = oldLearningState;
+          logEntry.to_learning_state = newLearningState;
+        }
+
+        await DecisionLogModel.create(logEntry);
       }
 
       if (req.body.last_reviewed !== undefined || req.body.review_cadence !== undefined) {
