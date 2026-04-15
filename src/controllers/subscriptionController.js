@@ -541,8 +541,30 @@ class SubscriptionController {
 
             await db.collection('user_businesses').updateMany(
                 { ...workspaceFilter, _id: { $nin: activeWorkspaceIds } },
-                { $set: { access_mode: 'archived', status: 'archived', archived_at: new Date() } }
+                {
+                    $set: {
+                        access_mode: 'archived',
+                        status: 'archived',
+                        archived_at: new Date(),
+                        collaborators: [],
+                        allowed_ranking_collaborators: []
+                    }
+                }
             );
+
+            // Cleanup project access for archived businesses
+            const archivedBusinesses = await db.collection('user_businesses').find({
+                ...workspaceFilter,
+                _id: { $nin: activeWorkspaceIds }
+            }).project({ _id: 1 }).toArray();
+
+            if (archivedBusinesses.length > 0) {
+                const archivedBusinessIds = archivedBusinesses.map(b => b._id);
+                await db.collection('projects').updateMany(
+                    { business_id: { $in: archivedBusinessIds } },
+                    { $set: { allowed_collaborators: [], updated_at: new Date() } }
+                );
+            }
 
             // 2. Process Users
             const activeUserIds = [
@@ -570,6 +592,36 @@ class SubscriptionController {
                 { ...userFilter, _id: { $nin: activeUserIds } },
                 { $set: { status: 'inactive', access_mode: 'archived', inactive_at: new Date() } }
             );
+
+            // Cleanup access for archived users
+            const archivedUsers = await db.collection('users').find({
+                ...userFilter,
+                _id: { $nin: activeUserIds }
+            }).project({ _id: 1 }).toArray();
+
+            if (archivedUsers.length > 0) {
+                const archivedUserIds = archivedUsers.map(u => u._id);
+
+                const companyBusinesses = await db.collection('user_businesses')
+                    .find(workspaceFilter)
+                    .project({ _id: 1 })
+                    .toArray();
+                const businessIds = companyBusinesses.map(b => b._id);
+
+                if (businessIds.length > 0) {
+                    // Remove from allowed_ranking_collaborators in businesses
+                    await db.collection('user_businesses').updateMany(
+                        { _id: { $in: businessIds } },
+                        { $pull: { allowed_ranking_collaborators: { $in: archivedUserIds } } }
+                    );
+
+                    // Remove from allowed_collaborators in projects
+                    await db.collection('projects').updateMany(
+                        { business_id: { $in: businessIds } },
+                        { $pull: { allowed_collaborators: { $in: archivedUserIds } } }
+                    );
+                }
+            }
 
             // 3. Update Company Plan
             const planSnapshot = TierService.buildPlanSnapshot(newPlan);
