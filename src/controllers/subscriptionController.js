@@ -9,7 +9,7 @@ class SubscriptionController {
         try {
             const db = getDB();
             const userId = req.user._id;
-            
+
             // Cache lookup
             const cacheKey = cacheUtil.getUserKey('sub_details', userId);
             const cachedData = cacheUtil.get(cacheKey);
@@ -416,7 +416,7 @@ class SubscriptionController {
                     company_id: user.company_id,
                     status: { $ne: 'deleted' }
                 }).toArray();
-                
+
                 const allActiveUsers = allCompanyUsers.filter(u => !u.status || u.status === 'active');
                 const allInactiveUsers = allCompanyUsers.filter(u => u.status && u.status !== 'active');
 
@@ -514,20 +514,33 @@ class SubscriptionController {
             if (!newPlan) return res.status(404).json({ error: 'Plan not found' });
 
             const companyUsers = await db.collection('users').find({ company_id: user.company_id }).project({ _id: 1 }).toArray();
-            const allPotentialOwnerIds = companyUsers.map(u => u._id);
+            const allPotentialOwnerIds = [...new Set([
+                ...companyUsers.map(u => u._id),
+                ...companyUsers.map(u => u._id.toString())
+            ])];
 
             const newLimits = TierService.getLimitsForPlan(newPlan);
 
             // 1. Process Workspaces
             const activeWorkspaceIds = (selections.workspaces || []).map(id => new ObjectId(id));
+
+            const workspaceFilter = {
+                $or: [
+                    { user_id: { $in: allPotentialOwnerIds } },
+                    { company_id: user.company_id }
+                ],
+                status: { $ne: 'deleted' }
+            };
+
             if (activeWorkspaceIds.length > 0) {
                 await db.collection('user_businesses').updateMany(
-                    { _id: { $in: activeWorkspaceIds }, company_id: user.company_id },
+                    { ...workspaceFilter, _id: { $in: activeWorkspaceIds } },
                     { $set: { access_mode: 'active', status: 'active', updated_at: new Date() } }
                 );
             }
+
             await db.collection('user_businesses').updateMany(
-                { _id: { $nin: activeWorkspaceIds }, company_id: user.company_id, status: { $ne: 'deleted' } },
+                { ...workspaceFilter, _id: { $nin: activeWorkspaceIds } },
                 { $set: { access_mode: 'archived', status: 'archived', archived_at: new Date() } }
             );
 
@@ -548,8 +561,13 @@ class SubscriptionController {
             const restrictedRoles = await db.collection('roles').find({ role_name: { $in: ['collaborator', 'viewer', 'user'] } }).project({ _id: 1 }).toArray();
             const restrictedRoleIds = restrictedRoles.map(r => r._id);
 
+            const userFilter = {
+                company_id: user.company_id,
+                role_id: { $in: restrictedRoleIds }
+            };
+
             await db.collection('users').updateMany(
-                { _id: { $nin: activeUserIds }, company_id: user.company_id, role_id: { $in: restrictedRoleIds } },
+                { ...userFilter, _id: { $nin: activeUserIds } },
                 { $set: { status: 'inactive', access_mode: 'archived', inactive_at: new Date() } }
             );
 
@@ -568,6 +586,16 @@ class SubscriptionController {
                     }
                 }
             );
+
+            // 4. Record in billing history
+            await db.collection('billing_history').insertOne({
+                company_id: user.company_id,
+                plan_name: newPlan.name,
+                amount: newPlan.price || newPlan.price_usd || 0,
+                date: new Date(),
+                type: 'upgrade',
+                stripe_subscription_id: company.stripe_subscription_id
+            });
 
             // Invalidate cache
             cacheUtil.del(cacheUtil.getUserKey('sub_details', userId));

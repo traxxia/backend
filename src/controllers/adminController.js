@@ -517,6 +517,7 @@ class AdminController {
             business_name: 1,
             business_purpose: 1,
             status: 1,
+            access_mode: 1,
             created_at: 1,
             owner_name: "$owner.name",
             owner_email: "$owner.email",
@@ -1559,19 +1560,19 @@ class AdminController {
       // Find relevant businesses
       let businesses;
       if (filter.company_id) {
-         const users = await db.collection("users").find(filter).toArray();
-         const userIds = users.map(u => u._id);
-         businesses = await db.collection("user_businesses").find({
-           $or: [
-             { user_id: { $in: userIds } },
-             { company_id: filter.company_id }
-           ],
-           status: { $ne: 'deleted' }
-         }).toArray();
+        const users = await db.collection("users").find(filter).toArray();
+        const userIds = users.map(u => u._id);
+        businesses = await db.collection("user_businesses").find({
+          $or: [
+            { user_id: { $in: userIds } },
+            { company_id: filter.company_id }
+          ],
+          status: { $ne: 'deleted' }
+        }).toArray();
       } else {
-         businesses = await db.collection("user_businesses").find({
-           status: { $ne: 'deleted' }
-         }).toArray();
+        businesses = await db.collection("user_businesses").find({
+          status: { $ne: 'deleted' }
+        }).toArray();
       }
 
       const businessIds = businesses.map(b => b._id);
@@ -1587,23 +1588,23 @@ class AdminController {
       }).toArray();
 
       const { isProjectStale } = require('../utils/helpers');
-      
+
       const staleProjects = [];
-      
+
       for (const project of projects) {
         if (project.next_review_date && isProjectStale(project.next_review_date)) {
           const business = businessMap[project.business_id.toString()];
-          
+
           let ownerName = "Unknown";
           if (project.accountable_owner) {
             ownerName = project.accountable_owner;
           } else if (project.created_by) {
-             const user = await db.collection("users").findOne({ _id: project.created_by });
-             if (user) ownerName = user.name;
-             else if (business && business.user_id) {
-               const bUser = await db.collection("users").findOne({ _id: business.user_id });
-               if (bUser) ownerName = bUser.name;
-             }
+            const user = await db.collection("users").findOne({ _id: project.created_by });
+            if (user) ownerName = user.name;
+            else if (business && business.user_id) {
+              const bUser = await db.collection("users").findOne({ _id: business.user_id });
+              if (bUser) ownerName = bUser.name;
+            }
           }
 
           staleProjects.push({

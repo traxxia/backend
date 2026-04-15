@@ -1562,6 +1562,13 @@ class ProjectController {
         business_id: new ObjectId(business_id),
       });
 
+      const businessOwnerId = business.user_id;
+      const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+        businessOwnerId,
+        business_id
+      );
+      const adminRankedProjectIds = new Set(adminRankings.filter(r => r.rank !== null).map(r => r.project_id.toString()));
+
       const rankingMap = {};
       rankings.forEach(r => {
         rankingMap[r.project_id.toString()] = r;
@@ -1606,6 +1613,7 @@ class ProjectController {
           locked: ranking.locked || false,
           ai_rank: project.ai_rank || null,
           ai_rank_score: project.ai_rank_score || null,
+          is_admin_ranked: adminRankedProjectIds.has(project._id.toString()),
           next_review_date: nextReview,
           is_stale: project.launch_status === 'launched' ? isProjectStale(nextReview) : false,
         };

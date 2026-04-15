@@ -265,8 +265,8 @@ class BusinessController {
               access,
               has_projects: businessHasProjectSet.has(business._id.toString()),
               has_launched_projects: businessHasLaunchedProjectSet.has(business._id.toString()),
-              has_access_grants: (business.allowed_ranking_collaborators?.length > 0) || 
-                                 businessHasProjectGrantsSet.has(business._id.toString()),
+              has_access_grants: (business.allowed_ranking_collaborators?.length > 0) ||
+                businessHasProjectGrantsSet.has(business._id.toString()),
             };
           })
         );
@@ -283,9 +283,13 @@ class BusinessController {
       // console.log("DEBUG collaborating_businesses:", collaborating_businesses.map(b => b._id.toString()));
 
       res.json({
-        businesses: enhancedOwned,
-        collaborating_businesses: enhancedCollaborating,
+        businesses: enhancedOwned.filter(b => b.status !== 'archived'),
+        collaborating_businesses: enhancedCollaborating.filter(b => b.status !== 'archived'),
         deleted_businesses: [...enhancedDeletedOwned, ...enhancedDeletedCollaborating],
+        archived_businesses: [
+          ...enhancedOwned.filter(b => b.status === 'archived'),
+          ...enhancedCollaborating.filter(b => b.status === 'archived')
+        ],
         overall_stats: {
           total_businesses: owned.filter(b => b.status !== 'deleted').length,
           total_questions_in_system: totalQuestions,
@@ -488,6 +492,7 @@ class BusinessController {
 
       const businessData = {
         user_id: new ObjectId(req.user._id),
+        company_id: req.user.company_id ? new ObjectId(req.user.company_id) : null,
         business_name: business_name.trim(),
         business_purpose: business_purpose.trim(),
         description: description ? description.trim() : "",
@@ -608,10 +613,10 @@ class BusinessController {
       const collaboratorIds = business.collaborators || [];
 
       const db = getDB();
-      const roles = await db.collection("roles").find({ 
-        role_name: { $in: ["collaborator", "user", "viewer"] } 
+      const roles = await db.collection("roles").find({
+        role_name: { $in: ["collaborator", "user", "viewer"] }
       }).toArray();
-      
+
       const roleIds = roles.map(r => r._id);
 
       const collaborators = await UserModel.getAll({
@@ -666,7 +671,7 @@ class BusinessController {
       const companyId = ownerUser?.company_id;
 
       const collaboratorIds = business.collaborators || [];
-      
+
       // Filter: Only owner, collaborators, and company admins (they have oversight)
       // This ensures we are "part that particular business" context.
       let queryFilter = {
@@ -681,9 +686,9 @@ class BusinessController {
         const db = getDB();
         const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
         if (companyAdminRole) {
-          queryFilter.$or.push({ 
-            company_id: companyId, 
-            role_id: companyAdminRole._id 
+          queryFilter.$or.push({
+            company_id: companyId,
+            role_id: companyAdminRole._id
           });
         }
       }
@@ -695,10 +700,10 @@ class BusinessController {
         .filter(u => {
           const role = (u.role_name || '').toLowerCase();
           const isRoleAllowed = ['collaborator', 'user', 'company_admin', 'org_admin'].includes(role);
-          
+
           // "Active" check: not deleted, not inactive, not archived
           const isActive = u.status !== 'deleted' && u.status !== 'inactive' && u.access_mode !== 'archived';
-          
+
           return isRoleAllowed && isActive;
         })
         .map(u => ({
@@ -862,7 +867,7 @@ class BusinessController {
       const targetRoleName = roleDoc?.role_name || "viewer";
 
       const limits = await TierService.getCompanyLimits(req.user.company_id);
-      
+
       // Get all existing assigned users to count by role
       const existingAssignedIds = (business.collaborators || []).map(id => new ObjectId(id));
       const assignedUsers = await db.collection("users").aggregate([
@@ -965,7 +970,7 @@ class BusinessController {
       }
 
       await BusinessModel.removeCollaborator(businessId, collabId);
-      
+
       // Also remove project-level edit access for this user in this business
       await ProjectModel.removeFromAllowedCollaborators(businessId, collabId);
 
