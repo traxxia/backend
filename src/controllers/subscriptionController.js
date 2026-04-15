@@ -689,7 +689,27 @@ class SubscriptionController {
                     { $set: { stripe_customer_id: customerId } }
                 );
             } else {
-                await StripeService.attachPaymentMethod(paymentMethodId, customerId);
+                // Check for duplicate card (fingerprint)
+                try {
+                    const pm = await StripeService.retrievePaymentMethod(paymentMethodId);
+
+                    if (pm.customer !== customerId) {
+                        // Check for fingerprint duplicate
+                        const existingMethods = await StripeService.listPaymentMethods(customerId);
+                        const newFingerprint = pm.card?.fingerprint;
+                        const isDuplicate = existingMethods.some(ex => ex.card?.fingerprint === newFingerprint);
+
+                        if (isDuplicate) {
+                            return res.status(400).json({ error: 'This card is already linked to your account.' });
+                        }
+
+                        // Attach new payment method to existing customer
+                        await StripeService.attachPaymentMethod(paymentMethodId, customerId);
+                    }
+                } catch (stripeError) {
+                    console.error('Stripe payment validation failed:', stripeError);
+                    return res.status(400).json({ error: 'Failed to validate card: ' + stripeError.message });
+                }
             }
 
             if (setAsDefault) {
