@@ -117,10 +117,26 @@ class ProjectRankingModel {
   static async clearRankingsForProject(projectId) {
     return this.collection().updateMany(
       { project_id: new ObjectId(projectId) },
-      { $set: { rank: null, updated_at: new Date() } }
+      { $set: { rank: null, rationals: "", updated_at: new Date() } }
     );
   }
 
+  static async resetCollaboratorRankings(businessId, adminId) {
+    return this.collection().updateMany(
+      {
+        business_id: new ObjectId(businessId),
+        user_id: { $ne: new ObjectId(adminId) }
+      },
+      {
+        $set: {
+          rank: null,
+          rationals: "",
+          locked: false,
+          updated_at: new Date()
+        }
+      }
+    );
+  }
 }
 
 module.exports = ProjectRankingModel;

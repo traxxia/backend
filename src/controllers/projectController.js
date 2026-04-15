@@ -358,25 +358,36 @@ class ProjectController {
             const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
             // Get locked rankings with user info
-            const lockedRankings = await ProjectRankingModel.collection()
-              .find({
-                business_id: new ObjectId(business_id),
-                locked: true,
-                user_id: { $in: nonAdminUserIds }
-              })
-              .toArray();
+            // Mandatory projects are those ranked by admin (business owner)
+            const businessOwnerId = business.user_id;
+            const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+              businessOwnerId,
+              business_id
+            );
+            const mandatoryProjectIds = adminRankings
+              .filter(r => r.rank !== null)
+              .map(r => r.project_id);
 
-            // Get unique locked user IDs
-            const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
+            // Get collaborator rankings for these mandatory projects
+            const lockedUsers = [];
+            for (const user of nonAdminUsers) {
+              const userRankingsCount = await ProjectRankingModel.collection()
+                .countDocuments({
+                  business_id: new ObjectId(business_id),
+                  user_id: user._id,
+                  project_id: { $in: mandatoryProjectIds.map(id => new ObjectId(id)) },
+                  rank: { $ne: null }
+                });
 
-            // Build locked users list with details
-            const lockedUsers = nonAdminUsers
-              .filter(u => lockedUserIds.includes(u._id.toString()))
-              .map(u => ({
-                user_id: u._id,
-                name: u.name,
-                email: u.email,
-              }));
+              // Consider "done" if they've ranked all projects that admin ranked
+              if (mandatoryProjectIds.length > 0 && userRankingsCount >= mandatoryProjectIds.length) {
+                lockedUsers.push({
+                  user_id: user._id,
+                  name: user.name,
+                  email: user.email,
+                });
+              }
+            }
 
             ranking_lock_summary = {
               total_users: nonAdminUsers.length,
@@ -391,6 +402,23 @@ class ProjectController {
       }
 
 
+      // Fetch Admin Rankings to determine is_admin_ranked status
+      let adminRankedProjectIds = new Set();
+      if (business_id && ObjectId.isValid(business_id)) {
+        const business = businessesMap[business_id.toString()] || await BusinessModel.findById(business_id);
+        if (business && business.user_id) {
+          const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+            business.user_id,
+            business_id
+          );
+          adminRankedProjectIds = new Set(
+            adminRankings
+              .filter(r => r.rank !== null)
+              .map(r => r.project_id.toString())
+          );
+        }
+      }
+
       res.json({
         total,
         count: projects.length,
@@ -401,6 +429,7 @@ class ProjectController {
             ...p,
             review_cadence: actualCadence,
             next_review_date: nextReview,
+            is_admin_ranked: adminRankedProjectIds.has(p._id.toString()),
             is_stale: p.launch_status === 'launched' ? isProjectStale(nextReview) : false
           };
         }),
@@ -453,37 +482,45 @@ class ProjectController {
       });
       const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
-      // Get locked rankings with user info
-      const lockedRankings = await ProjectRankingModel.collection()
-        .find({
-          business_id: new ObjectId(business_id),
-          locked: true,
-          user_id: { $in: nonAdminUserIds }
-        })
-        .toArray();
+      // Mandatory projects are those ranked by admin (business owner)
+      const businessOwnerId = business.user_id;
+      const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+        businessOwnerId,
+        business_id
+      );
+      const mandatoryProjectIds = adminRankings
+        .filter(r => r.rank !== null)
+        .map(r => r.project_id);
 
-      // Get unique locked user IDs
-      const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
+      // Get collaborator rankings for these mandatory projects
+      const lockedUsers = [];
+      for (const user of nonAdminUsers) {
+        const userRankingsCount = await ProjectRankingModel.collection()
+          .countDocuments({
+            business_id: new ObjectId(business_id),
+            user_id: user._id,
+            project_id: { $in: mandatoryProjectIds.map(id => new ObjectId(id)) },
+            rank: { $ne: null }
+          });
 
-      // Build locked users list with details
-      const lockedUsers = nonAdminUsers
-        .filter(u => lockedUserIds.includes(u._id.toString()))
-        .map(u => ({
-          user_id: u._id,
-          name: u.name,
-          email: u.email,
-        }));
+        if (mandatoryProjectIds.length > 0 && userRankingsCount >= mandatoryProjectIds.length) {
+          lockedUsers.push({
+            user_id: user._id,
+            name: user.name,
+            email: user.email,
+          });
+        }
+      }
 
-      const ranking_lock_summary = {
+      const summary = {
         total_users: nonAdminUsers.length,
         locked_users_count: lockedUsers.length,
         locked_users: lockedUsers,
       };
 
       // Cache for 60 seconds
-      cacheUtil.set(cacheKey, ranking_lock_summary, 60);
-
-      res.json(ranking_lock_summary);
+      cacheUtil.set(cacheKey, summary, 60);
+      res.json(summary);
     } catch (err) {
       console.error("RANKINGS SUMMARY ERR:", err);
       res.status(500).json({ error: "Server error" });
@@ -1163,6 +1200,10 @@ class ProjectController {
 
       // NEW: Unlock rankings to allow collaborators to provide input on the new selection
       await ProjectRankingModel.unlockRankingByBusiness(businessId);
+      
+      // Clear progress cache
+      const cacheKey = cacheUtil.getCompanyKey('ranking_lock', businessId);
+      cacheUtil.del(cacheKey);
 
       // 5. Consensus check: All non-admin collaborators must have a rank for ALL launched/pending projects
       const business = await BusinessModel.findById(businessId);
@@ -1378,6 +1419,41 @@ class ProjectController {
 
       await ProjectRankingModel.bulkUpsert(rankingDocs);
 
+      // If Admin is ranking, clear ranks for any projects they just deselected
+      // and unlock/reset all collaborator rankings so they are forced to review/re-save.
+      // If Admin is ranking, clear ranks for any projects they just deselected
+      // and unlock/reset all collaborator rankings so they are forced to review/re-save.
+      if (isAdmin) {
+        try {
+          // 1. Invalidate progress cache so UI updates immediately
+          const cacheKey = cacheUtil.getCompanyKey('ranking_lock', business_id);
+          cacheUtil.del(cacheKey);
+
+          // 2. Reset all collaborator rankings (rank, rationals, locked status)
+          await ProjectRankingModel.resetCollaboratorRankings(business_id, user_id);
+
+          // 3. Handle deselected projects: clear their ranks for everyone (including this admin's session record)
+          const previouslyRankedIds = existingRankings
+            .filter(r => r.rank !== null)
+            .map(r => r.project_id.toString());
+          
+          const currentlyRankedIds = projects
+            .filter(p => p.rank !== null)
+            .map(p => p.project_id.toString());
+          
+          const deselectedIds = previouslyRankedIds.filter(id => !currentlyRankedIds.includes(id));
+          
+          for (const projectId of deselectedIds) {
+            await ProjectRankingModel.clearRankingsForProject(projectId);
+          }
+
+          // 4. Force global unlock just in case
+          await ProjectRankingModel.unlockRankingByBusiness(business_id);
+        } catch (syncErr) {
+          console.error("Failed to sync admin rankings update:", syncErr);
+        }
+      }
+
       // Notification Logic
       try {
         const db = getDB();
@@ -1522,26 +1598,25 @@ class ProjectController {
 
         });
 
-        // Mandatory projects are those with a launched or pending_launch status
-        const mandatoryProjects = await ProjectModel.collection().find({
-          business_id: new ObjectId(business_id),
-          launch_status: { $in: ['launched', 'pending_launch'] }
-        }).toArray();
-        const mandatoryProjectIds = mandatoryProjects.map(p => p._id);
-        const mandatoryProjectIdStrs = mandatoryProjectIds.map(id => id.toString());
+        const businessOwnerId = business.user_id;
+        const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+          businessOwnerId,
+          business_id
+        );
+        const mandatoryProjectIds = adminRankings
+          .filter(r => r.rank !== null)
+          .map(r => r.project_id);
 
         const lockedUsers = [];
-
         for (const user of nonAdminUsers) {
-          const userRankings = await ProjectRankingModel.collection().find({
+          const userRankingsCount = await ProjectRankingModel.collection().countDocuments({
             business_id: new ObjectId(business_id),
             user_id: user._id,
-            project_id: { $in: mandatoryProjectIds },
+            project_id: { $in: mandatoryProjectIds.map(id => new ObjectId(id)) },
             rank: { $ne: null }
-          }).toArray();
+          });
 
-          // A user is considered "done" if they have ranked all projects with AI ranks
-          if (mandatoryProjectIds.length > 0 && userRankings.length >= mandatoryProjectIds.length) {
+          if (mandatoryProjectIds.length > 0 && userRankingsCount >= mandatoryProjectIds.length) {
             lockedUsers.push({
               user_id: user._id,
               name: user.name,
@@ -1554,7 +1629,7 @@ class ProjectController {
           total_users: nonAdminUsers.length,
           locked_users_count: lockedUsers.length,
           locked_users: lockedUsers,
-          mandatory_project_ids: mandatoryProjectIdStrs
+          mandatory_project_ids: mandatoryProjectIds
         };
       }
 
@@ -2043,6 +2118,7 @@ class ProjectController {
       res.json({
         business_id,
         has_rerank_access: hasRerankAccess,
+        has_ranking_access: hasRerankAccess, // Alias for clear identification in ranking view
         projects_edit_access: projectsEditAccess,
       });
     } catch (err) {
@@ -2275,6 +2351,10 @@ class ProjectController {
 
       // NEW: Unlock rankings when AI rankings are saved (kickstart)
       await ProjectRankingModel.unlockRankingByBusiness(business_id);
+      
+      // Clear progress cache
+      const cacheKey = cacheUtil.getCompanyKey('ranking_lock', business_id);
+      cacheUtil.del(cacheKey);
 
       // NEW: Automatically move business to prioritizing phase during kickstart
       await BusinessModel.collection().updateOne(
