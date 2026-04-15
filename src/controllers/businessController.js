@@ -283,13 +283,10 @@ class BusinessController {
       // console.log("DEBUG collaborating_businesses:", collaborating_businesses.map(b => b._id.toString()));
 
       res.json({
-        businesses: enhancedOwned.filter(b => b.status !== 'archived'),
-        collaborating_businesses: enhancedCollaborating.filter(b => b.status !== 'archived'),
+        businesses: enhancedOwned,
+        collaborating_businesses: enhancedCollaborating,
         deleted_businesses: [...enhancedDeletedOwned, ...enhancedDeletedCollaborating],
-        archived_businesses: [
-          ...enhancedOwned.filter(b => b.status === 'archived'),
-          ...enhancedCollaborating.filter(b => b.status === 'archived')
-        ],
+        archived_businesses: [], // Keep empty array for backward compatibility if needed
         overall_stats: {
           total_businesses: owned.filter(b => b.status !== 'deleted').length,
           total_questions_in_system: totalQuestions,
