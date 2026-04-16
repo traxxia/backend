@@ -17,7 +17,12 @@ class BlobService {
     if (!this.containerClient) {
       throw new Error('Blob storage not configured');
     }
+    
+    // Skip network call if already checked in this process lifecycle
+    if (BlobService.containerChecked) return;
+
     await this.containerClient.createIfNotExists();
+    BlobService.containerChecked = true;
   }
 
   async uploadBuffer(blobName, buffer, contentType) {

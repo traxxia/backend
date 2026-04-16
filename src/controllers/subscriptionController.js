@@ -2,7 +2,7 @@ const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 const TierService = require('../services/tierService');
 const StripeService = require('../services/stripeService');
-
+const cacheUtil = require('../utils/cache');
 
 class SubscriptionController {
     static async getDetails(req, res) {
@@ -10,7 +10,13 @@ class SubscriptionController {
             const db = getDB();
             const userId = req.user._id;
 
+            // Cache lookup
+            const cacheKey = cacheUtil.getUserKey('sub_details', userId);
+            const cachedData = cacheUtil.get(cacheKey);
+            if (cachedData) return res.json(cachedData);
+
             const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
+
             if (!user || !user.company_id) {
                 return res.json({
                     plan: 'None',
@@ -196,7 +202,7 @@ class SubscriptionController {
             // Determine billing cycle label
             const billingCycle = currentPlanPeriod === 'year' ? 'yearly' : 'monthly';
 
-            res.json({
+            const responseData = {
                 plan: planName,
                 billing_cycle: billingCycle,
                 total_days: totalDaysCycle,
@@ -269,7 +275,13 @@ class SubscriptionController {
                     insight: limits.insight ?? false,
                     strategic: limits.strategic ?? false
                 }
-            });
+            };
+
+            // Save to cache before sending response
+            cacheUtil.set(cacheKey, responseData, 60);
+
+            res.json(responseData);
+
         } catch (error) {
             console.error('Failed to fetch subscription details:', error);
             res.status(500).json({ error: 'Failed to fetch subscription details' });
@@ -376,16 +388,7 @@ class SubscriptionController {
                 usage.users > (newLimits.max_users || 0)
             );
 
-            const currentLimits = await TierService.getCompanyLimits(user.company_id);
-            const archivedUsage = await TierService.getCompanyArchivedUsage(user.company_id);
-            const isReactivationPossible = (
-                (newLimits.max_workspaces > (currentLimits.max_workspaces || 0) && archivedUsage.workspaces > 0) ||
-                (newLimits.max_collaborators > (currentLimits.max_collaborators || 0) && archivedUsage.collaborators > 0) ||
-                (newLimits.max_viewers > (currentLimits.max_viewers || 0) && archivedUsage.viewers > 0) ||
-                (newLimits.max_users > (currentLimits.max_users || 0) && archivedUsage.users > 0)
-            );
-
-            // Always show configuration for new plans or renewals as per user request
+            // Always show configuration for new plans 
             if (true) {
                 const companyUsers = await db.collection('users')
                     .find({ company_id: user.company_id })
@@ -413,7 +416,7 @@ class SubscriptionController {
                     company_id: user.company_id,
                     status: { $ne: 'deleted' }
                 }).toArray();
-                
+
                 const allActiveUsers = allCompanyUsers.filter(u => !u.status || u.status === 'active');
                 const allInactiveUsers = allCompanyUsers.filter(u => u.status && u.status !== 'active');
 
@@ -467,85 +470,6 @@ class SubscriptionController {
                 });
             }
 
-            // 6. Sync with Stripe
-            let stripeSubscriptionId = company?.stripe_subscription_id;
-            let periodStart = new Date();
-            let periodEnd = TierService.calculateExpiryDate(periodStart, newPlan.interval || newPlan.period || 'month');
-
-            if (newPlan.stripe_price_id) {
-                try {
-                    if (stripeSubscriptionId) {
-                        // Update existing subscription
-                        console.log(`Updating Stripe subscription ${stripeSubscriptionId} to price ${newPlan.stripe_price_id}`);
-                        const subscription = await StripeService.updateSubscription(stripeSubscriptionId, {
-                            items: [{
-                                id: (await StripeService.retrieveSubscription(stripeSubscriptionId)).items.data[0].id,
-                                price: newPlan.stripe_price_id,
-                            }],
-                            proration_behavior: 'always_invoice',
-                        });
-                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) {
-                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
-                            const planInterval = newPlan.interval || newPlan.period || 'month';
-                            // If yearly plan, only trust Stripe if the date is actually set for a year (roughly)
-                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
-                                console.log('[Upgrade] Stripe returned short period for yearly plan, keeping 365 days');
-                            } else {
-                                periodEnd = stripeEndDate;
-                            }
-                        }
-                    } else if (company?.stripe_customer_id) {
-                        // Create new subscription
-                        console.log(`Creating new Stripe subscription for customer ${company.stripe_customer_id} with price ${newPlan.stripe_price_id}`);
-                        const subscription = await StripeService.createSubscription(
-                            company.stripe_customer_id,
-                            newPlan.stripe_price_id,
-                            company.stripe_payment_method_id
-                        );
-                        stripeSubscriptionId = subscription.id;
-                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) {
-                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
-                            const planInterval = newPlan.interval || newPlan.period || 'month';
-                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
-                                console.log('[Upgrade] Stripe returned short period for yearly plan, keeping 365 days');
-                            } else {
-                                periodEnd = stripeEndDate;
-                            }
-                        }
-                    }
-                } catch (stripeError) {
-                    console.error('Stripe sync failed during upgrade:', stripeError);
-                    // We continue for now to keep local DB updated, but ideally we should handle this
-                }
-            }
-
-            // Normal upgrade/downgrade (no selection needed)
-            // Snapshot current plan limits so existing customer is not affected by future plan edits
-            const planSnapshot = TierService.buildPlanSnapshot(newPlan);
-            const result = await db.collection('companies').updateOne(
-                { _id: user.company_id },
-                {
-                    $set: {
-                        plan_id: new ObjectId(plan_id),
-                        subscription_plan: newPlan.name,
-                        subscription_plan_price: newPlan.price || newPlan.price_usd || 0,
-                        plan_snapshot: planSnapshot,
-                        stripe_subscription_id: stripeSubscriptionId,
-                        subscription_start_date: periodStart,
-                        subscription_end_date: periodEnd,
-                        expires_at: periodEnd,
-                        updated_at: new Date(),
-                        status: 'active' // Reactivate if expired
-                    }
-                }
-            );
-
-            if (result.matchedCount === 0) {
-                return res.status(404).json({ error: 'Company not found' });
-            }
-
             // Record in billing history
             await db.collection('billing_history').insertOne({
                 company_id: user.company_id,
@@ -553,11 +477,15 @@ class SubscriptionController {
                 amount: newPlan.price || newPlan.price_usd || 0,
                 date: new Date(),
                 type: 'upgrade',
-                stripe_subscription_id: stripeSubscriptionId
+                stripe_subscription_id: company.stripe_subscription_id
             });
+
+            // Invalidate cache since plan changed
+            cacheUtil.del(cacheUtil.getUserKey('sub_details', userId));
 
             // Return updated details
             return SubscriptionController.getDetails(req, res);
+
         } catch (error) {
             console.error('Failed to upgrade plan:', error);
             res.status(500).json({ error: 'Failed to upgrade plan' });
@@ -569,7 +497,6 @@ class SubscriptionController {
             const db = getDB();
             const userId = req.user._id;
             const { plan_id, selections } = req.body;
-            // selections is an object like: { workspaces: ["id1", "id2"], collaborators: ["id3"], users: [], viewers: [] }
 
             if (!plan_id || !selections) {
                 return res.status(400).json({ error: 'plan_id and selections are required' });
@@ -586,175 +513,127 @@ class SubscriptionController {
 
             if (!newPlan) return res.status(404).json({ error: 'Plan not found' });
 
-            // Helper to fetch all users in company
             const companyUsers = await db.collection('users').find({ company_id: user.company_id }).project({ _id: 1 }).toArray();
-            const companyUserIds = companyUsers.map(u => u._id);
-            const companyUserIdStrs = companyUsers.map(u => u._id.toString());
-            const allPotentialOwnerIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
+            const allPotentialOwnerIds = [...new Set([
+                ...companyUsers.map(u => u._id),
+                ...companyUsers.map(u => u._id.toString())
+            ])];
 
             const newLimits = TierService.getLimitsForPlan(newPlan);
 
-            // 1. Validate Selections against new limits
+            // 1. Process Workspaces
             const activeWorkspaceIds = (selections.workspaces || []).map(id => new ObjectId(id));
-            if ((newLimits.max_workspaces || 0) > 0 && activeWorkspaceIds.length > newLimits.max_workspaces) {
-                return res.status(400).json({ error: `Limit exceeded: Maximum ${newLimits.max_workspaces} workspaces allowed.` });
-            }
 
-            const activeCollaboratorIds = (selections.collaborators || []);
-            if ((newLimits.max_collaborators || 0) > 0 && activeCollaboratorIds.length > newLimits.max_collaborators) {
-                return res.status(400).json({ error: `Limit exceeded: Maximum ${newLimits.max_collaborators} collaborators allowed.` });
-            }
+            const workspaceFilter = {
+                $or: [
+                    { user_id: { $in: allPotentialOwnerIds } },
+                    { company_id: user.company_id }
+                ],
+                status: { $ne: 'deleted' }
+            };
 
-            const activeViewerIds = (selections.viewers || []);
-            if ((newLimits.max_viewers || 0) > 0 && activeViewerIds.length > newLimits.max_viewers) {
-                return res.status(400).json({ error: `Limit exceeded: Maximum ${newLimits.max_viewers} viewers allowed.` });
-            }
-
-            const activeUserRoleIds = (selections.users || []);
-            if ((newLimits.max_users || 0) > 0 && activeUserRoleIds.length > newLimits.max_users) {
-                return res.status(400).json({ error: `Limit exceeded: Maximum ${newLimits.max_users} users allowed.` });
-            }
-
-            // 2. Process Workspaces
-            
-            // Set selected workspaces to active
             if (activeWorkspaceIds.length > 0) {
                 await db.collection('user_businesses').updateMany(
-                    { _id: { $in: activeWorkspaceIds }, $or: [{ user_id: { $in: allPotentialOwnerIds } }, { company_id: user.company_id }] },
+                    { ...workspaceFilter, _id: { $in: activeWorkspaceIds } },
                     { $set: { access_mode: 'active', status: 'active', updated_at: new Date() } }
                 );
-                await db.collection('projects').updateMany(
-                    { business_id: { $in: activeWorkspaceIds } },
-                    { $set: { is_readonly: false, updated_at: new Date() }, $unset: { locked_at: "", lock_reason: "" } }
-                );
             }
 
-            // Set unselected workspaces to archived
             await db.collection('user_businesses').updateMany(
-                { _id: { $nin: activeWorkspaceIds }, $or: [{ user_id: { $in: allPotentialOwnerIds } }, { company_id: user.company_id }], status: { $ne: 'deleted' } },
-                { $set: { access_mode: 'archived', status: 'archived', archived_at: new Date(), archived_reason: 'plan_configuration' } }
+                { ...workspaceFilter, _id: { $nin: activeWorkspaceIds } },
+                {
+                    $set: {
+                        access_mode: 'archived',
+                        status: 'archived',
+                        archived_at: new Date(),
+                        collaborators: [],
+                        allowed_ranking_collaborators: []
+                    }
+                }
             );
 
-            // Lock projects in archived workspaces
-            const archivedBusinessesList = await db.collection('user_businesses')
-                .find({ _id: { $nin: activeWorkspaceIds }, $or: [{ user_id: { $in: allPotentialOwnerIds } }, { company_id: user.company_id }], status: { $in: ['archived', 'inactive'] } })
-                .toArray();
-            if (archivedBusinessesList.length > 0) {
+            // Cleanup project access for archived businesses
+            const archivedBusinesses = await db.collection('user_businesses').find({
+                ...workspaceFilter,
+                _id: { $nin: activeWorkspaceIds }
+            }).project({ _id: 1 }).toArray();
+
+            if (archivedBusinesses.length > 0) {
+                const archivedBusinessIds = archivedBusinesses.map(b => b._id);
                 await db.collection('projects').updateMany(
-                    { business_id: { $in: archivedBusinessesList.map(b => b._id) } },
-                    { $set: { is_readonly: true, locked_at: new Date(), lock_reason: 'business_archived' } }
+                    { business_id: { $in: archivedBusinessIds } },
+                    { $set: { allowed_collaborators: [], updated_at: new Date() } }
                 );
             }
 
-            // 2. Process Users (Collaborators, Users, Viewers)
+            // 2. Process Users
             const activeUserIds = [
                 ...(selections.collaborators || []),
                 ...(selections.users || []),
                 ...(selections.viewers || [])
             ].map(id => new ObjectId(id));
 
-            // Set selected to active
             if (activeUserIds.length > 0) {
                 await db.collection('users').updateMany(
                     { _id: { $in: activeUserIds }, company_id: user.company_id },
-                    { $set: { status: 'active', access_mode: 'active', updated_at: new Date() }, $unset: { inactive_reason: "", inactive_at: "" } }
+                    { $set: { status: 'active', access_mode: 'active', updated_at: new Date() } }
                 );
             }
 
-            // Set unselected to inactive
             const restrictedRoles = await db.collection('roles').find({ role_name: { $in: ['collaborator', 'viewer', 'user'] } }).project({ _id: 1 }).toArray();
             const restrictedRoleIds = restrictedRoles.map(r => r._id);
 
+            const userFilter = {
+                company_id: user.company_id,
+                role_id: { $in: restrictedRoleIds }
+            };
+
             await db.collection('users').updateMany(
-                { _id: { $nin: activeUserIds }, company_id: user.company_id, role_id: { $in: restrictedRoleIds } },
-                { $set: { status: 'inactive', access_mode: 'archived', inactive_reason: 'plan_configuration', inactive_at: new Date() } }
+                { ...userFilter, _id: { $nin: activeUserIds } },
+                { $set: { status: 'inactive', access_mode: 'archived', inactive_at: new Date() } }
             );
 
-            // Remove archived users from businesses and projects collaborator lists
-            const archivedUsersList = await db.collection('users').find(
-                { company_id: user.company_id, status: 'inactive', access_mode: 'archived' }
-            ).project({ _id: 1 }).toArray();
+            // Cleanup access for archived users
+            const archivedUsers = await db.collection('users').find({
+                ...userFilter,
+                _id: { $nin: activeUserIds }
+            }).project({ _id: 1 }).toArray();
 
-            const archivedUserIdsList = archivedUsersList.map(u => u._id);
+            if (archivedUsers.length > 0) {
+                const archivedUserIds = archivedUsers.map(u => u._id);
 
-            if (archivedUserIdsList.length > 0) {
-                // Find all businesses associated with this company/potential owners
-                const companyBusinessesList = await db.collection('user_businesses').find({
-                    $or: [
-                        { user_id: { $in: allPotentialOwnerIds } },
-                        { company_id: user.company_id }
-                    ]
-                }).project({ _id: 1 }).toArray();
-                const businessIdsList = companyBusinessesList.map(b => b._id);
+                const companyBusinesses = await db.collection('user_businesses')
+                    .find(workspaceFilter)
+                    .project({ _id: 1 })
+                    .toArray();
+                const businessIds = companyBusinesses.map(b => b._id);
 
-                // Remove from user_businesses collaborators and allowed_ranking_collaborators
-                await db.collection('user_businesses').updateMany(
-                    { _id: { $in: businessIdsList } },
-                    {
-                        $pull: {
-                            collaborators: { $in: archivedUserIdsList },
-                            allowed_ranking_collaborators: { $in: archivedUserIdsList }
-                        }
-                    }
-                );
-
-                // Remove from projects allowed_collaborators
-                await db.collection('projects').updateMany(
-                    { business_id: { $in: businessIdsList } },
-                    { $pull: { allowed_collaborators: { $in: archivedUserIdsList } } }
-                );
-            }
-
-            // 3. Sync with Stripe
-            let stripeSubscriptionId = company?.stripe_subscription_id;
-            let periodStart = new Date();
-            let periodEnd = TierService.calculateExpiryDate(periodStart, newPlan.interval || newPlan.period || 'month');
-
-            if (newPlan.stripe_price_id) {
-                try {
-                    if (stripeSubscriptionId) {
-                        const subscription = await StripeService.updateSubscription(stripeSubscriptionId, {
-                            items: [{
-                                id: (await StripeService.retrieveSubscription(stripeSubscriptionId)).items.data[0].id,
-                                price: newPlan.stripe_price_id,
-                            }],
-                            proration_behavior: 'always_invoice',
-                        });
-                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) {
-                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
-                            const planInterval = newPlan.interval || newPlan.period || 'month';
-                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
-                                console.log('[Config] Stripe returned short period for yearly plan, keeping 365 days');
-                            } else {
-                                periodEnd = stripeEndDate;
+                if (businessIds.length > 0) {
+                    // Remove from allowed_ranking_collaborators in businesses
+                    await db.collection('user_businesses').updateMany(
+                        { _id: { $in: businessIds } },
+                        {
+                            $pull: {
+                                allowed_ranking_collaborators: { $in: archivedUserIds },
+                                collaborators: { $in: archivedUserIds }
                             }
                         }
-                    } else if (company?.stripe_customer_id) {
-                        const subscription = await StripeService.createSubscription(
-                            company.stripe_customer_id,
-                            newPlan.stripe_price_id,
-                            company.stripe_payment_method_id
-                        );
-                        stripeSubscriptionId = subscription.id;
-                        if (subscription.current_period_start) periodStart = new Date(subscription.current_period_start * 1000);
-                        if (subscription.current_period_end) {
-                            const stripeEndDate = new Date(subscription.current_period_end * 1000);
-                            const planInterval = newPlan.interval || newPlan.period || 'month';
-                            if (planInterval === 'year' && (stripeEndDate - periodStart) < (300 * 24 * 60 * 60 * 1000)) {
-                                console.log('[Config] Stripe returned short period for yearly plan, keeping 365 days');
-                            } else {
-                                periodEnd = stripeEndDate;
-                            }
-                        }
-                    }
-                } catch (stripeError) {
-                    console.error('Stripe sync failed during configuration:', stripeError);
+                    );
+
+                    // Remove from allowed_collaborators in projects
+                    await db.collection('projects').updateMany(
+                        { business_id: { $in: businessIds } },
+                        { $pull: { allowed_collaborators: { $in: archivedUserIds } } }
+                    );
                 }
             }
 
-            // 4. Update Company Plan and snapshot limits
+            // 3. Update Company Plan and Dates
             const planSnapshot = TierService.buildPlanSnapshot(newPlan);
+            const now = new Date();
+            const interval = newPlan.interval || newPlan.period || 'month';
+            const expiryDate = TierService.calculateExpiryDate(now, interval);
+
             await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
@@ -763,44 +642,29 @@ class SubscriptionController {
                         subscription_plan: newPlan.name,
                         subscription_plan_price: newPlan.price || newPlan.price_usd || 0,
                         plan_snapshot: planSnapshot,
-                        stripe_subscription_id: stripeSubscriptionId,
-                        subscription_start_date: periodStart,
-                        subscription_end_date: periodEnd,
-                        expires_at: periodEnd,
-                        updated_at: new Date(),
+                        subscription_start_date: now,
+                        subscription_end_date: expiryDate,
+                        expires_at: expiryDate,
+                        updated_at: now,
                         status: 'active'
                     }
                 }
             );
 
-            // Record in billing history
-            const amount = newPlan.price || newPlan.price_usd || 0;
-            
-            // Also update company record with new price
-            await db.collection('companies').updateOne(
-                { _id: user.company_id },
-                { $set: { subscription_plan_price: amount } }
-            );
-
+            // 4. Record in billing history
             await db.collection('billing_history').insertOne({
                 company_id: user.company_id,
                 plan_name: newPlan.name,
-                amount: amount,
+                amount: newPlan.price || newPlan.price_usd || 0,
                 date: new Date(),
-                type: 'plan_configuration',
-                stripe_subscription_id: stripeSubscriptionId
+                type: 'upgrade',
+                stripe_subscription_id: company.stripe_subscription_id
             });
 
-            // 5. Audit Log
-            const { logAuditEvent } = require('../services/auditService');
-            await logAuditEvent(userId, 'plan_configured', {
-                from_plan: currentPlan?.name || 'unknown',
-                to_plan: newPlan.name,
-                workspaces_active: selections.workspaces?.length || 0,
-                users_active: (selections.users?.length || 0) + (selections.collaborators?.length || 0) + (selections.viewers?.length || 0)
-            });
+            // Invalidate cache
+            cacheUtil.del(cacheUtil.getUserKey('sub_details', userId));
 
-            return SubscriptionController.getDetails(req, res);
+            return res.json({ success: true, message: 'Plan configured successfully' });
         } catch (error) {
             console.error('Configuration processing error:', error);
             res.status(500).json({ error: 'Failed to process configuration' });
@@ -825,7 +689,6 @@ class SubscriptionController {
             let customerId = company?.stripe_customer_id;
 
             if (!customerId) {
-                // Create Stripe customer on first card add
                 const customer = await StripeService.createCustomer(user.email, user.name, paymentMethodId, setAsDefault);
                 customerId = customer.id;
                 await db.collection('companies').updateOne(
@@ -833,16 +696,27 @@ class SubscriptionController {
                     { $set: { stripe_customer_id: customerId } }
                 );
             } else {
-                // Check for duplicate card fingerprint before attaching
-                const newPM = await StripeService.retrievePaymentMethod(paymentMethodId);
-                const existingMethods = await StripeService.listPaymentMethods(customerId);
-                const newFingerprint = newPM.card?.fingerprint;
+                // Check for duplicate card (fingerprint)
+                try {
+                    const pm = await StripeService.retrievePaymentMethod(paymentMethodId);
 
-                if (newFingerprint && existingMethods.some(pm => pm.card?.fingerprint === newFingerprint)) {
-                    return res.status(400).json({ error: 'This card is already linked to your account.' });
+                    if (pm.customer !== customerId) {
+                        // Check for fingerprint duplicate
+                        const existingMethods = await StripeService.listPaymentMethods(customerId);
+                        const newFingerprint = pm.card?.fingerprint;
+                        const isDuplicate = existingMethods.some(ex => ex.card?.fingerprint === newFingerprint);
+
+                        if (isDuplicate) {
+                            return res.status(400).json({ error: 'This card is already linked to your account.' });
+                        }
+
+                        // Attach new payment method to existing customer
+                        await StripeService.attachPaymentMethod(paymentMethodId, customerId);
+                    }
+                } catch (stripeError) {
+                    console.error('Stripe payment validation failed:', stripeError);
+                    return res.status(400).json({ error: 'Failed to validate card: ' + stripeError.message });
                 }
-
-                await StripeService.attachPaymentMethod(paymentMethodId, customerId);
             }
 
             if (setAsDefault) {
@@ -853,14 +727,8 @@ class SubscriptionController {
                     { _id: user.company_id },
                     { $set: { stripe_customer_id: customerId, stripe_payment_method_id: paymentMethodId } }
                 );
-            } else {
-                await db.collection('companies').updateOne(
-                    { _id: user.company_id },
-                    { $set: { stripe_customer_id: customerId } }
-                );
             }
 
-            // Return refreshed payment methods list
             const methods = await StripeService.listPaymentMethods(customerId);
             const updatedCompany = await db.collection('companies').findOne({ _id: user.company_id });
             res.json({
@@ -896,7 +764,6 @@ class SubscriptionController {
 
             await StripeService.detachPaymentMethod(paymentMethodId);
 
-            // If removed was the default, promote the next available card as default
             let newDefaultId = company.stripe_payment_method_id;
             if (company.stripe_payment_method_id === paymentMethodId) {
                 const remaining = await StripeService.listPaymentMethods(company.stripe_customer_id);
@@ -912,7 +779,6 @@ class SubscriptionController {
                 );
             }
 
-            // Return refreshed payment methods list
             const methods = await StripeService.listPaymentMethods(company.stripe_customer_id);
             res.json({
                 payment_methods: methods.map(pm => ({
@@ -949,18 +815,15 @@ class SubscriptionController {
                 return res.status(400).json({ error: 'No Stripe customer found' });
             }
 
-            // Update Stripe customer
             await StripeService.updateCustomer(company.stripe_customer_id, {
                 invoice_settings: { default_payment_method: paymentMethodId }
             });
 
-            // Update local DB
             await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 { $set: { stripe_payment_method_id: paymentMethodId } }
             );
 
-            // Return refreshed payment methods list
             const methods = await StripeService.listPaymentMethods(company.stripe_customer_id);
             res.json({
                 payment_methods: methods.map(pm => ({
@@ -980,4 +843,3 @@ class SubscriptionController {
 }
 
 module.exports = SubscriptionController;
-

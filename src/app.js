@@ -3,6 +3,10 @@ const bodyParser = require('body-parser');
 const cors = require('cors');
 const path = require('path');
 require('dotenv').config();
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+
 
 const routes = require('./routes');
 const webhookRoutes = require('./routes/webhookRoutes');
@@ -13,6 +17,20 @@ const renewalLogger = require('./utils/renewalLogger');
 require('./jobs/staleBetCron'); // Initializes stale bet notification scheduler
 
 const app = express();
+
+// Security and Performance Middlewares
+app.use(helmet());
+app.use(compression());
+
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 1000, // Limit each IP to 1000 requests per windowMs
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: 'Too many requests from this IP, please try again later.'
+});
+app.use('/api/', limiter); // Apply rate limit to all api routes
+
 
 // Background Automated Renewal Watcher
 let isJobRunning = false; 
@@ -79,8 +97,13 @@ app.use(routes);
 // Health check
 app.get('/health', async (req, res) => {
   try {
+    const isDeep = req.query.deep === '1';
     const { getDB } = require('./config/database');
     const db = getDB();
+
+    if (!isDeep) {
+      return res.json({ status: 'healthy', database: 'connected' });
+    }
 
     const stats = await Promise.all([
       db.collection('companies').countDocuments(),
@@ -93,6 +116,7 @@ app.get('/health', async (req, res) => {
     res.json({
       status: 'healthy',
       database: 'connected',
+      deep: true,
       stats: {
         companies: stats[0],
         users: stats[1],

@@ -20,7 +20,8 @@ class UserModel {
     const result = await db.collection('users').insertOne({
       ...userData,
       password: hashedPassword,
-      created_at: new Date()
+      created_at: new Date(),
+      tour_completed: false
     });
 
     return result.insertedId;
@@ -92,6 +93,23 @@ class UserModel {
     )
   }
 
+  static async completeTour(userId) {
+    const db = getDB();
+    console.log(`[UserModel] Attempting to mark tour complete for ID: ${userId}`);
+    
+    // Ensure we handle the ID as a string for robust ObjectId conversion
+    const idToUpdate = typeof userId === 'object' ? userId.toString() : userId;
+
+    return await db.collection("users").updateOne(
+      { _id: new ObjectId(idToUpdate) },
+      {
+        $set: {
+          tour_completed: true,
+          updated_at: new Date(),
+        },
+      }
+    );
+  }
 }
 
 

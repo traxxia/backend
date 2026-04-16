@@ -253,9 +253,11 @@ class TierService {
         const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
         const userRole = await db.collection('roles').findOne({ role_name: 'user' });
 
+        const adminRole = await db.collection('roles').findOne({ role_name: 'company_admin' });
+
         const collaborators = companyUsers.filter(u => isItemActive(u) && u.role_id?.toString() === collabRole?._id?.toString()).length;
         const viewers = companyUsers.filter(u => isItemActive(u) && u.role_id?.toString() === viewerRole?._id?.toString()).length;
-        const users = companyUsers.filter(u => isItemActive(u) && u.role_id?.toString() === userRole?._id?.toString()).length;
+        const users = companyUsers.filter(u => isItemActive(u) && (u.role_id?.toString() === userRole?._id?.toString() || u.role_id?.toString() === adminRole?._id?.toString())).length;
 
         return {
             workspaces,

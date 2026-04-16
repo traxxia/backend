@@ -265,8 +265,8 @@ class BusinessController {
               access,
               has_projects: businessHasProjectSet.has(business._id.toString()),
               has_launched_projects: businessHasLaunchedProjectSet.has(business._id.toString()),
-              has_access_grants: (business.allowed_ranking_collaborators?.length > 0) || 
-                                 businessHasProjectGrantsSet.has(business._id.toString()),
+              has_access_grants: (business.allowed_ranking_collaborators?.length > 0) ||
+                businessHasProjectGrantsSet.has(business._id.toString()),
             };
           })
         );
@@ -286,6 +286,7 @@ class BusinessController {
         businesses: enhancedOwned,
         collaborating_businesses: enhancedCollaborating,
         deleted_businesses: [...enhancedDeletedOwned, ...enhancedDeletedCollaborating],
+        archived_businesses: [], // Keep empty array for backward compatibility if needed
         overall_stats: {
           total_businesses: owned.filter(b => b.status !== 'deleted').length,
           total_questions_in_system: totalQuestions,
@@ -486,14 +487,37 @@ class BusinessController {
           .json({ error: "A business with this name already exists" });
       }
 
+      const db = getDB();
+      let defaultCollaborators = [];
+
+      // If business is created by non-admin, add company admin as default participant
+      if (req.user.company_id && req.user.role.role_name === 'user') {
+        const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
+        if (companyAdminRole) {
+          const companyAdmins = await UserModel.getAll({
+            company_id: new ObjectId(req.user.company_id),
+            role_id: companyAdminRole._id,
+            status: { $nin: ['deleted', 'inactive', 'archived'] }
+          });
+
+          if (Array.isArray(companyAdmins)) {
+            // Filter out the creator if they happen to be an admin
+            defaultCollaborators = companyAdmins
+              .map(admin => admin._id)
+              .filter(id => id.toString() !== req.user._id.toString());
+          }
+        }
+      }
+
       const businessData = {
         user_id: new ObjectId(req.user._id),
+        company_id: req.user.company_id ? new ObjectId(req.user.company_id) : null,
         business_name: business_name.trim(),
         business_purpose: business_purpose.trim(),
         description: description ? description.trim() : "",
         city: city ? city.trim() : "",
         country: country ? country.trim() : "",
-        collaborators: [],
+        collaborators: defaultCollaborators,
       };
 
       const businessId = await BusinessModel.create(businessData);
@@ -605,23 +629,36 @@ class BusinessController {
         });
       }
 
-      const collaboratorIds = business.collaborators || [];
+      const ownerId = business.user_id;
+      const ownerUser = await UserModel.findById(ownerId);
+      const isOwnerAdmin = ownerUser && ["company_admin", "super_admin"].includes(ownerUser.role_name);
+
+      // Only include owner in participants list if they are an admin.
+      // Regular users who own the business shouldn't show up in the "Participants" list by default.
+      const collaboratorIds = [...(business.collaborators || [])];
+      if (isOwnerAdmin && ownerId) {
+        collaboratorIds.push(ownerId);
+      }
+      const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
 
       const db = getDB();
-      const roles = await db.collection("roles").find({ 
-        role_name: { $in: ["collaborator", "user", "viewer"] } 
+      const roles = await db.collection("roles").find({
+        role_name: { $in: ["collaborator", "user", "viewer", "company_admin", "super_admin"] }
       }).toArray();
-      
+
       const roleIds = roles.map(r => r._id);
 
       const collaborators = await UserModel.getAll({
-        _id: { $in: collaboratorIds.map(id => new ObjectId(id)) },
+        _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) },
         role_id: { $in: roleIds },
         status: { $nin: ['deleted', 'inactive', 'archived'] },
         access_mode: { $ne: 'archived' }
       });
 
-      const response = collaborators.map(u => {
+      // Extract only the IDs of users with eligible roles
+      const allowedUsers = collaborators.filter(u => ['collaborator', 'user', 'viewer', 'company_admin', 'super_admin'].includes(u.role_name));
+      const filteredIds = allowedUsers.map(u => u._id);
+      const response = allowedUsers.map(u => {
         const roleObj = roles.find(r => r._id?.toString() === u.role_id?.toString());
         return {
           _id: u._id,
@@ -666,7 +703,7 @@ class BusinessController {
       const companyId = ownerUser?.company_id;
 
       const collaboratorIds = business.collaborators || [];
-      
+
       // Filter: Only owner, collaborators, and company admins (they have oversight)
       // This ensures we are "part that particular business" context.
       let queryFilter = {
@@ -681,9 +718,9 @@ class BusinessController {
         const db = getDB();
         const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
         if (companyAdminRole) {
-          queryFilter.$or.push({ 
-            company_id: companyId, 
-            role_id: companyAdminRole._id 
+          queryFilter.$or.push({
+            company_id: companyId,
+            role_id: companyAdminRole._id
           });
         }
       }
@@ -695,10 +732,10 @@ class BusinessController {
         .filter(u => {
           const role = (u.role_name || '').toLowerCase();
           const isRoleAllowed = ['collaborator', 'user', 'company_admin', 'org_admin'].includes(role);
-          
+
           // "Active" check: not deleted, not inactive, not archived
           const isActive = u.status !== 'deleted' && u.status !== 'inactive' && u.access_mode !== 'archived';
-          
+
           return isRoleAllowed && isActive;
         })
         .map(u => ({
@@ -862,7 +899,7 @@ class BusinessController {
       const targetRoleName = roleDoc?.role_name || "viewer";
 
       const limits = await TierService.getCompanyLimits(req.user.company_id);
-      
+
       // Get all existing assigned users to count by role
       const existingAssignedIds = (business.collaborators || []).map(id => new ObjectId(id));
       const assignedUsers = await db.collection("users").aggregate([
@@ -888,8 +925,6 @@ class BusinessController {
         }
       } else if (targetRoleName === "viewer") {
         const currentViewerCount = assignedUsers.filter(u => u.role_name === "viewer").length;
-        // If there's a specific limit for viewers per business, check it here. 
-        // For now, let's use the company-wide limit as a guide or just allow more if max_viewers is high.
         if (limits.max_viewers > 0 && currentViewerCount >= limits.max_viewers) {
           return res.status(403).json({
             error: `Viewer limit reached. Maximum ${limits.max_viewers} viewer(s) allowed. Please upgrade your plan.`
@@ -903,6 +938,8 @@ class BusinessController {
           });
         }
       }
+      // Note: company_admin and super_admin target roles are allowed without limit checks
+      // as they are already accounted for in the company structure.
 
       if (business.user_id && business.user_id.toString() === collaboratorId) {
         return res
@@ -965,7 +1002,7 @@ class BusinessController {
       }
 
       await BusinessModel.removeCollaborator(businessId, collabId);
-      
+
       // Also remove project-level edit access for this user in this business
       await ProjectModel.removeFromAllowedCollaborators(businessId, collabId);
 

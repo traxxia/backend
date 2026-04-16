@@ -144,6 +144,26 @@ class ProjectModel {
       { $pull: { allowed_collaborators: new ObjectId(userId) }, $set: { updated_at: new Date() } }
     );
   }
+
+  static async reassignOwnership(businessId, oldOwnerId, newOwnerId, newOwnerName) {
+    return await this.collection().updateMany(
+      { 
+        business_id: new ObjectId(businessId), 
+        $or: [
+          { user_id: new ObjectId(oldOwnerId) },
+          { accountable_owner_id: new ObjectId(oldOwnerId) }
+        ]
+      },
+      { 
+        $set: { 
+          user_id: new ObjectId(newOwnerId), 
+          accountable_owner_id: new ObjectId(newOwnerId),
+          accountable_owner: newOwnerName,
+          updated_at: new Date() 
+        } 
+      }
+    );
+  }
 }
 
 module.exports = ProjectModel;

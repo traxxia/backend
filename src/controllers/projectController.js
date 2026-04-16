@@ -4,8 +4,11 @@ const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const DecisionLogModel = require("../models/decisionLogModel");
+const NotificationModel = require("../models/notificationModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
+const cacheUtil = require("../utils/cache");
+
 
 const {
   PROJECT_STATES,
@@ -290,6 +293,16 @@ class ProjectController {
       });
 
 
+      // Fetch rankings for the current user and business to include rank in response
+      const userRankings = (business_id && ObjectId.isValid(business_id))
+        ? await ProjectRankingModel.findByUserAndBusiness(req.user._id, business_id)
+        : [];
+
+      const userRankMap = {};
+      userRankings.forEach(r => {
+        if (r.project_id) userRankMap[r.project_id.toString()] = r.rank;
+      });
+
       projects = projects.map(project => {
         let cleanDesc = project.description || "";
         if (cleanDesc.startsWith("PMF Tactical Action:")) {
@@ -308,6 +321,7 @@ class ProjectController {
           status: project.status, // Ensure status is returned
           decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []), // fallback to embedded if still there
           is_stale: isProjectStale(project.next_review_date),
+          rank: userRankMap[project._id.toString()] || null,
         };
       });
 
@@ -327,53 +341,92 @@ class ProjectController {
       };
 
       if (business_id && ObjectId.isValid(business_id)) {
-        const business = await BusinessModel.findById(business_id);
-        if (business) {
-          const collaboratorIds = (business.collaborators || []).map(id => id.toString());
-          const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+        const cacheKey = cacheUtil.getCompanyKey('ranking_lock', business_id);
+        const cachedSummary = cacheUtil.get(cacheKey);
+        
+        if (cachedSummary) {
+          ranking_lock_summary = cachedSummary;
+        } else {
+          const business = await BusinessModel.findById(business_id);
+          if (business) {
+            const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+            const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
 
-          const users = await db.collection("users").find({
-            _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
-          }).toArray();
+            const users = await db.collection("users").find({
+              _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+            }).toArray();
 
-          const roles = await db.collection("roles").find({}).toArray();
-          const roleMap = {};
-          roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+            const roles = await ProjectController._getRolesCached();
+            const roleMap = {};
+            roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
 
-          // Filter non-admins and non-viewers
-          const nonAdminUsers = users.filter(u => {
-            const roleName = roleMap[u.role_id?.toString()];
-            const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
-            return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
-          });
-          const nonAdminUserIds = nonAdminUsers.map(u => u._id);
+            // Filter non-admins and non-viewers
+            const nonAdminUsers = users.filter(u => {
+              const roleName = roleMap[u.role_id?.toString()];
+              const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
+              return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
+            });
+            const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
-          // Get locked rankings with user info
-          const lockedRankings = await ProjectRankingModel.collection()
-            .find({
-              business_id: new ObjectId(business_id),
-              locked: true,
-              user_id: { $in: nonAdminUserIds }
-            })
-            .toArray();
+            // Get locked rankings with user info
+            // Mandatory projects are those ranked by admin (business owner)
+            const businessOwnerId = business.user_id;
+            const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+              businessOwnerId,
+              business_id
+            );
+            const mandatoryProjectIds = adminRankings
+              .filter(r => r.rank !== null)
+              .map(r => r.project_id);
 
-          // Get unique locked user IDs
-          const lockedUserIds = [...new Set(lockedRankings.map(r => r.user_id.toString()))];
+            // Get collaborator rankings for these mandatory projects
+            const lockedUsers = [];
+            for (const user of nonAdminUsers) {
+              const userRankingsCount = await ProjectRankingModel.collection()
+                .countDocuments({
+                  business_id: new ObjectId(business_id),
+                  user_id: user._id,
+                  project_id: { $in: mandatoryProjectIds.map(id => new ObjectId(id)) },
+                  rank: { $ne: null }
+                });
 
-          // Build locked users list with details
-          const lockedUsers = nonAdminUsers
-            .filter(u => lockedUserIds.includes(u._id.toString()))
-            .map(u => ({
-              user_id: u._id,
-              name: u.name,
-              email: u.email,
-            }));
+              // Consider "done" if they've ranked all projects that admin ranked
+              if (mandatoryProjectIds.length > 0 && userRankingsCount >= mandatoryProjectIds.length) {
+                lockedUsers.push({
+                  user_id: user._id,
+                  name: user.name,
+                  email: user.email,
+                });
+              }
+            }
 
-          ranking_lock_summary = {
-            total_users: nonAdminUsers.length,
-            locked_users_count: lockedUsers.length,
-            locked_users: lockedUsers,
-          };
+            ranking_lock_summary = {
+              total_users: nonAdminUsers.length,
+              locked_users_count: lockedUsers.length,
+              locked_users: lockedUsers,
+            };
+            
+            // Cache for 60 seconds
+            cacheUtil.set(cacheKey, ranking_lock_summary, 60);
+          }
+        }
+      }
+
+
+      // Fetch Admin Rankings to determine is_admin_ranked status
+      let adminRankedProjectIds = new Set();
+      if (business_id && ObjectId.isValid(business_id)) {
+        const business = businessesMap[business_id.toString()] || await BusinessModel.findById(business_id);
+        if (business && business.user_id) {
+          const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+            business.user_id,
+            business_id
+          );
+          adminRankedProjectIds = new Set(
+            adminRankings
+              .filter(r => r.rank !== null)
+              .map(r => r.project_id.toString())
+          );
         }
       }
 
@@ -387,6 +440,7 @@ class ProjectController {
             ...p,
             review_cadence: actualCadence,
             next_review_date: nextReview,
+            is_admin_ranked: adminRankedProjectIds.has(p._id.toString()),
             is_stale: p.launch_status === 'launched' ? isProjectStale(nextReview) : false
           };
         }),
@@ -396,6 +450,90 @@ class ProjectController {
       });
     } catch (err) {
       console.error("PROJECT GET ALL ERR:", err);
+      res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  static async getRankingsSummary(req, res) {
+    try {
+      const { business_id } = req.query;
+      if (!business_id || !ObjectId.isValid(business_id)) {
+        return res.status(400).json({ error: "Valid business_id is required" });
+      }
+
+      const db = getDB();
+      const cacheKey = cacheUtil.getCompanyKey('ranking_lock', business_id);
+      const cachedSummary = cacheUtil.get(cacheKey);
+
+      if (cachedSummary) {
+        return res.json(cachedSummary);
+      }
+
+      const business = await BusinessModel.findById(business_id);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+      const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+
+      const users = await db.collection("users").find({
+        _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+      }).toArray();
+
+      const roles = await ProjectController._getRolesCached();
+      const roleMap = {};
+      roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
+      // Filter non-admins and non-viewers
+      const nonAdminUsers = users.filter(u => {
+        const roleName = roleMap[u.role_id?.toString()];
+        const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
+        return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
+      });
+      const nonAdminUserIds = nonAdminUsers.map(u => u._id);
+
+      // Mandatory projects are those ranked by admin (business owner)
+      const businessOwnerId = business.user_id;
+      const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+        businessOwnerId,
+        business_id
+      );
+      const mandatoryProjectIds = adminRankings
+        .filter(r => r.rank !== null)
+        .map(r => r.project_id);
+
+      // Get collaborator rankings for these mandatory projects
+      const lockedUsers = [];
+      for (const user of nonAdminUsers) {
+        const userRankingsCount = await ProjectRankingModel.collection()
+          .countDocuments({
+            business_id: new ObjectId(business_id),
+            user_id: user._id,
+            project_id: { $in: mandatoryProjectIds.map(id => new ObjectId(id)) },
+            rank: { $ne: null }
+          });
+
+        if (mandatoryProjectIds.length > 0 && userRankingsCount >= mandatoryProjectIds.length) {
+          lockedUsers.push({
+            user_id: user._id,
+            name: user.name,
+            email: user.email,
+          });
+        }
+      }
+
+      const summary = {
+        total_users: nonAdminUsers.length,
+        locked_users_count: lockedUsers.length,
+        locked_users: lockedUsers,
+      };
+
+      // Cache for 60 seconds
+      cacheUtil.set(cacheKey, summary, 60);
+      res.json(summary);
+    } catch (err) {
+      console.error("RANKINGS SUMMARY ERR:", err);
       res.status(500).json({ error: "Server error" });
     }
   }
@@ -496,7 +634,7 @@ class ProjectController {
 
           const db = getDB();
 
-          const roleDoc = await db.collection("roles").findOne({ _id: ownerUser.role_id });
+          const roleDoc = await ProjectController._getRoleByIdCached(ownerUser.role_id);
 
           const ownerRoleName = roleDoc?.role_name;
 
@@ -529,10 +667,7 @@ class ProjectController {
 
         let ownerRoleName = null;
         if (ownerUser?.role_id) {
-          const db = getDB();
-          const roleDoc = await db
-            .collection("roles")
-            .findOne({ _id: ownerUser.role_id });
+          const roleDoc = await ProjectController._getRoleByIdCached(ownerUser.role_id);
           ownerRoleName = roleDoc?.role_name;
         }
 
@@ -864,6 +999,14 @@ class ProjectController {
       if (req.body.review_cadence !== undefined)
         updateData.review_cadence = normalizeString(req.body.review_cadence);
 
+      // --- Detect status and learning_state changes, create ONE decision log entry ---
+      let statusChanged = false;
+      let learningStateChanged = false;
+      let resolvedStatus = null;
+      let newLearningState = null;
+      const oldLearningState = existing.learning_state || "Testing";
+
+      // Process status
       if (req.body.status !== undefined) {
         const val = req.body.status;
         if (val === "" || val === null) {
@@ -883,40 +1026,13 @@ class ProjectController {
           }
 
           if (found !== existing.status) {
-
-            if (!req.body.justification || String(req.body.justification).trim() === "") {
-              return res.status(400).json({
-                error: "Justification is required when changing project status."
-              });
-            }
-
-            const justification = String(req.body.justification).trim();
-
-            // Allow alphabets + spaces + punctuation
-            const validSentence = /^[A-Za-z\s.,'-]+$/;
-
-            if (!validSentence.test(justification)) {
-              return res.status(400).json({
-                error: "Justification must contain only letters and valid sentence punctuation."
-              });
-            }
-
-            const logEntry = {
-              project_id: new ObjectId(id),
-              from_status: existing.status,
-              to_status: found,
-              justification: justification,
-              changed_by: new ObjectId(req.user._id),
-              changed_at: new Date()
-            };
-
-            await DecisionLogModel.create(logEntry);
+            statusChanged = true;
+            resolvedStatus = found;
           }
 
           updateData.status = found;
         }
       }
-
 
       if (req.body.impact !== undefined)
         updateData.impact = normalizeString(req.body.impact);
@@ -966,8 +1082,52 @@ class ProjectController {
         }
       }
 
+      // Process learning_state
       if (req.body.learning_state !== undefined) {
-        updateData.learning_state = normalizeString(req.body.learning_state);
+        newLearningState = normalizeString(req.body.learning_state);
+
+        if (newLearningState && oldLearningState.toLowerCase() !== newLearningState.toLowerCase()) {
+          learningStateChanged = true;
+        }
+
+        updateData.learning_state = newLearningState;
+      }
+
+      // Create a single decision log entry if either status or learning_state changed
+      if (statusChanged || learningStateChanged) {
+        if (!req.body.justification || String(req.body.justification).trim() === "") {
+          return res.status(400).json({
+            error: "Justification is required when changing project status or learning state."
+          });
+        }
+
+        const justification = String(req.body.justification).trim();
+        const validSentence = /^[A-Za-z\s.,'-]+$/;
+
+        if (!validSentence.test(justification)) {
+          return res.status(400).json({
+            error: "Justification must contain only letters and valid sentence punctuation."
+          });
+        }
+
+        const logEntry = {
+          project_id: new ObjectId(id),
+          justification: justification,
+          changed_by: new ObjectId(req.user._id),
+          changed_at: new Date()
+        };
+
+        if (statusChanged) {
+          logEntry.from_status = existing.status;
+          logEntry.to_status = resolvedStatus;
+        }
+
+        if (learningStateChanged) {
+          logEntry.from_learning_state = oldLearningState;
+          logEntry.to_learning_state = newLearningState;
+        }
+
+        await DecisionLogModel.create(logEntry);
       }
 
       if (req.body.last_reviewed !== undefined || req.body.review_cadence !== undefined) {
@@ -985,7 +1145,13 @@ class ProjectController {
       delete updateData.business_id;
       delete updateData.created_at;
 
+      // Revoke special edit access for collaborators if terminal state
+      if (['killed', 'completed', 'scaled'].includes(updateData.status?.toLowerCase())) {
+        updateData.allowed_collaborators = [];
+      }
+
       await ProjectModel.update(id, updateData);
+
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -1034,7 +1200,26 @@ class ProjectController {
         return res.status(404).json({ error: "No valid projects found to launch" });
       }
 
-      // 2. Persist the selection: Mark selected as PENDING_LAUNCH, reset others (if not already LAUNCHED)
+      // 3. Admin Ranking Check: Admin must have ranked all selected projects
+      const adminRankings = await ProjectRankingModel.collection().find({
+        user_id: new ObjectId(req.user._id),
+        project_id: { $in: project_ids.map(id => new ObjectId(id)) },
+        rank: { $ne: null }
+      }).toArray();
+
+      if (adminRankings.length < project_ids.length) {
+        const rankedIds = new Set(adminRankings.map(r => r.project_id.toString()));
+        const unrankedProjectNames = projectsToLaunch
+          .filter(p => !rankedIds.has(p._id.toString()))
+          .map(p => p.project_name);
+
+        const bulletedList = unrankedProjectNames.map(name => `• ${name}`).join("\n");
+        return res.status(400).json({
+          error: `Launch failed: Numerical ranks are mandatory for all projects moved to 'Launched'. The following projects are not ranked:\n${bulletedList}\n\nPlease assign ranks before launching.`
+        });
+      }
+
+      // 4. Persist the selection: Mark selected as PENDING_LAUNCH, reset others (if not already LAUNCHED)
       await ProjectModel.collection().updateMany(
         {
           business_id: new ObjectId(businessId),
@@ -1057,27 +1242,12 @@ class ProjectController {
 
       // NEW: Unlock rankings to allow collaborators to provide input on the new selection
       await ProjectRankingModel.unlockRankingByBusiness(businessId);
+      
+      // Clear progress cache
+      const cacheKey = cacheUtil.getCompanyKey('ranking_lock', businessId);
+      cacheUtil.del(cacheKey);
 
-      // 3. Admin Ranking Check: Admin must have ranked all selected projects
-      const adminRankings = await ProjectRankingModel.collection().find({
-        user_id: new ObjectId(req.user._id),
-        project_id: { $in: project_ids.map(id => new ObjectId(id)) },
-        rank: { $ne: null }
-      }).toArray();
-
-      if (adminRankings.length < project_ids.length) {
-        const rankedIds = new Set(adminRankings.map(r => r.project_id.toString()));
-        const unrankedProjectNames = projectsToLaunch
-          .filter(p => !rankedIds.has(p._id.toString()))
-          .map(p => p.project_name);
-
-        const bulletedList = unrankedProjectNames.map(name => `• ${name}`).join("\n");
-        return res.status(400).json({
-          error: `Launch failed: Numerical ranks are mandatory for all projects moved to 'Launched'. The following projects are not ranked:\n${bulletedList}\n\nPlease assign ranks before launching.`
-        });
-      }
-
-      // 4. Consensus check: All non-admin collaborators must have a rank for ALL launched/pending projects
+      // 5. Consensus check: All non-admin collaborators must have a rank for ALL launched/pending projects
       const business = await BusinessModel.findById(businessId);
       if (business) {
         const collaboratorIds = (business.collaborators || []).map(id => id.toString());
@@ -1088,7 +1258,7 @@ class ProjectController {
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
-        const roles = await db.collection("roles").find({}).toArray();
+        const roles = await ProjectController._getRolesCached();
 
 
         const roleMap = {};
@@ -1180,9 +1350,15 @@ class ProjectController {
         results.push({ id, status: "launched", is_ranked: true });
       }
 
+      // Return updated projects list
+      const updatedProjects = await ProjectModel.collection().find({
+        business_id: new ObjectId(businessId)
+      }).toArray();
+
       res.json({
         message: "Project launch check complete",
-        results
+        results,
+        projects: updatedProjects
       });
     } catch (err) {
       console.error("PROJECT LAUNCH ERR:", err);
@@ -1291,10 +1467,106 @@ class ProjectController {
 
       await ProjectRankingModel.bulkUpsert(rankingDocs);
 
-      // NEW: Grant rerank access to this collaborator for restricted states
-      if (!isAdmin) {
-        await BusinessModel.addAllowedRankingCollaborator(business_id, user_id);
+      // If Admin is ranking, clear ranks for any projects they just deselected
+      // and unlock/reset all collaborator rankings so they are forced to review/re-save.
+      // If Admin is ranking, clear ranks for any projects they just deselected
+      // and unlock/reset all collaborator rankings so they are forced to review/re-save.
+      if (isAdmin) {
+        try {
+          // 1. Invalidate progress cache so UI updates immediately
+          const cacheKey = cacheUtil.getCompanyKey('ranking_lock', business_id);
+          cacheUtil.del(cacheKey);
+
+          // 2. Reset all collaborator rankings (rank, rationals, locked status)
+          await ProjectRankingModel.resetCollaboratorRankings(business_id, user_id);
+
+          // 3. Handle deselected projects: clear their ranks for everyone (including this admin's session record)
+          const previouslyRankedIds = existingRankings
+            .filter(r => r.rank !== null)
+            .map(r => r.project_id.toString());
+          
+          const currentlyRankedIds = projects
+            .filter(p => p.rank !== null)
+            .map(p => p.project_id.toString());
+          
+          const deselectedIds = previouslyRankedIds.filter(id => !currentlyRankedIds.includes(id));
+          
+          for (const projectId of deselectedIds) {
+            await ProjectRankingModel.clearRankingsForProject(projectId);
+          }
+
+          // 4. Force global unlock just in case
+          await ProjectRankingModel.unlockRankingByBusiness(business_id);
+        } catch (syncErr) {
+          console.error("Failed to sync admin rankings update:", syncErr);
+        }
       }
+
+      // Notification Logic
+      try {
+        const db = getDB();
+        if (isAdmin) {
+          // Notify non-admin collaborators
+          const collaboratorIds = (business.collaborators || []).map(id => id.toString());
+          const uniqueCollaboratorIds = [...new Set(collaboratorIds)];
+
+          if (uniqueCollaboratorIds.length > 0) {
+            const users = await db.collection("users").find({
+              _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
+            }).toArray();
+
+            const roles = await ProjectController._getRolesCached();
+            const roleMap = {};
+            roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
+
+            const nonAdminUsers = users.filter(u => {
+              const roleName = roleMap[u.role_id?.toString()];
+              return !["company_admin", "super_admin", "viewer"].includes(roleName);
+            });
+
+            for (const u of nonAdminUsers) {
+              await NotificationModel.create({
+                user_id: u._id,
+                type: 'admin_ranked_projects',
+                title: 'Time to Rank Projects',
+                message: `The admin has ranked the projects for "${business.business_name || 'the business'}". Please review and rank your projects.`,
+                action_data: { business_id: business_id.toString() }
+              });
+            }
+          }
+        } else {
+          // Notify company_admins
+          let resolvedCompanyId = business.company_id;
+          if (!resolvedCompanyId) {
+            resolvedCompanyId = req.user.company_id;
+          }
+
+          if (resolvedCompanyId) {
+            const companyAdmins = await db.collection("users").aggregate([
+              { $match: { company_id: { $in: [new ObjectId(String(resolvedCompanyId)), String(resolvedCompanyId)] } } },
+              { $lookup: { from: 'roles', localField: 'role_id', foreignField: '_id', as: 'role' } },
+              { $unwind: '$role' },
+              { $match: { 'role.role_name': { $in: ['company_admin', 'super_admin'] } } }
+            ]).toArray();
+
+            for (const admin of companyAdmins) {
+              await NotificationModel.create({
+                user_id: admin._id,
+                type: 'collaborator_ranked_projects',
+                title: 'Collaborator Ranked Projects',
+                message: `Collaborator ${req.user.name || req.user.email || 'A user'} has ranked their projects for "${business.business_name || 'the business'}".`,
+                action_data: { 
+                  business_id: business_id.toString(), 
+                  collaborator_id: user_id.toString() 
+                }
+              });
+            }
+          }
+        }
+      } catch (notifErr) {
+        console.error("Failed to send ranking notifications:", notifErr);
+      }
+ 
 
       const rankedProjects =
         await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
@@ -1353,7 +1625,7 @@ class ProjectController {
           _id: { $in: uniqueCollaboratorIds.map(id => new ObjectId(id)) }
         }).toArray();
 
-        const roles = await db.collection("roles").find({}).toArray();
+        const roles = await ProjectController._getRolesCached();
 
 
         const roleMap = {};
@@ -1374,26 +1646,25 @@ class ProjectController {
 
         });
 
-        // Mandatory projects are those with an AI rank
-        const mandatoryProjects = await ProjectModel.collection().find({
-          business_id: new ObjectId(business_id),
-          ai_rank: { $exists: true, $ne: null }
-        }).toArray();
-        const mandatoryProjectIds = mandatoryProjects.map(p => p._id);
-        const mandatoryProjectIdStrs = mandatoryProjectIds.map(id => id.toString());
+        const businessOwnerId = business.user_id;
+        const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+          businessOwnerId,
+          business_id
+        );
+        const mandatoryProjectIds = adminRankings
+          .filter(r => r.rank !== null)
+          .map(r => r.project_id);
 
         const lockedUsers = [];
-
         for (const user of nonAdminUsers) {
-          const userRankings = await ProjectRankingModel.collection().find({
+          const userRankingsCount = await ProjectRankingModel.collection().countDocuments({
             business_id: new ObjectId(business_id),
             user_id: user._id,
-            project_id: { $in: mandatoryProjectIds },
+            project_id: { $in: mandatoryProjectIds.map(id => new ObjectId(id)) },
             rank: { $ne: null }
-          }).toArray();
+          });
 
-          // A user is considered "done" if they have ranked all projects with AI ranks
-          if (mandatoryProjectIds.length > 0 && userRankings.length >= mandatoryProjectIds.length) {
+          if (mandatoryProjectIds.length > 0 && userRankingsCount >= mandatoryProjectIds.length) {
             lockedUsers.push({
               user_id: user._id,
               name: user.name,
@@ -1406,13 +1677,20 @@ class ProjectController {
           total_users: nonAdminUsers.length,
           locked_users_count: lockedUsers.length,
           locked_users: lockedUsers,
-          mandatory_project_ids: mandatoryProjectIdStrs
+          mandatory_project_ids: mandatoryProjectIds
         };
       }
 
       const allProjects = await ProjectModel.findAll({
         business_id: new ObjectId(business_id),
       });
+
+      const businessOwnerId = business.user_id;
+      const adminRankings = await ProjectRankingModel.findByUserAndBusiness(
+        businessOwnerId,
+        business_id
+      );
+      const adminRankedProjectIds = new Set(adminRankings.filter(r => r.rank !== null).map(r => r.project_id.toString()));
 
       const rankingMap = {};
       rankings.forEach(r => {
@@ -1458,6 +1736,7 @@ class ProjectController {
           locked: ranking.locked || false,
           ai_rank: project.ai_rank || null,
           ai_rank_score: project.ai_rank_score || null,
+          is_admin_ranked: adminRankedProjectIds.has(project._id.toString()),
           next_review_date: nextReview,
           is_stale: project.launch_status === 'launched' ? isProjectStale(nextReview) : false,
         };
@@ -1622,8 +1901,12 @@ class ProjectController {
 
       await ProjectModel.update(id, {
         status: PROJECT_STATES.KILLED,
+        allowed_collaborators: [],
         updated_at: new Date()
       });
+
+      // Clear all rankings for this killed project
+      await ProjectRankingModel.clearRankingsForProject(id);
 
       res.json({
         message: "Project killed successfully and rankings cleared",
@@ -1672,6 +1955,12 @@ class ProjectController {
       }
 
       const updateUpdate = { status, updated_at: new Date() };
+
+      if (['killed', 'completed', 'scaled'].includes(status.toLowerCase())) {
+        updateUpdate.allowed_collaborators = [];
+        // Clear all rankings for this project since it's now terminal
+        await ProjectRankingModel.clearRankingsForProject(id);
+      }
 
       await ProjectModel.collection().updateOne(
         { _id: new ObjectId(id) },
@@ -1844,11 +2133,9 @@ class ProjectController {
           const rankings = await ProjectRankingModel.findByUserAndBusiness(user_id, business_id);
           const hasLockedRanking = rankings.some(r => r.locked === true);
 
-          if (isRestrictedRankingState) {
-            hasRerankAccess = isAllowedToRank && !hasLockedRanking;
-          } else {
-            hasRerankAccess = !hasLockedRanking;
-          }
+          // Unified Access Logic: Fresh flow OR Explicit Rerank
+          // Access is true if explicitly allowed OR if rankings are not currently locked
+          hasRerankAccess = isAllowedToRank || !hasLockedRanking;
         }
       } catch (err) {
         console.error("Error checking rerank access:", err);
@@ -1873,11 +2160,15 @@ class ProjectController {
         }
 
         const isLaunchedOrPending = (project.launch_status || "").toLowerCase() === "launched" || (project.launch_status || "").toLowerCase() === "pending_launch";
+        const isTerminal = ['killed', 'completed', 'scaled'].includes((project.status || "").toLowerCase());
 
         const isInAllowedCollabs = Array.isArray(project.allowed_collaborators) &&
           project.allowed_collaborators.some(id => id.toString() === user_id.toString());
 
-        if (isLaunchedOrPending) {
+        if (isTerminal) {
+          // Terminal projects are NEVER editable by collaborators/users
+          projectsEditAccess[project._id.toString()] = false;
+        } else if (isLaunchedOrPending) {
           // For launched or pending launch projects, only those with special access can edit
           projectsEditAccess[project._id.toString()] = isInAllowedCollabs;
         } else {
@@ -1886,9 +2177,11 @@ class ProjectController {
         }
       });
 
+
       res.json({
         business_id,
         has_rerank_access: hasRerankAccess,
+        has_ranking_access: hasRerankAccess, // Alias for clear identification in ranking view
         projects_edit_access: projectsEditAccess,
       });
     } catch (err) {
@@ -2019,6 +2312,9 @@ class ProjectController {
           { $set: { allowed_ranking_collaborators: filteredCollaborators } }
         );
 
+        // NEW: Explicitly lock their rankings to ensure they lose "default" access too
+        await ProjectRankingModel.lockRankingByUserAndBusiness(user_id, business_id);
+
         revokedAccess.push("rerank");
       }
 
@@ -2118,6 +2414,10 @@ class ProjectController {
 
       // NEW: Unlock rankings when AI rankings are saved (kickstart)
       await ProjectRankingModel.unlockRankingByBusiness(business_id);
+      
+      // Clear progress cache
+      const cacheKey = cacheUtil.getCompanyKey('ranking_lock', business_id);
+      cacheUtil.del(cacheKey);
 
       // NEW: Automatically move business to prioritizing phase during kickstart
       await BusinessModel.collection().updateOne(
@@ -2275,7 +2575,7 @@ class ProjectController {
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
       }).toArray();
 
-      const roles = await db.collection("roles").find({}).toArray();
+      const roles = await ProjectController._getRolesCached();
       const roleMap = {};
       roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
 
@@ -2416,11 +2716,9 @@ class ProjectController {
         _id: { $in: collaboratorIds.map(id => new ObjectId(id)) }
       }).toArray();
 
-      const roles = await db.collection("roles").find({}).toArray();
-
+      const roles = await ProjectController._getRolesCached();
 
       const roleMap = {};
-
 
       roles.forEach(r => roleMap[r._id.toString()] = r.role_name);
 
@@ -2600,7 +2898,12 @@ class ProjectController {
       if (status) updateData.status = status;
       if (learning_state) updateData.learning_state = learning_state;
 
+      if (status && ['killed', 'completed', 'scaled'].includes(status.toLowerCase())) {
+        updateData.allowed_collaborators = [];
+      }
+
       await ProjectModel.update(id, updateData);
+
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -2673,9 +2976,14 @@ class ProjectController {
       if (!no_changes) {
         if (status) updateData.status = status;
         if (learning_state) updateData.learning_state = learning_state;
+        
+        if (status && ['killed', 'completed', 'scaled'].includes(status.toLowerCase())) {
+          updateData.allowed_collaborators = [];
+        }
       }
 
       await ProjectModel.update(id, updateData);
+
 
       const updated = await ProjectModel.findById(id);
       const [project] = await ProjectModel.populateCreatedBy(updated);
@@ -2716,6 +3024,23 @@ class ProjectController {
       console.error("PERFORM REVIEW ERR:", err);
       res.status(500).json({ error: "Server error" });
     }
+  }
+
+  static async _getRolesCached() {
+    const cacheKey = "global_roles";
+    let roles = cacheUtil.get(cacheKey);
+    if (!roles) {
+      const db = getDB();
+      roles = await db.collection("roles").find({}).toArray();
+      cacheUtil.set(cacheKey, roles, 600); // 10 minutes
+    }
+    return roles;
+  }
+
+  static async _getRoleByIdCached(roleId) {
+    if (!roleId) return null;
+    const roles = await this._getRolesCached();
+    return roles.find((r) => r._id.toString() === roleId.toString()) || null;
   }
 }
 

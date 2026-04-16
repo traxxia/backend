@@ -10,6 +10,7 @@ const BusinessModel = require("../models/businessModel");
 const ConversationModel = require("../models/conversationModel");
 const AnswerModel = require("../models/answerModel");
 const AnalysisModel = require("../models/analysisModel");
+const InitiativeModel = require("../models/initiativeModel");
 const TierService = require('../services/tierService');
 const blobService = require("../services/blobService");
 
@@ -490,7 +491,7 @@ class AdminController {
           $match: {
             $or: [
               { user_id: { $in: userIds } },
-              { company_id: filter.company_id } // Some businesses might have company_id directly
+              { company_id: filter.company_id } 
             ]
           }
         },
@@ -508,14 +509,35 @@ class AdminController {
             from: "users",
             localField: "collaborators",
             foreignField: "_id",
-            as: "collaborator_details"
+            as: "collaborator_details",
+            pipeline: [
+              {
+                $lookup: {
+                  from: "roles",
+                  localField: "role_id",
+                  foreignField: "_id",
+                  as: "role_info"
+                }
+              },
+              { $unwind: { path: "$role_info", preserveNullAndEmptyArrays: true } },
+              {
+                $project: {
+                  _id: 1,
+                  name: 1,
+                  email: 1,
+                  role_name: "$role_info.role_name"
+                }
+              }
+            ]
           }
         },
         {
           $project: {
+            user_id: 1,
             business_name: 1,
             business_purpose: 1,
             status: 1,
+            access_mode: 1,
             created_at: 1,
             owner_name: "$owner.name",
             owner_email: "$owner.email",
@@ -526,7 +548,8 @@ class AdminController {
                 in: {
                   id: "$$collab._id",
                   name: "$$collab.name",
-                  email: "$$collab.email"
+                  email: "$$collab.email",
+                  role_name: "$$collab.role_name"
                 }
               }
             }
@@ -541,7 +564,7 @@ class AdminController {
       });
     } catch (error) {
       console.error("Error fetching company businesses:", error);
-      res.status(500).json({ error: "Failed to fetch businesses" });
+      res.status(500).json({ error: "Failed to fetch company businesses" });
     }
   }
 
@@ -577,6 +600,16 @@ class AdminController {
 
       // Also remove project-level edit access for this user in this business
       await ProjectModel.removeFromAllowedCollaborators(business_id, user_id);
+
+      // CRITICAL: Reassign ownership of any projects/bets owned by this participant back to the business owner
+      const businessOwnerId = business.user_id;
+      if (businessOwnerId.toString() !== user_id.toString()) {
+        const busOwner = await db.collection("users").findOne({ _id: businessOwnerId });
+        const newOwnerName = busOwner ? (busOwner.name || busOwner.email || "Business Owner") : "Business Owner";
+        
+        await ProjectModel.reassignOwnership(business_id, user_id, businessOwnerId, newOwnerName);
+        await InitiativeModel.reassignOwnership(business_id, user_id, businessOwnerId, newOwnerName);
+      }
 
       res.json({ message: "Participant removed successfully" });
     } catch (error) {
@@ -678,15 +711,12 @@ class AdminController {
         };
       }
 
-      const auditEntries = await AuditModel.find(filter, {
+      const { entries: auditEntries, totalCount, analysisStats } = await AuditModel.getAuditTrailPaged(filter, {
         skip,
         limit: parseInt(limit),
         projection,
         searchFilter
       });
-
-      const totalCount = await AuditModel.countDocuments(filter, searchFilter);
-      const analysisStats = await AuditModel.getAnalysisStats(filter, searchFilter);
 
       res.json({
         audit_entries: auditEntries,
@@ -1551,19 +1581,19 @@ class AdminController {
       // Find relevant businesses
       let businesses;
       if (filter.company_id) {
-         const users = await db.collection("users").find(filter).toArray();
-         const userIds = users.map(u => u._id);
-         businesses = await db.collection("user_businesses").find({
-           $or: [
-             { user_id: { $in: userIds } },
-             { company_id: filter.company_id }
-           ],
-           status: { $ne: 'deleted' }
-         }).toArray();
+        const users = await db.collection("users").find(filter).toArray();
+        const userIds = users.map(u => u._id);
+        businesses = await db.collection("user_businesses").find({
+          $or: [
+            { user_id: { $in: userIds } },
+            { company_id: filter.company_id }
+          ],
+          status: { $ne: 'deleted' }
+        }).toArray();
       } else {
-         businesses = await db.collection("user_businesses").find({
-           status: { $ne: 'deleted' }
-         }).toArray();
+        businesses = await db.collection("user_businesses").find({
+          status: { $ne: 'deleted' }
+        }).toArray();
       }
 
       const businessIds = businesses.map(b => b._id);
@@ -1579,23 +1609,23 @@ class AdminController {
       }).toArray();
 
       const { isProjectStale } = require('../utils/helpers');
-      
+
       const staleProjects = [];
-      
+
       for (const project of projects) {
         if (project.next_review_date && isProjectStale(project.next_review_date)) {
           const business = businessMap[project.business_id.toString()];
-          
+
           let ownerName = "Unknown";
           if (project.accountable_owner) {
             ownerName = project.accountable_owner;
           } else if (project.created_by) {
-             const user = await db.collection("users").findOne({ _id: project.created_by });
-             if (user) ownerName = user.name;
-             else if (business && business.user_id) {
-               const bUser = await db.collection("users").findOne({ _id: business.user_id });
-               if (bUser) ownerName = bUser.name;
-             }
+            const user = await db.collection("users").findOne({ _id: project.created_by });
+            if (user) ownerName = user.name;
+            else if (business && business.user_id) {
+              const bUser = await db.collection("users").findOne({ _id: business.user_id });
+              if (bUser) ownerName = bUser.name;
+            }
           }
 
           staleProjects.push({
