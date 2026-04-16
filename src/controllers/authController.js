@@ -99,7 +99,7 @@ class AuthController {
 
   static async register(req, res) {
     try {
-      const { name, email, password, company_id, company_name, plan_id, terms_accepted, paymentMethodId } = req.body;
+      const { name, email, password, company_id, company_name, plan_id, terms_accepted, paymentMethodId, role } = req.body;
 
       if (!name || !email || !password || (!company_id && !company_name) || !terms_accepted) {
         return res.status(400).json({ error: 'All fields required including terms acceptance and company details' });
@@ -213,8 +213,46 @@ class AuthController {
         }
         finalCompanyId = new ObjectId(company_id);
 
-        const userRole = await db.collection('roles').findOne({ role_name: 'user' });
-        finalRoleId = userRole._id;
+        // Map requested role to valid internal role name
+        let requestedRole = (role || 'user').toLowerCase();
+        if (requestedRole === 'org admin') requestedRole = 'company_admin';
+
+        const roleDoc = await db.collection('roles').findOne({ role_name: requestedRole });
+        if (!roleDoc) {
+          return res.status(400).json({ error: 'Invalid role requested' });
+        }
+        finalRoleId = roleDoc._id;
+
+        // --- User Limit Check ---
+        const limits = await TierService.getCompanyLimits(finalCompanyId);
+        const usage = await TierService.getCompanyUsage(finalCompanyId);
+
+        let limitKey = '';
+        let currentUsage = 0;
+        let limitValue = 0;
+
+        if (requestedRole === 'collaborator') {
+          limitKey = 'collaborators';
+          currentUsage = usage.collaborators;
+          limitValue = limits.max_collaborators;
+        } else if (requestedRole === 'viewer') {
+          limitKey = 'viewers';
+          currentUsage = usage.viewers;
+          limitValue = limits.max_viewers;
+        } else {
+          // Both 'user' and 'company_admin' share the standard 'users' limit
+          limitKey = requestedRole === 'company_admin' ? 'Org Admin' : 'Users';
+          currentUsage = usage.users;
+          limitValue = limits.max_users;
+        }
+
+        if (currentUsage >= limitValue) {
+          let roleLabel = requestedRole.charAt(0).toUpperCase() + requestedRole.slice(1).replace('_', ' ');
+          if (requestedRole === 'company_admin') roleLabel = 'Org Admin';
+          return res.status(400).json({ 
+            error: `User limit reached for ${roleLabel}. Current limit is ${limitValue}.` 
+          });
+        }
       }
 
       const userId = await UserModel.create({

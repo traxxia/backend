@@ -487,6 +487,28 @@ class BusinessController {
           .json({ error: "A business with this name already exists" });
       }
 
+      const db = getDB();
+      let defaultCollaborators = [];
+
+      // If business is created by non-admin, add company admin as default participant
+      if (req.user.company_id && req.user.role.role_name === 'user') {
+        const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
+        if (companyAdminRole) {
+          const companyAdmins = await UserModel.getAll({
+            company_id: new ObjectId(req.user.company_id),
+            role_id: companyAdminRole._id,
+            status: { $nin: ['deleted', 'inactive', 'archived'] }
+          });
+
+          if (Array.isArray(companyAdmins)) {
+            // Filter out the creator if they happen to be an admin
+            defaultCollaborators = companyAdmins
+              .map(admin => admin._id)
+              .filter(id => id.toString() !== req.user._id.toString());
+          }
+        }
+      }
+
       const businessData = {
         user_id: new ObjectId(req.user._id),
         company_id: req.user.company_id ? new ObjectId(req.user.company_id) : null,
@@ -495,7 +517,7 @@ class BusinessController {
         description: description ? description.trim() : "",
         city: city ? city.trim() : "",
         country: country ? country.trim() : "",
-        collaborators: [],
+        collaborators: defaultCollaborators,
       };
 
       const businessId = await BusinessModel.create(businessData);
