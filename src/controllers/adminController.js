@@ -491,7 +491,7 @@ class AdminController {
           $match: {
             $or: [
               { user_id: { $in: userIds } },
-              { company_id: filter.company_id } // Some businesses might have company_id directly
+              { company_id: filter.company_id } 
             ]
           }
         },
@@ -509,11 +509,31 @@ class AdminController {
             from: "users",
             localField: "collaborators",
             foreignField: "_id",
-            as: "collaborator_details"
+            as: "collaborator_details",
+            pipeline: [
+              {
+                $lookup: {
+                  from: "roles",
+                  localField: "role_id",
+                  foreignField: "_id",
+                  as: "role_info"
+                }
+              },
+              { $unwind: { path: "$role_info", preserveNullAndEmptyArrays: true } },
+              {
+                $project: {
+                  _id: 1,
+                  name: 1,
+                  email: 1,
+                  role_name: "$role_info.role_name"
+                }
+              }
+            ]
           }
         },
         {
           $project: {
+            user_id: 1,
             business_name: 1,
             business_purpose: 1,
             status: 1,
@@ -528,7 +548,8 @@ class AdminController {
                 in: {
                   id: "$$collab._id",
                   name: "$$collab.name",
-                  email: "$$collab.email"
+                  email: "$$collab.email",
+                  role_name: "$$collab.role_name"
                 }
               }
             }
@@ -543,7 +564,7 @@ class AdminController {
       });
     } catch (error) {
       console.error("Error fetching company businesses:", error);
-      res.status(500).json({ error: "Failed to fetch businesses" });
+      res.status(500).json({ error: "Failed to fetch company businesses" });
     }
   }
 
