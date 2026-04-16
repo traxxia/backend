@@ -293,6 +293,16 @@ class ProjectController {
       });
 
 
+      // Fetch rankings for the current user and business to include rank in response
+      const userRankings = (business_id && ObjectId.isValid(business_id))
+        ? await ProjectRankingModel.findByUserAndBusiness(req.user._id, business_id)
+        : [];
+
+      const userRankMap = {};
+      userRankings.forEach(r => {
+        if (r.project_id) userRankMap[r.project_id.toString()] = r.rank;
+      });
+
       projects = projects.map(project => {
         let cleanDesc = project.description || "";
         if (cleanDesc.startsWith("PMF Tactical Action:")) {
@@ -311,6 +321,7 @@ class ProjectController {
           status: project.status, // Ensure status is returned
           decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []), // fallback to embedded if still there
           is_stale: isProjectStale(project.next_review_date),
+          rank: userRankMap[project._id.toString()] || null,
         };
       });
 
