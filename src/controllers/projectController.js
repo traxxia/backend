@@ -1240,9 +1240,6 @@ class ProjectController {
         }
       );
 
-      // NEW: Unlock rankings to allow collaborators to provide input on the new selection
-      await ProjectRankingModel.unlockRankingByBusiness(businessId);
-      
       // Clear progress cache
       const cacheKey = cacheUtil.getCompanyKey('ranking_lock', businessId);
       cacheUtil.del(cacheKey);
@@ -2134,8 +2131,14 @@ class ProjectController {
           const hasLockedRanking = rankings.some(r => r.locked === true);
 
           // Unified Access Logic: Fresh flow OR Explicit Rerank
-          // Access is true if explicitly allowed OR if rankings are not currently locked
-          hasRerankAccess = isAllowedToRank || !hasLockedRanking;
+          // If the business is in a restricted state (launched, prioritized, reprioritizing),
+          // participants ONLY get access if explicitly allowed via the administration panel.
+          if (isRestrictedRankingState) {
+            hasRerankAccess = isAllowedToRank;
+          } else {
+            // In draft/prioritizing phases, access is true if explicitly allowed OR if rankings are not currently locked
+            hasRerankAccess = isAllowedToRank || !hasLockedRanking;
+          }
         }
       } catch (err) {
         console.error("Error checking rerank access:", err);
