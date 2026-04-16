@@ -1339,9 +1339,15 @@ class ProjectController {
         results.push({ id, status: "launched", is_ranked: true });
       }
 
+      // Return updated projects list
+      const updatedProjects = await ProjectModel.collection().find({
+        business_id: new ObjectId(businessId)
+      }).toArray();
+
       res.json({
         message: "Project launch check complete",
-        results
+        results,
+        projects: updatedProjects
       });
     } catch (err) {
       console.error("PROJECT LAUNCH ERR:", err);
@@ -1888,6 +1894,8 @@ class ProjectController {
         updated_at: new Date()
       });
 
+      // Clear all rankings for this killed project
+      await ProjectRankingModel.clearRankingsForProject(id);
 
       res.json({
         message: "Project killed successfully and rankings cleared",
@@ -1939,8 +1947,9 @@ class ProjectController {
 
       if (['killed', 'completed', 'scaled'].includes(status.toLowerCase())) {
         updateUpdate.allowed_collaborators = [];
+        // Clear all rankings for this project since it's now terminal
+        await ProjectRankingModel.clearRankingsForProject(id);
       }
-
 
       await ProjectModel.collection().updateOne(
         { _id: new ObjectId(id) },
