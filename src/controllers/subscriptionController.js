@@ -628,8 +628,12 @@ class SubscriptionController {
                 }
             }
 
-            // 3. Update Company Plan
+            // 3. Update Company Plan and Dates
             const planSnapshot = TierService.buildPlanSnapshot(newPlan);
+            const now = new Date();
+            const interval = newPlan.interval || newPlan.period || 'month';
+            const expiryDate = TierService.calculateExpiryDate(now, interval);
+
             await db.collection('companies').updateOne(
                 { _id: user.company_id },
                 {
@@ -638,7 +642,10 @@ class SubscriptionController {
                         subscription_plan: newPlan.name,
                         subscription_plan_price: newPlan.price || newPlan.price_usd || 0,
                         plan_snapshot: planSnapshot,
-                        updated_at: new Date(),
+                        subscription_start_date: now,
+                        subscription_end_date: expiryDate,
+                        expires_at: expiryDate,
+                        updated_at: now,
                         status: 'active'
                     }
                 }
