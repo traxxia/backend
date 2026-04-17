@@ -5,7 +5,12 @@ const { logAuditEvent } = require('../services/auditService');
 class PlanController {
     static async getAll(req, res) {
         try {
-            const includeInactive = req.query.include_inactive === 'true' || req.headers['x-include-inactive'] === 'true';
+            const userRole = req.user?.role?.role_name || req.user?.role;
+            const includeInactive = 
+                req.query.include_inactive === 'true' || 
+                req.headers['x-include-inactive'] === 'true' ||
+                userRole === 'super_admin';
+
             const plans = await PlanModel.getAll(includeInactive);
             
             // Sort by price ascending

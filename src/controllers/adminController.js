@@ -12,6 +12,7 @@ const AnswerModel = require("../models/answerModel");
 const AnalysisModel = require("../models/analysisModel");
 const InitiativeModel = require("../models/initiativeModel");
 const TierService = require('../services/tierService');
+const { ALLOWED_PHASES } = require('../config/constants');
 const blobService = require("../services/blobService");
 
 class AdminController {
@@ -953,7 +954,10 @@ class AdminController {
         ? await AnalysisModel.getAll(business_id)
         : [];
       const businesses = await BusinessModel.findByUserId(targetUserId);
-      const questionsFetch = await QuestionModel.findAll({ is_active: true });
+      const questionsFetch = await QuestionModel.findAll({ 
+        is_active: true,
+        phase: { $in: ALLOWED_PHASES }
+      });
 
       // Fetch saved answers from the answers collection (Source of Truth)
       const savedAnswers = business_id && ObjectId.isValid(business_id)
@@ -1293,17 +1297,25 @@ class AdminController {
         };
       });
 
-      // Calculate statistics using saved answers as the Source of Truth
+      // Calculate statistics using saved answers as the Source of Truth, filtered by allowed phases
       const totalQuestions = questions.length;
+      
+      const allowedQuestionIds = new Set(questions.map(q => q._id.toString()));
+      const filteredSavedAnswers = savedAnswers.filter(ans => 
+        ans.question_id && allowedQuestionIds.has(ans.question_id.toString())
+      );
+
       const completedQuestions = business_id 
-        ? savedAnswers.length 
+        ? filteredSavedAnswers.length 
         : conversationPhases.reduce((sum, phase) => sum + phase.questions.length, 0);
 
       // Enhanced businesses with statistics
       const enhancedBusinesses = await Promise.all(
         businesses.map(async (business) => {
           const businessSavedAnswers = await AnswerModel.getByBusinessId(business._id);
-          const completedQuestionsForBusiness = businessSavedAnswers.length;
+          const completedQuestionsForBusiness = businessSavedAnswers.filter(ans => 
+            ans.question_id && allowedQuestionIds.has(ans.question_id.toString())
+          ).length;
 
           const progressPercentage =
             totalQuestions > 0
