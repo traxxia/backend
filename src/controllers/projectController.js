@@ -4,6 +4,7 @@ const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const DecisionLogModel = require("../models/decisionLogModel");
+const DecisionLogService = require("../services/decisionLogService");
 const NotificationModel = require("../models/notificationModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
@@ -1110,24 +1111,13 @@ class ProjectController {
           });
         }
 
-        const logEntry = {
-          project_id: new ObjectId(id),
-          justification: justification,
-          changed_by: new ObjectId(req.user._id),
-          changed_at: new Date()
-        };
-
-        if (statusChanged) {
-          logEntry.from_status = existing.status;
-          logEntry.to_status = resolvedStatus;
-        }
-
-        if (learningStateChanged) {
-          logEntry.from_learning_state = oldLearningState;
-          logEntry.to_learning_state = newLearningState;
-        }
-
-        await DecisionLogModel.create(logEntry);
+        await DecisionLogService.logProjectUpdateIfSignificant({
+          projectBefore: existing,
+          updateData,
+          actorId: req.user._id,
+          justification,
+          source: "project_update_api",
+        });
       }
 
       if (req.body.last_reviewed !== undefined || req.body.review_cadence !== undefined) {
@@ -2912,29 +2902,20 @@ class ProjectController {
       const [project] = await ProjectModel.populateCreatedBy(updated);
       project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
-      // Log the decision
-      const db = getDB();
-      await db.collection("audit_trail").insertOne({
-        user_id: new ObjectId(req.user._id),
-        event_type: "project_decision_log",
-        event_data: {
-          project_id: new ObjectId(id),
-          business_id: existing.business_id,
-          action: "adhoc_update",
-          justification,
-          old_state: { status: existing.status, learning_state: existing.learning_state },
-          new_state: { status: status || existing.status, learning_state: learning_state || existing.learning_state }
+      await DecisionLogService.createManualDecisionLog({
+        project: existing,
+        actorId: req.user._id,
+        logType: "adhoc_update",
+        decision: `adhoc_${existing.status || "unknown"}_to_${status || existing.status || "unknown"}`,
+        executionState: status || existing.status,
+        assumptionState: learning_state || existing.learning_state,
+        justification: `[Ad-Hoc Update] ${justification}`,
+        metadata: { source: "adhoc_update_api" },
+        beforeSnapshot: { status: existing.status, learning_state: existing.learning_state },
+        afterSnapshot: {
+          status: status || existing.status,
+          learning_state: learning_state || existing.learning_state,
         },
-        timestamp: new Date()
-      });
-
-      await DecisionLogModel.create({
-        project_id: new ObjectId(id),
-        changed_at: new Date(),
-        from_status: existing.status || "Draft",
-        to_status: status || existing.status || "Draft",
-        justification,
-        user_id: new ObjectId(req.user._id)
       });
 
       res.json({ message: "Ad-hoc update processed", project });
@@ -2992,34 +2973,20 @@ class ProjectController {
       const [project] = await ProjectModel.populateCreatedBy(updated);
       project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
-      // Log the decision
-      const db = getDB();
-      await db.collection("audit_trail").insertOne({
-        user_id: new ObjectId(req.user._id),
-        event_type: "project_decision_log",
-        event_data: {
-          project_id: new ObjectId(id),
-          business_id: existing.business_id,
-          action: no_changes ? "no_change_review" : "cadence_review",
-          justification,
-          old_state: { status: existing.status, learning_state: existing.learning_state },
-          new_state: {
-            status: no_changes ? existing.status : (status || existing.status),
-            learning_state: no_changes ? existing.learning_state : (learning_state || existing.learning_state)
-          }
-        },
-        timestamp: new Date()
-      });
+      const finalStatus = no_changes ? existing.status : (status || existing.status);
+      const finalLearningState = no_changes ? existing.learning_state : (learning_state || existing.learning_state);
 
-      await DecisionLogModel.create({
-        project_id: new ObjectId(id),
-        changed_at: new Date(),
-        from_status: existing.status || "Draft",
-        to_status: no_changes ? (existing.status || "Draft") : (status || existing.status || "Draft"),
-        from_learning_state: existing.learning_state || "Testing",
-        to_learning_state: no_changes ? (existing.learning_state || "Testing") : (learning_state || existing.learning_state || "Testing"),
+      await DecisionLogService.createManualDecisionLog({
+        project: existing,
+        actorId: req.user._id,
+        logType: no_changes ? "no_change_review" : "cadence_review",
+        decision: no_changes ? "no_change_review" : `cadence_review_${existing.status || "unknown"}_to_${finalStatus || "unknown"}`,
+        executionState: finalStatus,
+        assumptionState: finalLearningState,
         justification: `[Cadence Review] ${justification}`,
-        user_id: new ObjectId(req.user._id)
+        metadata: { source: "cadence_review_api", no_changes: !!no_changes },
+        beforeSnapshot: { status: existing.status, learning_state: existing.learning_state },
+        afterSnapshot: { status: finalStatus, learning_state: finalLearningState },
       });
 
       res.json({ message: "Review processed", project });
