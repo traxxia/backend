@@ -46,8 +46,13 @@ class PMFController {
                 return res.status(400).json({ error: "Invalid business ID" });
             }
 
-            const summaryDoc = await PMFExecutiveSummaryModel.findByBusinessId(businessId);
-            const business = await BusinessModel.findById(businessId);
+            // Parallelize database lookups
+            const [summaryDoc, business, existingProjects] = await Promise.all([
+                PMFExecutiveSummaryModel.findByBusinessId(businessId),
+                BusinessModel.findById(businessId),
+                ProjectModel.findAll({ business_id: new ObjectId(businessId) })
+            ]);
+
             const hasCollaborators = Array.isArray(business?.collaborators) && business.collaborators.length > 0;
 
             if (!summaryDoc || !summaryDoc.summary) {
@@ -57,8 +62,7 @@ class PMFController {
             // Extract Top Priorities
             const priorities = summaryDoc.summary.top_priorities || summaryDoc.summary.topPriorities || [];
 
-            // Fetch existing projects for this business to check for duplicates
-            const existingProjects = await ProjectModel.findAll({ business_id: new ObjectId(businessId) });
+            // Get names of existing projects to check for duplicates
             const existingProjectNames = existingProjects.map(p => p.project_name.toLowerCase().trim());
 
             const kickstartData = priorities.map(priority => {

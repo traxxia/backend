@@ -11,6 +11,7 @@ const { createAuditIndexes, runAuditTrailMigration } = require('./src/services/a
 const { getDB } = require('./src/config/database');
 const bcrypt = require('bcryptjs');
 const { PORT } = require('./src/config/constants');
+const { disconnectFromMongoDB } = require('./src/config/database');
 
 async function initializeSystem() {
   try {
@@ -72,10 +73,28 @@ async function initializeSystem() {
 connectToMongoDB()
   .then(async () => {
     await initializeSystem();
-    app.listen(PORT, '0.0.0.0', () => {
+    const server = app.listen(PORT, '0.0.0.0', () => {
       console.log(`Traxxia API running on port ${PORT}`);
       console.log(`Server accessible at: http://localhost:${PORT}`);
     });
+
+    const shutdown = async (signal) => {
+      console.log(`\n[Server] Received ${signal}. Starting graceful shutdown...`);
+      server.close(async () => {
+        console.log('[Server] HTTP server closed.');
+        await disconnectFromMongoDB();
+        process.exit(0);
+      });
+      
+      setTimeout(() => {
+        console.error('[Server] Forced shutdown after timeout.');
+        process.exit(1);
+      }, 10000);
+    };
+
+    process.on('SIGINT', () => shutdown('SIGINT'));
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+
   })
   .catch(err => {
     console.error('Failed to start server:', err);

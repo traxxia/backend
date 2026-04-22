@@ -121,6 +121,14 @@ class ProjectRankingModel {
     );
   }
 
+  static async clearRankingsForProjects(projectIds) {
+    const ids = projectIds.map(id => new ObjectId(id));
+    return this.collection().updateMany(
+      { project_id: { $in: ids } },
+      { $set: { rank: null, rationals: "", updated_at: new Date() } }
+    );
+  }
+
   static async resetCollaboratorRankings(businessId, adminId) {
     return this.collection().updateMany(
       {

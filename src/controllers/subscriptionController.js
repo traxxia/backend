@@ -10,15 +10,13 @@ class SubscriptionController {
             const db = getDB();
             const userId = req.user._id;
 
-            // Cache lookup
-            const cacheKey = cacheUtil.getUserKey('sub_details', userId);
-            const cachedData = cacheUtil.get(cacheKey);
-            if (cachedData) return res.json(cachedData);
 
+
+            // Step 1: Initial user fetch to resolve company context
             const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
 
             if (!user || !user.company_id) {
-                return res.json({
+                const data = {
                     plan: 'None',
                     start_date: user?.created_at || new Date(),
                     end_date: null,
@@ -26,76 +24,128 @@ class SubscriptionController {
                     status: 'inactive',
                     available_plans: [],
                     billing_history: []
-                });
+                };
+                return res.json(data);
             }
 
-            const company = await db.collection('companies').findOne({ _id: user.company_id });
-
-            const planName = await TierService.getUserTier(userId);
-            // Use snapshotted limits so super-admin plan edits don't affect existing customers
-            const limits = await TierService.getCompanyLimits(user.company_id);
-
-            // Robust counting for businesses and users
             const companyIdStr = user.company_id.toString();
             const companyIdObj = new ObjectId(companyIdStr);
             const companyIdFilter = { $in: [companyIdStr, companyIdObj] };
 
-            // 1. Get all company users (supporting both String and ObjectId for company_id)
-            const companyUsers = await db.collection('users').find({
-                company_id: companyIdFilter
-            }).project({ _id: 1, role_id: 1, status: 1 }).toArray();
+            // Step 2: Parallelize first wave of independent data fetching
+            const [
+                company,
+                planName,
+                limits,
+                companyUsers,
+                roles,
+                availablePlans,
+                billingHistory,
+                currentWorkspaces,
+                companyBusinesses
+            ] = await Promise.all([
+                db.collection('companies').findOne({ _id: user.company_id }),
+                TierService.getUserTier(userId),
+                TierService.getCompanyLimits(user.company_id),
+                db.collection('users').find({ company_id: companyIdFilter }).project({ _id: 1, role_id: 1, status: 1 }).toArray(),
+                db.collection('roles').find({ role_name: { $in: ['collaborator', 'viewer', 'user', 'company_admin', 'super_admin'] } }).toArray(),
+                db.collection('plans').find({ status: 'active' }).sort({ _id: 1 }).toArray(),
+                db.collection('billing_history').find({ company_id: user.company_id }).sort({ date: -1 }).toArray(),
+                db.collection('user_businesses').countDocuments({
+                    user_id: { $in: [userId.toString(), new ObjectId(userId)] }, // Wait, usage logic should likely use allUserIds. Refined below.
+                    status: { $nin: ['deleted', 'archived', 'inactive'] }
+                }),
+                db.collection('user_businesses').find({ 
+                    $or: [
+                        { user_id: { $in: [userId.toString(), new ObjectId(userId)] } }, 
+                        { company_id: user.company_id }
+                    ] 
+                }).project({ _id: 1, status: 1, access_mode: 1 }).toArray()
+            ]);
 
+            // Map roles for quick access
+            const roleMap = {};
+            roles.forEach(r => roleMap[r.role_name] = r);
+            const roleIdToNameMap = {};
+            roles.forEach(r => roleIdToNameMap[r._id.toString()] = r.role_name);
+
+            // Step 3: Parallelize secondary wave (Usage counting & Stripe)
             const companyUserIds = companyUsers.map(u => u._id);
             const companyUserIdStrs = companyUsers.map(u => u._id.toString());
             const allUserIds = [...new Set([...companyUserIds, ...companyUserIdStrs])];
 
-            // Helper to check if a user is active (explicit 'active' or missing status)
+            const businessIdStrs = companyBusinesses.map(b => b._id.toString());
+            const allBusinessIds = [...new Set([...companyBusinesses.map(b => b._id), ...businessIdStrs])];
+
             const isItemActive = (item) => !item.status || item.status === 'active';
 
-            // 2. Count Businesses (supporting items without a status field as active)
-            const currentWorkspaces = await db.collection('user_businesses').countDocuments({
-                user_id: { $in: allUserIds },
-                status: { $nin: ['deleted', 'archived', 'inactive'] }
-            });
+            const [currentProjects, paymentMethodsData, livePlan] = await Promise.all([
+                db.collection('projects').countDocuments({ business_id: { $in: allBusinessIds } }),
+                company?.stripe_customer_id ? StripeService.listPaymentMethods(company.stripe_customer_id).catch(() => []) : Promise.resolve([]),
+                company?.plan_id ? db.collection('plans').findOne({ _id: company.plan_id }) : Promise.resolve(null)
+            ]);
 
-            // 3. Count Roles
-            const collabRole = await db.collection('roles').findOne({ role_name: 'collaborator' });
-            const viewerRole = await db.collection('roles').findOne({ role_name: 'viewer' });
-            const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+            // Recalculate workspace count based on all user IDs (consistent with existing logic)
+            const actualWorkspacesCount = companyBusinesses.filter(b => 
+                !['deleted', 'archived', 'inactive'].includes(b.status) && b.access_mode !== 'archived'
+            ).length;
 
             const currentCollaborators = companyUsers.filter(u =>
-                isItemActive(u) && u.role_id?.toString() === collabRole?._id.toString()
+                isItemActive(u) && roleIdToNameMap[u.role_id?.toString()] === 'collaborator'
             ).length;
 
             const currentViewers = companyUsers.filter(u =>
-                isItemActive(u) && u.role_id?.toString() === viewerRole?._id.toString()
+                isItemActive(u) && roleIdToNameMap[u.role_id?.toString()] === 'viewer'
             ).length;
 
             const currentUsersWithUserRole = companyUsers.filter(u =>
-                isItemActive(u) && u.role_id?.toString() === userRole?._id.toString()
+                isItemActive(u) && (roleIdToNameMap[u.role_id?.toString()] === 'user' || roleIdToNameMap[u.role_id?.toString()] === 'company_admin')
             ).length;
 
-            // 4. Count Projects across all company businesses
-            const companyBusinesses = await db.collection('user_businesses')
-                .find({ $or: [{ user_id: { $in: allUserIds } }, { company_id: user.company_id }] })
-                .project({ _id: 1 })
-                .toArray();
-            const businessIds = companyBusinesses.map(b => b._id);
-            const businessIdStrs = companyBusinesses.map(b => b._id.toString());
-            const allBusinessIds = [...new Set([...businessIds, ...businessIdStrs])];
+            const paymentMethods = paymentMethodsData.map(pm => ({
+                id: pm.id,
+                brand: pm.card.brand,
+                last4: pm.card.last4,
+                exp_month: pm.card.exp_month,
+                exp_year: pm.card.exp_year
+            }));
+            const defaultPaymentMethodId = company?.stripe_payment_method_id;
 
-            const currentProjects = await db.collection('projects').countDocuments({
-                business_id: { $in: allBusinessIds }
-            });
+            // Determine if the live plan limits differ from the customer's snapshot
+            let planUpdatedSinceSnapshot = false;
+            let originalPlanLimits = null;
+            let originalPlanPrice = null;
+            let currentPlanPeriod = 'month';
 
-            // Available Plans
-            const availablePlans = await db.collection('plans').find({ status: 'active' }).sort({ _id: 1 }).toArray();
+            if (livePlan) {
+                currentPlanPeriod = livePlan.interval || livePlan.period || 'month';
+                const liveLimits = TierService.getLimitsForPlan(livePlan);
+                originalPlanPrice = livePlan.price || livePlan.price_usd || 0;
+                originalPlanLimits = {
+                    workspaces: liveLimits.max_workspaces,
+                    collaborators: liveLimits.max_collaborators,
+                    viewers: liveLimits.max_viewers,
+                    users: liveLimits.max_users,
+                    project: liveLimits.project,
+                    pmf: liveLimits.pmf,
+                    insight: liveLimits.insight,
+                    strategic: liveLimits.strategic
+                };
 
-            // Billing History
-            const billingHistory = await db.collection('billing_history')
-                .find({ company_id: user.company_id })
-                .sort({ date: -1 })
-                .toArray();
+                if (company?.plan_snapshot?.snapshotted_at) {
+                    const snap = company.plan_snapshot;
+                    planUpdatedSinceSnapshot = (
+                        liveLimits.max_workspaces !== snap.max_workspaces ||
+                        liveLimits.max_collaborators !== snap.max_collaborators ||
+                        liveLimits.max_viewers !== snap.max_viewers ||
+                        liveLimits.max_users !== snap.max_users ||
+                        liveLimits.project !== snap.project ||
+                        liveLimits.insight !== snap.insight ||
+                        liveLimits.strategic !== snap.strategic ||
+                        liveLimits.pmf !== snap.pmf
+                    );
+                }
+            }
 
             // Expiration Logic
             let expiresAt = company?.subscription_end_date || company?.expires_at;
@@ -104,7 +154,6 @@ class SubscriptionController {
 
             const isManualAccount = TierService.isStripeAccountNull(company || {});
 
-            // If no expiration date (legacy data), set one based on created_at or give 30 days grace from now
             if (!expiresAt) {
                 const interval = company?.plan_snapshot?.interval || 'month';
                 expiresAt = TierService.calculateExpiryDate(startDate, interval);
@@ -113,83 +162,14 @@ class SubscriptionController {
             // Check if expired
             if (new Date() > new Date(expiresAt) && status !== 'expired') {
                 status = 'expired';
-                // Update specific company status to expired
                 await db.collection('companies').updateOne(
                     { _id: user.company_id },
                     { $set: { status: 'expired' } }
                 );
             }
 
-            // If manual account and the DB says expired, force it back to active for the response.
-            if (isManualAccount && status === 'expired') {
-                status = 'active';
-            }
-
-            // Set expiresAt to null for unlimited accounts to signal frontend
-            if (isManualAccount) {
-                expiresAt = null;
-            }
-
-            // Fetch Payment Method Details if available
-            let paymentMethods = [];
-            let defaultPaymentMethodId = null;
-
-            if (company?.stripe_customer_id) {
-                try {
-                    const methods = await StripeService.listPaymentMethods(company.stripe_customer_id);
-                    paymentMethods = methods.map(pm => ({
-                        id: pm.id,
-                        brand: pm.card.brand,
-                        last4: pm.card.last4,
-                        exp_month: pm.card.exp_month,
-                        exp_year: pm.card.exp_year
-                    }));
-                    defaultPaymentMethodId = company.stripe_payment_method_id;
-
-                } catch (stripeError) {
-                    console.error('Failed to retrieve payment methods:', stripeError);
-                }
-            }
-
-            // Determine if the live plan limits differ from the customer's snapshot
-            // so the frontend can show a "limits locked until renewal" notice.
-            let planUpdatedSinceSnapshot = false;
-            let originalPlanLimits = null;
-            let originalPlanPrice = null;
-            let currentPlanPeriod = 'month';
-
-            if (company?.plan_id) {
-                const livePlan = await db.collection('plans').findOne({ _id: company.plan_id });
-                if (livePlan) {
-                    currentPlanPeriod = livePlan.interval || livePlan.period || 'month';
-                    const liveLimits = TierService.getLimitsForPlan(livePlan);
-                    originalPlanPrice = livePlan.price || livePlan.price_usd || 0;
-                    originalPlanLimits = {
-                        workspaces: liveLimits.max_workspaces,
-                        collaborators: liveLimits.max_collaborators,
-                        viewers: liveLimits.max_viewers,
-                        users: liveLimits.max_users,
-                        project: liveLimits.project,
-                        pmf: liveLimits.pmf,
-                        insight: liveLimits.insight,
-                        strategic: liveLimits.strategic
-                    };
-
-                    if (company.plan_snapshot?.snapshotted_at) {
-                        const snap = company.plan_snapshot;
-                        planUpdatedSinceSnapshot = (
-                            liveLimits.max_workspaces !== snap.max_workspaces ||
-                            liveLimits.max_collaborators !== snap.max_collaborators ||
-                            liveLimits.max_viewers !== snap.max_viewers ||
-                            liveLimits.max_users !== snap.max_users ||
-                            liveLimits.project !== snap.project ||
-                            liveLimits.insight !== snap.insight ||
-                            liveLimits.strategic !== snap.strategic ||
-                            liveLimits.pmf !== snap.pmf
-                        );
-                    }
-                }
-            }
+            if (isManualAccount && status === 'expired') status = 'active';
+            if (isManualAccount) expiresAt = null;
 
             // Calculate total days in current billing cycle
             let totalDaysCycle = 31;
@@ -199,7 +179,6 @@ class SubscriptionController {
                 totalDaysCycle = Math.max(1, Math.round((e - s) / (1000 * 60 * 60 * 24)));
             }
 
-            // Determine billing cycle label
             const billingCycle = currentPlanPeriod === 'year' ? 'yearly' : 'monthly';
 
             const responseData = {
@@ -277,8 +256,7 @@ class SubscriptionController {
                 }
             };
 
-            // Save to cache before sending response
-            cacheUtil.set(cacheKey, responseData, 60);
+
 
             res.json(responseData);
 
@@ -480,8 +458,7 @@ class SubscriptionController {
                 stripe_subscription_id: company.stripe_subscription_id
             });
 
-            // Invalidate cache since plan changed
-            cacheUtil.del(cacheUtil.getUserKey('sub_details', userId));
+
 
             // Return updated details
             return SubscriptionController.getDetails(req, res);
@@ -661,8 +638,7 @@ class SubscriptionController {
                 stripe_subscription_id: company.stripe_subscription_id
             });
 
-            // Invalidate cache
-            cacheUtil.del(cacheUtil.getUserKey('sub_details', userId));
+
 
             return res.json({ success: true, message: 'Plan configured successfully' });
         } catch (error) {

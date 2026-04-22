@@ -894,11 +894,18 @@ class AdminController {
       const { user_id } = req.params;
       const { business_id } = req.query;
 
-      if (!ObjectId.isValid(user_id)) {
-        return res.status(400).json({ error: "Invalid user ID" });
-      }
+      const targetUserId = new ObjectId(user_id);
 
-      const targetUser = await UserModel.findById(user_id);
+      // Step 1: Parallelize initial validation and basic lookups
+      const [targetUser, questionsFetch, businesses] = await Promise.all([
+        UserModel.findById(user_id),
+        QuestionModel.findAll({ 
+          is_active: true,
+          phase: { $in: ALLOWED_PHASES }
+        }),
+        BusinessModel.findByUserId(targetUserId)
+      ]);
+
       if (!targetUser) {
         return res.status(404).json({ error: "User not found" });
       }
@@ -914,8 +921,6 @@ class AdminController {
         }
       }
 
-      const targetUserId = new ObjectId(user_id);
-
       // Build filters
       let conversationFilter = {
         user_id: targetUserId,
@@ -927,42 +932,27 @@ class AdminController {
         conversation_type: "phase_analysis",
       };
 
-      let businessFilter = { user_id: targetUserId };
-
+      let targetBusiness = null;
       if (business_id && ObjectId.isValid(business_id)) {
         const businessObjectId = new ObjectId(business_id);
         conversationFilter.business_id = businessObjectId;
         phaseAnalysisFilter.business_id = businessObjectId;
 
-        const businessExists = await BusinessModel.findById(
-          businessObjectId,
-          targetUserId
-        );
-        if (!businessExists) {
-          return res
-            .status(404)
-            .json({ error: "Business not found for this user" });
+        // Optimization: Find business in pre-fetched businesses array instead of extra DB call
+        targetBusiness = businesses.find(b => b._id.toString() === business_id.toString());
+        
+        if (!targetBusiness) {
+          return res.status(404).json({ error: "Business not found for this user" });
         }
       }
 
-      // Get data
-      const conversations =
-        await ConversationModel.findByFilter(conversationFilter);
-      const phaseAnalysis =
-        await ConversationModel.findByFilter(phaseAnalysisFilter);
-      const savedAnalyses = business_id && ObjectId.isValid(business_id)
-        ? await AnalysisModel.getAll(business_id)
-        : [];
-      const businesses = await BusinessModel.findByUserId(targetUserId);
-      const questionsFetch = await QuestionModel.findAll({ 
-        is_active: true,
-        phase: { $in: ALLOWED_PHASES }
-      });
-
-      // Fetch saved answers from the answers collection (Source of Truth)
-      const savedAnswers = business_id && ObjectId.isValid(business_id)
-        ? await AnswerModel.getByBusinessId(business_id)
-        : [];
+      // Step 2: Parallelize content data fetching
+      const [conversations, phaseAnalysis, savedAnalyses, savedAnswers] = await Promise.all([
+        ConversationModel.findByFilter(conversationFilter),
+        ConversationModel.findByFilter(phaseAnalysisFilter),
+        (business_id && ObjectId.isValid(business_id)) ? AnalysisModel.getAll(business_id) : Promise.resolve([]),
+        (business_id && ObjectId.isValid(business_id)) ? AnswerModel.getByBusinessId(business_id) : Promise.resolve([])
+      ]);
 
       const savedAnswerMap = new Map();
       savedAnswers.forEach(ans => {
@@ -984,12 +974,8 @@ class AdminController {
       let businessInfo = null;
       let documentInfo = null;
 
-      if (business_id) {
-        const business = await BusinessModel.findById(
-          business_id,
-          targetUserId
-        );
-
+      if (targetBusiness) {
+        const business = targetBusiness;
         if (business) {
           businessInfo = {
             id: business._id,
