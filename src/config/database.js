@@ -10,7 +10,14 @@ const connectToMongoDB = async () => {
     console.log('Raw MONGO_URI from env:', process.env.MONGO_URI ? 'SET' : 'NOT SET');
     console.log('Using MONGO_URI:', MONGO_URI.replace(/\/\/.*:.*@/, '//***:***@'));
 
-    const client = new MongoClient(MONGO_URI);
+    const client = new MongoClient(MONGO_URI, {
+      maxPoolSize: 100,
+      minPoolSize: 5,
+      connectTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
+      retryWrites: true,
+      w: 'majority'
+    });
     await client.connect();
     db = client.db();
 
@@ -31,4 +38,12 @@ const getDB = () => {
   return db;
 };
 
-module.exports = { connectToMongoDB, getDB };
+const disconnectFromMongoDB = async () => {
+  if (db && db.client) {
+    await db.client.close();
+    db = null;
+    console.log('MongoDB connection closed properly.');
+  }
+};
+
+module.exports = { connectToMongoDB, getDB, disconnectFromMongoDB };

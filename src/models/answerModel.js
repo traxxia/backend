@@ -52,6 +52,13 @@ class AnswerModel {
       .toArray();
   }
 
+  static async getByBusinessIds(business_ids) {
+    const db = getDB();
+    return await db.collection('answers')
+      .find({ business_id: { $in: business_ids.map(id => new ObjectId(id)) } })
+      .toArray();
+  }
+
   static async update(id, updateData) {
     const db = getDB();
     return await db.collection('answers').updateOne(

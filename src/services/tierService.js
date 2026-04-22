@@ -1,5 +1,6 @@
 const { getDB } = require('../config/database');
 const { ObjectId } = require('mongodb');
+const cacheUtil = require('../utils/cache');
 
 class TierService {
     static calculateExpiryDate(startDate, interval) {
@@ -13,22 +14,34 @@ class TierService {
     }
 
     static async getUserTier(userId) {
+        if (!userId) return 'none';
+        
+
+
         const db = getDB();
 
         const user = await db.collection('users').findOne({ _id: new ObjectId(userId) });
-        if (!user || !user.company_id) return 'none';
+        if (!user || !user.company_id) {
+            return 'none';
+        }
 
         const company = await db.collection('companies').findOne({ _id: user.company_id });
-        if (!company) return 'none';
+        if (!company) {
+            return 'none';
+        }
 
         // Legacy companies created without a plan have locked access
-        if (!company.plan_id) return 'none';
+        if (!company.plan_id) {
+            return 'none';
+        }
 
         // Cast plan_id to ObjectId to ensure correct MongoDB lookup, as it may be saved as a string
         const planObjId = typeof company.plan_id === 'string' ? new ObjectId(company.plan_id) : company.plan_id;
         const plan = await db.collection('plans').findOne({ _id: planObjId });
         
-        return plan?.name?.toLowerCase() || 'none';
+        const tier = plan?.name?.toLowerCase() || 'none';
+
+        return tier;
     }
 
     static isStripeAccountNull(company) {
@@ -77,33 +90,21 @@ class TierService {
      * Falls back to TIER_LIMITS only if no matching plan exists.
      */
     static async getTierLimits(tierName) {
-        const db = getDB();
         const normalizedTier = tierName?.toLowerCase()?.trim();
+        if (!normalizedTier) return this.getLimitsForPlan(null);
+
+
+
+        const db = getDB();
 
         // Look up plan by name (case-insensitive) so "Essential" / "essential" both work
-        let plan = null;
-        if (normalizedTier) {
-            plan = await db.collection('plans').findOne({
-                name: new RegExp(`^${normalizedTier}$`, 'i')
-            });
-        }
+        const plan = await db.collection('plans').findOne({
+            name: new RegExp(`^${normalizedTier}$`, 'i')
+        });
 
-        if (plan) {
-            return this.getLimitsForPlan(plan);
-        }
+        const limits = this.getLimitsForPlan(plan);
 
-        // If no matching plan is found in the DB, 
-        // lock all access so they must purchase a plan.
-        return {
-            max_workspaces: 0,
-            project: false,
-            max_collaborators: 0,
-            max_viewers: 0,
-            max_users: 0,
-            insight: false,
-            strategic: false,
-            pmf: false
-        };
+        return limits;
     }
 
     /**

@@ -16,6 +16,29 @@ const {
 
 const VALID_ADMIN_ROLES = ["super_admin", "company_admin"];
 
+// Simple in-memory cache for static question data
+const QUESTION_CACHE = {
+  data: null,
+  expiry: 0,
+  TTL: 5 * 60 * 1000 // 5 minutes
+};
+
+async function getQuestionContext() {
+  const now = Date.now();
+  if (QUESTION_CACHE.data && now < QUESTION_CACHE.expiry) {
+    return QUESTION_CACHE.data;
+  }
+
+  const [totalQuestions, allowedQuestions] = await Promise.all([
+    QuestionModel.countDocuments({ is_active: true, phase: { $in: ALLOWED_PHASES } }),
+    QuestionModel.findAll({ is_active: true, phase: { $in: ALLOWED_PHASES } })
+  ]);
+
+  QUESTION_CACHE.data = { totalQuestions, allowedQuestions };
+  QUESTION_CACHE.expiry = now + QUESTION_CACHE.TTL;
+  return QUESTION_CACHE.data;
+}
+
 
 
 class BusinessController {
@@ -29,9 +52,15 @@ class BusinessController {
 
       const db = getDB();
 
-      // Fetch the role document for company_admin
-      const companyAdminRole = await db.collection("roles").findOne({ role_name: "company_admin" });
+      // Parallelize role context and static question data fetching (with cache)
+      const [companyAdminRole, questionContext] = await Promise.all([
+        db.collection("roles").findOne({ role_name: "company_admin" }),
+        getQuestionContext()
+      ]);
+
+      const { totalQuestions, allowedQuestions } = questionContext;
       const companyAdminRoleId = companyAdminRole?._id;
+      const allowedQuestionIds = new Set(allowedQuestions.map((q) => q._id.toString()));
 
       let companyAdminIds = [];
 
@@ -95,17 +124,21 @@ class BusinessController {
 
         const companyUserIds = companyUsers.map((u) => new ObjectId(u._id));
 
-        owned = await BusinessModel.findByUserIds(companyUserIds);
-        collabs = await BusinessModel.findByCollaborator(req.user._id);
-
-        deletedOwned = await BusinessModel.findDeletedByUserIds(companyUserIds);
-        deletedCollabs = await BusinessModel.findDeletedByCollaborator(req.user._id);
+        const [o, c, do_, dc] = await Promise.all([
+          BusinessModel.findByUserIds(companyUserIds),
+          BusinessModel.findByCollaborator(req.user._id),
+          BusinessModel.findDeletedByUserIds(companyUserIds),
+          BusinessModel.findDeletedByCollaborator(req.user._id)
+        ]);
+        owned = o; collabs = c; deletedOwned = do_; deletedCollabs = dc;
       } else {
-        owned = await BusinessModel.findByUserId(targetUserId);
-        collabs = await BusinessModel.findByCollaborator(targetUserId);
-
-        deletedOwned = await BusinessModel.findDeletedByUserId(targetUserId);
-        deletedCollabs = await BusinessModel.findDeletedByCollaborator(targetUserId);
+        const [o, c, do_, dc] = await Promise.all([
+          BusinessModel.findByUserId(targetUserId),
+          BusinessModel.findByCollaborator(targetUserId),
+          BusinessModel.findDeletedByUserId(targetUserId),
+          BusinessModel.findDeletedByCollaborator(targetUserId)
+        ]);
+        owned = o; collabs = c; deletedOwned = do_; deletedCollabs = dc;
       }
 
       const ownedIds = new Set(owned.map((b) => b._id.toString()));
@@ -123,45 +156,29 @@ class BusinessController {
       const allDeletedBusinesses = [...deletedOwned, ...deleted_collaborating];
       const allBusinessIds = [...allActiveBusinesses, ...allDeletedBusinesses].map((b) => new ObjectId(b._id));
 
-      const businessesWithProjects = await ProjectModel.collection().distinct(
-        "business_id",
-        {
-          business_id: { $in: allBusinessIds },
-        }
-      );
+      // Parallelize all dependent statistics data fetching
+      const [
+        businessesWithProjects,
+        businessesWithLaunchedProjects,
+        businessesWithProjectGrants,
+        allAnswers
+      ] = await Promise.all([
+        ProjectModel.collection().distinct("business_id", { business_id: { $in: allBusinessIds } }),
+        ProjectModel.collection().distinct("business_id", { business_id: { $in: allBusinessIds }, launch_status: { $in: ["launched", "pending_launch"] } }),
+        ProjectModel.collection().distinct("business_id", { business_id: { $in: allBusinessIds }, allowed_collaborators: { $exists: true, $not: { $size: 0 } } }),
+        AnswerModel.getByBusinessIds(allBusinessIds)
+      ]);
 
-      const businessesWithLaunchedProjects = await ProjectModel.collection().distinct(
-        "business_id",
-        {
-          business_id: { $in: allBusinessIds },
-          launch_status: { $in: ["launched", "pending_launch"] }
-        }
-      );
+      const businessHasProjectSet = new Set(businessesWithProjects.map((id) => id.toString()));
+      const businessHasLaunchedProjectSet = new Set(businessesWithLaunchedProjects.map((id) => id.toString()));
+      const businessHasProjectGrantsSet = new Set(businessesWithProjectGrants.map((id) => id.toString()));
 
-      const businessesWithProjectGrants = await ProjectModel.collection().distinct(
-        "business_id",
-        {
-          business_id: { $in: allBusinessIds },
-          allowed_collaborators: { $exists: true, $not: { $size: 0 } }
-        }
-      );
-
-      const businessHasProjectSet = new Set(
-        businessesWithProjects.map((id) => id.toString())
-      );
-
-      const businessHasLaunchedProjectSet = new Set(
-        businessesWithLaunchedProjects.map((id) => id.toString())
-      );
-
-      const businessHasProjectGrantsSet = new Set(
-        businessesWithProjectGrants.map((id) => id.toString())
-      );
-
-      const totalQuestions = await QuestionModel.countDocuments({
-        is_active: true,
-        phase: { $in: ALLOWED_PHASES },
-      });
+      const answersByBusiness = allAnswers.reduce((acc, ans) => {
+        const bid = ans.business_id.toString();
+        if (!acc[bid]) acc[bid] = [];
+        acc[bid].push(ans);
+        return acc;
+      }, {});
 
       const buildAccess = (business) => {
         const isOwner =
@@ -188,94 +205,85 @@ class BusinessController {
         };
       };
 
-      const enhance = async (businessList) => {
-        return Promise.all(
-          businessList.map(async (business) => {
-            const answers = await AnswerModel.getByBusinessId(business._id);
+      const enhance = (businessList) => {
+        return businessList.map((business) => {
+          const answers = answersByBusiness[business._id.toString()] || [];
 
-            const questionStats = {};
-            answers.forEach((ans) => {
-              if (ans.question_id) {
-                const qid = ans.question_id.toString();
-                if (!questionStats[qid])
-                  questionStats[qid] = {
-                    hasAnswers: false,
-                    isComplete: false,
-                    answerCount: 0,
-                  };
-                if (ans.answer && ans.answer.trim() !== "") {
-                  questionStats[qid].hasAnswers = true;
-                  questionStats[qid].answerCount++;
-                  questionStats[qid].isComplete = true;
-                }
+          const questionStats = {};
+          answers.forEach((ans) => {
+            if (ans.question_id) {
+              const qid = ans.question_id.toString();
+              if (!questionStats[qid])
+                questionStats[qid] = {
+                  hasAnswers: false,
+                  isComplete: false,
+                  answerCount: 0,
+                };
+              if (ans.answer && ans.answer.trim() !== "") {
+                questionStats[qid].hasAnswers = true;
+                questionStats[qid].answerCount++;
+                questionStats[qid].isComplete = true;
               }
-            });
+            }
+          });
 
-            const allowedQuestions = await QuestionModel.findAll({
-              is_active: true,
-              phase: { $in: ALLOWED_PHASES },
-            });
-            const allowedQuestionIds = new Set(
-              allowedQuestions.map((q) => q._id.toString())
-            );
-            const filteredQuestionStats = Object.entries(questionStats).filter(
-              ([qid]) => allowedQuestionIds.has(qid)
-            );
-            const completedQuestions = filteredQuestionStats.filter(
-              ([_, stat]) => stat.isComplete || stat.hasAnswers
-            ).length;
-            const pendingQuestions = totalQuestions - completedQuestions;
-            const progressPercentage =
-              totalQuestions > 0
-                ? Math.round((completedQuestions / totalQuestions) * 100)
-                : 0;
+          const filteredQuestionStats = Object.entries(questionStats).filter(
+            ([qid]) => allowedQuestionIds.has(qid)
+          );
+          const completedQuestions = filteredQuestionStats.filter(
+            ([_, stat]) => stat.isComplete || stat.hasAnswers
+          ).length;
+          const pendingQuestions = totalQuestions - completedQuestions;
+          const progressPercentage =
+            totalQuestions > 0
+              ? Math.round((completedQuestions / totalQuestions) * 100)
+              : 0;
 
-            const access = buildAccess(business);
+          const access = buildAccess(business);
 
-            return {
-              ...business,
-              company_admin_id: companyAdminIds,
-              city: business.city || "",
-              country: business.country || "",
-              location_display: [business.city, business.country]
-                .filter(Boolean)
-                .join(", "),
-              has_financial_document: business.has_financial_document || false,
-              financial_document_info:
-                business.has_financial_document && business.financial_document
-                  ? {
-                    filename: business.financial_document.original_name,
-                    upload_date: business.financial_document.upload_date,
-                    file_size: business.financial_document.file_size,
-                    file_type: business.financial_document.file_type,
-                  }
-                  : null,
-              question_statistics: {
-                total_questions: totalQuestions,
-                completed_questions: completedQuestions,
-                pending_questions: pendingQuestions,
-                progress_percentage: progressPercentage,
-                total_answers_given: filteredQuestionStats.reduce(
-                  (sum, [, stat]) => sum + stat.answerCount,
-                  0
-                ),
-                excluded_phases: ["good"],
-                included_phases: ALLOWED_PHASES,
-              },
-              access,
-              has_projects: businessHasProjectSet.has(business._id.toString()),
-              has_launched_projects: businessHasLaunchedProjectSet.has(business._id.toString()),
-              has_access_grants: (business.allowed_ranking_collaborators?.length > 0) ||
-                businessHasProjectGrantsSet.has(business._id.toString()),
-            };
-          })
-        );
+          return {
+            ...business,
+            company_admin_id: companyAdminIds,
+            city: business.city || "",
+            country: business.country || "",
+            location_display: [business.city, business.country]
+              .filter(Boolean)
+              .join(", "),
+            has_financial_document: business.has_financial_document || false,
+            financial_document_info:
+              business.has_financial_document && business.financial_document
+                ? {
+                  filename: business.financial_document.original_name,
+                  upload_date: business.financial_document.upload_date,
+                  file_size: business.financial_document.file_size,
+                  file_type: business.financial_document.file_type,
+                }
+                : null,
+            question_statistics: {
+              total_questions: totalQuestions,
+              completed_questions: completedQuestions,
+              pending_questions: pendingQuestions,
+              progress_percentage: progressPercentage,
+              total_answers_given: filteredQuestionStats.reduce(
+                (sum, [, stat]) => sum + stat.answerCount,
+                0
+              ),
+              excluded_phases: ["good"],
+              included_phases: ALLOWED_PHASES,
+            },
+            access,
+            has_projects: businessHasProjectSet.has(business._id.toString()),
+            has_launched_projects: businessHasLaunchedProjectSet.has(business._id.toString()),
+            has_access_grants: (business.allowed_ranking_collaborators?.length > 0) ||
+              businessHasProjectGrantsSet.has(business._id.toString()),
+          };
+        });
       };
 
-      const enhancedOwned = await enhance(owned);
-      const enhancedCollaborating = await enhance(collaborating_businesses);
-      const enhancedDeletedOwned = await enhance(deletedOwned);
-      const enhancedDeletedCollaborating = await enhance(deleted_collaborating);
+      const enhancedOwned = enhance(owned);
+      const enhancedCollaborating = enhance(collaborating_businesses);
+      const enhancedDeletedOwned = enhance(deletedOwned);
+      const enhancedDeletedCollaborating = enhance(deleted_collaborating);
 
       //       console.log("DEBUG companyAdminIds:", companyAdminIds);
       // console.log("DEBUG targetUserId:", targetUserId.toString());

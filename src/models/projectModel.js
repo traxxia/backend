@@ -36,6 +36,16 @@ class ProjectModel {
     );
   }
 
+  static async updateAndReturn(id, updateData) {
+    const result = await this.collection().findOneAndUpdate(
+      { _id: new ObjectId(id) },
+      { $set: { ...updateData, updated_at: new Date() } },
+      { returnDocument: 'after' }
+    );
+    // Handle both old and new driver return formats
+    return result?.value || result;
+  }
+
   static async delete(id) {
     return await this.collection().deleteOne({ _id: new ObjectId(id) });
   }
@@ -46,30 +56,35 @@ class ProjectModel {
 
   // populate created_by field
   static async populateCreatedBy(projects) {
-    if (!Array.isArray(projects)) projects = [projects];
-    if (projects.length === 0) return projects;
+    const isArray = Array.isArray(projects);
+    const projectsArray = isArray ? projects : [projects];
+    if (projectsArray.length === 0) return projects;
 
     const userIds = [
-      ...new Set(projects.map((p) => p.user_id).filter(Boolean)),
+      ...new Set(projectsArray.map((p) => p.user_id?.toString()).filter(Boolean)),
     ];
-    if (userIds.length === 0) return projects;
+    
+    if (userIds.length === 0) {
+      const result = projectsArray.map(p => ({ ...p, created_by: "Unknown User" }));
+      return isArray ? result : result[0];
+    }
 
-    const users = await Promise.all(
-      userIds.map((id) => UserModel.findById(id))
-    );
+    // Optimization: Fetch all users in one query instead of multiple findById calls
+    const users = await UserModel.getAll({ _id: { $in: userIds.map(id => new ObjectId(id)) } });
 
     const userMap = {};
     users.forEach((user) => {
       if (user) {
-        const name = user.name?.trim() || "User";
-        userMap[user._id.toString()] = name;
+        userMap[user._id.toString()] = (user.name || "").trim() || "User";
       }
     });
 
-    return projects.map((project) => ({
+    const enriched = projectsArray.map((project) => ({
       ...project,
       created_by: userMap[project.user_id?.toString()] || "Unknown User",
     }));
+
+    return isArray ? enriched : enriched[0];
   }
 
   static async setAllowedCollaborators(projectId, collaboratorIds) {
