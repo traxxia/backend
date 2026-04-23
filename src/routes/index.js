@@ -19,6 +19,7 @@ const pmfRoutes = require("./pmfRoutes");
 const academyFeedbackRoutes = require("./academyFeedbackRoutes");
 const answerRoutes = require("./answerRoutes");
 const notificationRoutes = require("./notificationRoutes");
+const decisionLogRoutes = require("./decisionLogRoutes");
 const ProjectController = require("../controllers/projectController");
 const { authenticateToken } = require("../middleware/auth");
 
@@ -44,6 +45,7 @@ router.use("/api/subscription", subscriptionRoutes);
 router.use("/api/academy-feedback", academyFeedbackRoutes);
 router.use("/api/answers", answerRoutes);
 router.use("/api/notifications", notificationRoutes);
+router.use("/api/decision-logs", decisionLogRoutes);
 router.get("/api/rankings/summary", authenticateToken, ProjectController.getRankingsSummary);
 router.get("/api/access-control", authenticateToken, ProjectController.getGrantedAccess);
 
