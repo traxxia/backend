@@ -220,6 +220,67 @@ class DecisionLogController {
   }
 
   /**
+   * GET /api/decision-logs/business/:businessId
+   * Business-scoped decision logs from all projects within a specific business.
+   * Supports filters: project_id, log_type, execution_state, status, from, to, page, limit, sort_order
+   */
+  static async getBusinessDecisionLogs(req, res) {
+    try {
+      const { businessId } = req.params;
+      if (!ObjectId.isValid(businessId)) {
+        return res.status(400).json({ error: "Invalid business ID" });
+      }
+
+      // Check if user has access to this business
+      const business = await BusinessModel.findById(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const userId = req.user._id.toString();
+      const ownerId = business.user_id?.toString();
+      const collaboratorIds = (business.collaborators || []).map((id) => id.toString());
+      const userRole = req.user?.role?.role_name;
+
+      const canView =
+        isAdmin(req.user) || ownerId === userId || collaboratorIds.includes(userId) || userRole === "viewer";
+
+      if (!canView) {
+        return res.status(403).json({ error: "You do not have permission to view this business's decision logs" });
+      }
+
+      const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+      const limit = Math.min(parseInt(req.query.limit, 10) || 20, 100);
+      const skip = (page - 1) * limit;
+
+      const options = {
+        project_id: req.query.project_id,
+        log_type: req.query.log_type,
+        execution_state: req.query.execution_state,
+        status: req.query.status,
+        from: req.query.from,
+        to: req.query.to,
+        sort_order: req.query.sort_order || "desc",
+        limit,
+        skip,
+      };
+
+      const result = await DecisionLogModel.findByBusinessId(businessId, options);
+
+      return res.json({
+        message: "Business decision logs fetched successfully",
+        business_id: businessId,
+        page,
+        total_pages: Math.ceil(result.total / limit),
+        ...result,
+      });
+    } catch (error) {
+      console.error("GET BUSINESS DECISION LOGS ERROR:", error);
+      return res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  /**
    * GET /api/decision-logs
    * Cross-project aggregated feed scoped to the authenticated user's business.
    * Admins can pass ?business_id= to view any business.
