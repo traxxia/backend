@@ -2787,8 +2787,19 @@ class ProjectController {
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
+      const isAllowedCollaborator = Array.isArray(existing.allowed_collaborators) &&
+        existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
 
       const isOwnerAccountable = existing.accountable_owner_id && existing.accountable_owner_id.toString() === req.user._id.toString();
+
+      const permissions = getProjectPermissions({
+        projectStatus: existing.status,
+        isOwner,
+        isCollaborator,
+        isAdmin,
+        isAllowedCollaborator,
+        userRole: req.user.role.role_name,
+      });
 
       if (!isAdmin && !isOwnerAccountable && !permissions.canEdit) {
         return res.status(403).json({ error: "You do not have permission to update this project. Only admins or the accountable owner can perform updates." });
@@ -2809,7 +2820,7 @@ class ProjectController {
 
 
       const updated = await ProjectModel.findById(id);
-      const [project] = await ProjectModel.populateCreatedBy(updated);
+      const project = await ProjectModel.populateCreatedBy(updated);
       project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
       // Log the decision
@@ -2860,8 +2871,19 @@ class ProjectController {
       const isAdmin = ADMIN_ROLES.includes(req.user.role.role_name);
       const isOwner = business.user_id.toString() === req.user._id.toString();
       const isCollaborator = business.collaborators?.some(c => c.toString() === req.user._id.toString());
+      const isAllowedCollaborator = Array.isArray(existing.allowed_collaborators) &&
+        existing.allowed_collaborators.some(id => id.toString() === req.user._id.toString());
 
       const isOwnerAccountable = existing.accountable_owner_id && existing.accountable_owner_id.toString() === req.user._id.toString();
+
+      const permissions = getProjectPermissions({
+        projectStatus: existing.status,
+        isOwner,
+        isCollaborator,
+        isAdmin,
+        isAllowedCollaborator,
+        userRole: req.user.role.role_name,
+      });
 
       if (!isAdmin && !isOwnerAccountable && !permissions.canEdit) {
         return res.status(403).json({ error: "You do not have permission to review this project. Only admins or the accountable owner can perform reviews." });
@@ -2889,7 +2911,7 @@ class ProjectController {
 
 
       const updated = await ProjectModel.findById(id);
-      const [project] = await ProjectModel.populateCreatedBy(updated);
+      const project = await ProjectModel.populateCreatedBy(updated);
       project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
       // Log the decision
