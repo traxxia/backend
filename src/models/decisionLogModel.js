@@ -24,16 +24,17 @@ function normalizeForRead(log) {
   const actorId = log.actor_id || log.user_id || log.changed_by || null;
   const createdAt = log.created_at || log.changed_at || log.timestamp || new Date();
   const updatedAt = log.updated_at || createdAt;
+  const logType = log.log_type || "status_change";
   const decision =
     log.decision ||
     (log.from_status || log.to_status
       ? `${log.from_status || "Unknown"} -> ${log.to_status || "Unknown"}`
-      : "status_change");
+      : logType);
 
   return {
     ...log,
     actor_id: actorId,
-    log_type: log.log_type || "status_change",
+    log_type: logType,
     decision,
     execution_state: log.execution_state || log.to_status || null,
     assumption_state: log.assumption_state || log.to_learning_state || null,
@@ -60,7 +61,7 @@ class DecisionLogModel {
       business_id: toObjectId(payload.business_id) || null,
       actor_id: toObjectId(payload.actor_id || payload.user_id || payload.changed_by) || null,
       log_type: payload.log_type || "status_change",
-      decision: payload.decision || "status_change",
+      decision: payload.decision || payload.log_type || "status_change",
       execution_state: payload.execution_state || payload.to_status || null,
       assumption_state: payload.assumption_state || payload.to_learning_state || null,
       justification: payload.justification ? String(payload.justification).trim() : "",
@@ -253,11 +254,24 @@ class DecisionLogModel {
                       $cond: [
                         { $ifNull: ["$$actor", false] },
                         {
-                          $concat: [
-                            { $ifNull: ["$$actor.first_name", ""] },
-                            " ",
-                            { $ifNull: ["$$actor.last_name", ""] },
-                          ],
+                          $cond: [
+                            { $and: [
+                              { $eq: [{ $ifNull: ["$$actor.first_name", ""] }, ""] },
+                              { $eq: [{ $ifNull: ["$$actor.last_name", ""] }, ""] }
+                            ] },
+                            { $ifNull: ["$$actor.name", "Unknown"] },
+                            {
+                              $trim: {
+                                input: {
+                                  $concat: [
+                                    { $ifNull: ["$$actor.first_name", ""] },
+                                    " ",
+                                    { $ifNull: ["$$actor.last_name", ""] },
+                                  ]
+                                }
+                              }
+                            }
+                          ]
                         },
                         "Unknown",
                       ],

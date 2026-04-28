@@ -2907,8 +2907,18 @@ class ProjectController {
         assumptionState: finalLearningState,
         justification: `[Cadence Review] ${justification}`,
         metadata: { source: "cadence_review_api", no_changes: !!no_changes },
-        beforeSnapshot: { status: existing.status, learning_state: existing.learning_state },
-        afterSnapshot: { status: finalStatus, learning_state: finalLearningState },
+        beforeSnapshot: {
+          status: existing.status,
+          learning_state: existing.learning_state,
+          review_cadence: existing.review_cadence || null,
+          next_review_date: existing.next_review_date || null,
+        },
+        afterSnapshot: {
+          status: finalStatus,
+          learning_state: finalLearningState,
+          review_cadence: actualCadence,
+          next_review_date: updateData.next_review_date || null,
+        },
       });
 
       res.json({ message: "Review processed", project });
