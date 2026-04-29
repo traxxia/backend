@@ -294,6 +294,23 @@ class DecisionLogModel {
     return { logs, total, count: logs.length, limit, skip };
   }
 
+  static async getBusinessFilterOptions(businessId) {
+    if (!ObjectId.isValid(businessId)) return { log_types: [], execution_states: [] };
+    const match = { business_id: new ObjectId(businessId) };
+    const [log_types, execution_states, to_statuses] = await Promise.all([
+      this.collection().distinct("log_type", match),
+      this.collection().distinct("execution_state", match),
+      this.collection().distinct("to_status", match)
+    ]);
+    
+    const combined_states = Array.from(new Set([...execution_states, ...to_statuses].filter(Boolean)));
+    
+    return {
+      log_types: log_types.filter(Boolean),
+      execution_states: combined_states
+    };
+  }
+
   static async createIndexes() {
     await this.collection().createIndexes([
       { key: { project_id: 1, created_at: -1 }, name: "project_timeline_idx" },

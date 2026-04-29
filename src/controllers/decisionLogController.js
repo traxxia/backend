@@ -220,6 +220,46 @@ class DecisionLogController {
   }
 
   /**
+   * GET /api/decision-logs/business/:businessId/filters
+   * Get distinct log types and execution states for filtering
+   */
+  static async getBusinessFilterOptions(req, res) {
+    try {
+      const { businessId } = req.params;
+      if (!ObjectId.isValid(businessId)) {
+        return res.status(400).json({ error: "Invalid business ID" });
+      }
+
+      // Check if user has access to this business
+      const business = await BusinessModel.findById(businessId);
+      if (!business) {
+        return res.status(404).json({ error: "Business not found" });
+      }
+
+      const userId = req.user._id.toString();
+      const ownerId = business.user_id?.toString();
+      const collaboratorIds = (business.collaborators || []).map((id) => id.toString());
+      const userRole = req.user?.role?.role_name;
+
+      const canView =
+        isAdmin(req.user) || ownerId === userId || collaboratorIds.includes(userId) || userRole === "viewer";
+
+      if (!canView) {
+        return res.status(403).json({ error: "You do not have permission to view this business's decision logs" });
+      }
+
+      const options = await DecisionLogModel.getBusinessFilterOptions(businessId);
+      return res.json({
+        message: "Business filter options fetched successfully",
+        ...options
+      });
+    } catch (error) {
+      console.error("GET BUSINESS FILTER OPTIONS ERROR:", error);
+      return res.status(500).json({ error: "Server error" });
+    }
+  }
+
+  /**
    * GET /api/decision-logs/business/:businessId
    * Business-scoped decision logs from all projects within a specific business.
    * Supports filters: project_id, log_type, execution_state, status, from, to, page, limit, sort_order

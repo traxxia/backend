@@ -7,6 +7,7 @@ const DecisionLogController = require("../controllers/decisionLogController");
 router.get("/", authenticateToken, DecisionLogController.getAllDecisionLogs);
 
 // Business-level decision logs — must come before /:projectId/* to avoid conflict
+router.get("/business/:businessId/filters", authenticateToken, DecisionLogController.getBusinessFilterOptions);
 router.get("/business/:businessId", authenticateToken, DecisionLogController.getBusinessDecisionLogs);
 
 router.post("/:projectId/logs", authenticateToken, DecisionLogController.createDecisionLog);
