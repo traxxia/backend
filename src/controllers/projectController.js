@@ -22,6 +22,7 @@ const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
 const { calculateNextReviewDate, isProjectStale } = require("../utils/helpers");
+const { calculateProjectScore } = require("../utils/projectScore");
 
 
 
@@ -404,6 +405,7 @@ class ProjectController {
           decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []),
           is_stale: isProjectStale(project.next_review_date),
           rank: userRankMap[project._id.toString()] || null,
+          score: project.score !== undefined ? project.score : calculateProjectScore(project.impact, project.effort, project.risk)
         };
       });
 
@@ -763,6 +765,7 @@ class ProjectController {
             ? ""
             : String(budget_estimate).trim(),
         next_review_date: calculateNextReviewDate(last_reviewed || new Date(), review_cadence),
+        score: calculateProjectScore(impact, effort, risk),
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -1109,6 +1112,14 @@ class ProjectController {
         }
 
         updateData.next_review_date = calculateNextReviewDate(lr || new Date(), rc);
+      }
+
+      // Recalculate score if impact, effort, or risk changed
+      if (req.body.impact !== undefined || req.body.effort !== undefined || req.body.risk !== undefined) {
+        const impact = req.body.impact !== undefined ? req.body.impact : existing.impact;
+        const effort = req.body.effort !== undefined ? req.body.effort : existing.effort;
+        const risk = req.body.risk !== undefined ? req.body.risk : existing.risk;
+        updateData.score = calculateProjectScore(impact, effort, risk);
       }
 
       delete updateData._id;

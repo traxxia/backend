@@ -161,17 +161,27 @@ class BusinessController {
         businessesWithProjects,
         businessesWithLaunchedProjects,
         businessesWithProjectGrants,
-        allAnswers
+        allAnswers,
+        projectCounts
       ] = await Promise.all([
         ProjectModel.collection().distinct("business_id", { business_id: { $in: allBusinessIds } }),
         ProjectModel.collection().distinct("business_id", { business_id: { $in: allBusinessIds }, launch_status: { $in: ["launched", "pending_launch"] } }),
         ProjectModel.collection().distinct("business_id", { business_id: { $in: allBusinessIds }, allowed_collaborators: { $exists: true, $not: { $size: 0 } } }),
-        AnswerModel.getByBusinessIds(allBusinessIds)
+        AnswerModel.getByBusinessIds(allBusinessIds),
+        ProjectModel.collection().aggregate([
+          { $match: { business_id: { $in: allBusinessIds } } },
+          { $group: { _id: "$business_id", count: { $sum: 1 } } }
+        ]).toArray()
       ]);
 
       const businessHasProjectSet = new Set(businessesWithProjects.map((id) => id.toString()));
       const businessHasLaunchedProjectSet = new Set(businessesWithLaunchedProjects.map((id) => id.toString()));
       const businessHasProjectGrantsSet = new Set(businessesWithProjectGrants.map((id) => id.toString()));
+
+      const projectCountMap = projectCounts.reduce((acc, curr) => {
+        acc[curr._id.toString()] = curr.count;
+        return acc;
+      }, {});
 
       const answersByBusiness = allAnswers.reduce((acc, ans) => {
         const bid = ans.business_id.toString();
@@ -276,6 +286,8 @@ class BusinessController {
             has_launched_projects: businessHasLaunchedProjectSet.has(business._id.toString()),
             has_access_grants: (business.allowed_ranking_collaborators?.length > 0) ||
               businessHasProjectGrantsSet.has(business._id.toString()),
+            collaborators_count: (business.collaborators?.length || 0) + 1,
+            project_count: projectCountMap[business._id.toString()] || 0,
           };
         });
       };
@@ -429,6 +441,8 @@ class BusinessController {
           canLaunchProject: isAdmin,
         },
         has_projects: hasProjects,
+        collaborators_count: (business.collaborators?.length || 0) + 1,
+        project_count: await ProjectModel.collection().countDocuments({ business_id: business._id })
       };
 
       res.json(enhancedBusiness);
