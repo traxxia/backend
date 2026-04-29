@@ -531,7 +531,7 @@ class ProjectController {
       const raw = await ProjectModel.findById(id);
       if (!raw) return res.status(404).json({ error: "Project not found" });
 
-      const [project] = await ProjectModel.populateCreatedBy(raw);
+      const project = await ProjectModel.populateCreatedBy(raw);
       
       const actualCadence = project.review_cadence || "";
       const nextReview = project.next_review_date || calculateNextReviewDate(project.last_reviewed || project.created_at, actualCadence);
@@ -587,9 +587,9 @@ class ProjectController {
       } = req.body;
 
       // Required fields
-      if (!business_id || !project_name) {
+      if (!business_id || !project_name || !learning_state) {
         return res.status(400).json({
-          error: "business_id and project_name are required",
+          error: "business_id, project_name and learning_state are required",
         });
       }
 
@@ -597,6 +597,18 @@ class ProjectController {
       const business = await BusinessModel.findById(business_id);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
+
+      // Check for duplicate name in the same business
+      const existingProject = await ProjectModel.collection().findOne({
+        business_id: new ObjectId(business_id),
+        project_name: { $regex: new RegExp("^" + project_name.trim() + "$", "i") }
+      });
+
+      if (existingProject) {
+        return res.status(400).json({
+          error: `A project with the name "${project_name}" already exists in this workspace.`
+        });
+      }
 
       const tierName = await TierService.getUserTier(req.user._id);
       if (!await TierService.canCreateProject(tierName)) {
@@ -745,7 +757,7 @@ class ProjectController {
         accountable_owner_id: accountable_owner_id ? new ObjectId(accountable_owner_id) : null,
         status: status || PROJECT_STATES.DRAFT,
         launch_status: PROJECT_LAUNCH_STATUS.UNLAUNCHED,
-        learning_state: learning_state || "Testing",
+        learning_state: learning_state,
         last_reviewed: last_reviewed ? new Date(last_reviewed) : null,
 
         impact: normalizeString(impact),
@@ -795,7 +807,7 @@ class ProjectController {
       // }
 
       const raw = await ProjectModel.findById(insertedId);
-      const [project] = await ProjectModel.populateCreatedBy(raw);
+      const project = await ProjectModel.populateCreatedBy(raw);
 
       res.status(201).json({
         message: "Project created successfully",
@@ -923,6 +935,20 @@ class ProjectController {
         if (!name) {
           return res.status(400).json({ error: "Project name cannot be empty" });
         }
+
+        // Check for duplicate name (excluding current project)
+        const existingProjectWithSameName = await ProjectModel.collection().findOne({
+          _id: { $ne: new ObjectId(id) },
+          business_id: existing.business_id,
+          project_name: { $regex: new RegExp("^" + name + "$", "i") }
+        });
+
+        if (existingProjectWithSameName) {
+          return res.status(400).json({
+            error: `A project with the name "${name}" already exists in this workspace.`
+          });
+        }
+
         updateData.project_name = name;
       }
 
@@ -1009,7 +1035,7 @@ class ProjectController {
             return res.status(400).json({ error: transition.error });
           }
 
-          if (found !== existing.status) {
+          if (found.toLowerCase() !== (existing.status || "").toLowerCase()) {
             statusChanged = true;
             resolvedStatus = found;
           }
@@ -1068,9 +1094,13 @@ class ProjectController {
 
       // Process learning_state
       if (req.body.learning_state !== undefined) {
-        newLearningState = normalizeString(req.body.learning_state);
+        newLearningState = normalizeString(req.body.learning_state).trim();
 
-        if (newLearningState && oldLearningState.toLowerCase() !== newLearningState.toLowerCase()) {
+        if (!newLearningState) {
+          return res.status(400).json({ error: "learning_state cannot be empty" });
+        }
+
+        if (oldLearningState.toLowerCase() !== newLearningState.toLowerCase()) {
           learningStateChanged = true;
         }
 
@@ -1079,14 +1109,17 @@ class ProjectController {
 
       // Create a single decision log entry if either status or learning_state changed
       if (statusChanged || learningStateChanged) {
-        if (!req.body.justification || String(req.body.justification).trim() === "") {
+        const isLaunched = (existing.launch_status || "").toLowerCase() === "launched";
+
+        if (isLaunched && (!req.body.justification || String(req.body.justification).trim() === "")) {
           return res.status(400).json({
             error: "Justification is required when changing project status or learning state."
           });
         }
 
-        const justification = String(req.body.justification).trim();
-        const validSentence = /^[A-Za-z\s.,'-]+$/;
+        const justification = req.body.justification ? String(req.body.justification).trim() : (isLaunched ? "" : "Initial state set during drafting");
+        const validSentence = /^[A-Za-z0-9\s.,'?!()-]+$/; // Relaxed regex to allow more characters
+
 
         if (!validSentence.test(justification)) {
           return res.status(400).json({
