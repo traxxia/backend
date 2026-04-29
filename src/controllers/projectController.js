@@ -1180,7 +1180,8 @@ class ProjectController {
         return res.status(404).json({ error: "No valid projects found to launch" });
       }
 
-      // 3. Admin Ranking Check: Admin must have ranked all selected projects
+      // 3. Admin Ranking Check: (Optional) Admin no longer required to rank all selected projects before launch
+      /*
       const adminRankings = await ProjectRankingModel.collection().find({
         user_id: new ObjectId(req.user._id),
         project_id: { $in: project_ids.map(id => new ObjectId(id)) },
@@ -1198,6 +1199,7 @@ class ProjectController {
           error: `Launch failed: Numerical ranks are mandatory for all projects moved to 'Launched'. The following projects are not ranked:\n${bulletedList}\n\nPlease assign ranks before launching.`
         });
       }
+      */
 
       // 4. Persist the selection: Mark selected as PENDING_LAUNCH, reset others (if not already LAUNCHED)
       await ProjectModel.collection().updateMany(
@@ -1222,7 +1224,8 @@ class ProjectController {
 
 
 
-      // 5. Consensus check: All non-admin collaborators must have a rank for ALL launched/pending projects
+      // 5. Consensus check: (Optional) Ranking consensus no longer blocks launch
+      /*
       const business = await BusinessModel.findById(businessId);
       if (business) {
         const collaboratorIds = (business.collaborators || []).map(id => id.toString());
@@ -1284,6 +1287,7 @@ class ProjectController {
           });
         }
       }
+      */
 
       const results = [];
       for (const project of projectsToLaunch) {
