@@ -90,9 +90,11 @@ class DecisionLogModel {
 
     if (options.log_type) filter.log_type = options.log_type;
     if (options.execution_state) {
+      const escapedState = String(options.execution_state).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const stateRegex = new RegExp(`^${escapedState}$`, 'i');
       filter.$or = [
-        { execution_state: options.execution_state },
-        { to_status: options.execution_state }
+        { execution_state: stateRegex },
+        { to_status: stateRegex }
       ];
     }
     if (options.assumption_state) filter.assumption_state = options.assumption_state;
@@ -218,9 +220,11 @@ class DecisionLogModel {
     }
     if (options.log_type) match.log_type = options.log_type;
     if (options.execution_state) {
+      const escapedState = String(options.execution_state).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const stateRegex = new RegExp(`^${escapedState}$`, 'i');
       match.$or = [
-        { execution_state: options.execution_state },
-        { to_status: options.execution_state }
+        { execution_state: stateRegex },
+        { to_status: stateRegex }
       ];
     }
     if (options.status) match.status = options.status;
@@ -313,11 +317,18 @@ class DecisionLogModel {
       this.collection().distinct("to_status", match)
     ]);
     
-    const combined_states = Array.from(new Set([...execution_states, ...to_statuses].filter(Boolean)));
+    const normalize = (val) => {
+      if (!val) return null;
+      const s = String(val).trim();
+      return s.charAt(0).toUpperCase() + s.slice(1).toLowerCase();
+    };
+
+    const unique_types = Array.from(new Set(log_types.filter(Boolean).map(t => String(t).trim())));
+    const unique_states = Array.from(new Set([...execution_states, ...to_statuses].filter(Boolean).map(normalize)));
     
     return {
-      log_types: log_types.filter(Boolean),
-      execution_states: combined_states
+      log_types: unique_types,
+      execution_states: unique_states
     };
   }
 
