@@ -453,6 +453,15 @@ class AdminController {
         }
       }
       await UserModel.updateRole(user_id, role.toLowerCase());
+      
+      // If the role is changed to 'viewer' or 'user', revoke any special administrative access (reranking/project edit)
+      if (normalizedRole === 'viewer' || normalizedRole === 'user') {
+        console.log(`[AdminController] Revoking special access for user ${user_id} due to role change to ${normalizedRole}`);
+        await Promise.all([
+          BusinessModel.revokeRerankAccessGlobally(user_id),
+          ProjectModel.revokeProjectEditAccessGlobally(user_id)
+        ]);
+      }
 
       return res.json({
         message: "User role updated successfully",
