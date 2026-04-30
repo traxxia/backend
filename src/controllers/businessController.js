@@ -286,7 +286,7 @@ class BusinessController {
             has_launched_projects: businessHasLaunchedProjectSet.has(business._id.toString()),
             has_access_grants: (business.allowed_ranking_collaborators?.length > 0) ||
               businessHasProjectGrantsSet.has(business._id.toString()),
-            collaborators_count: (business.collaborators?.length || 0) + 1,
+            collaborators_count: (business.collaborators?.length || 0),
             project_count: projectCountMap[business._id.toString()] || 0,
           };
         });
@@ -441,7 +441,7 @@ class BusinessController {
           canLaunchProject: isAdmin,
         },
         has_projects: hasProjects,
-        collaborators_count: (business.collaborators?.length || 0) + 1,
+        collaborators_count: (business.collaborators?.length || 0),
         project_count: await ProjectModel.collection().countDocuments({ business_id: business._id })
       };
 

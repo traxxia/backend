@@ -258,7 +258,7 @@ class ProjectController {
     const nonAdminUsers = users.filter(u => {
       const roleName = roleMap[u.role_id?.toString()];
       const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
-      return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
+      return isActive;
     });
 
     const mandatoryProjectIds = adminRankings.filter(r => r.rank !== null).map(r => r.project_id);
@@ -472,7 +472,7 @@ class ProjectController {
       const nonAdminUsers = users.filter(u => {
         const roleName = roleMap[u.role_id?.toString()];
         const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
-        return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
+        return isActive;
       });
       const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
@@ -2523,7 +2523,7 @@ class ProjectController {
       const nonAdminUserIds = users
         .filter(u => {
           const roleName = roleMap[u.role_id?.toString()];
-          return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
+          return true;
         })
         .map(u => u._id.toString());
 
