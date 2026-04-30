@@ -159,6 +159,12 @@ class ProjectModel {
       { $pull: { allowed_collaborators: new ObjectId(userId) }, $set: { updated_at: new Date() } }
     );
   }
+  static async revokeProjectEditAccessGlobally(userId) {
+    return await this.collection().updateMany(
+      { allowed_collaborators: new ObjectId(userId) },
+      { $pull: { allowed_collaborators: new ObjectId(userId) }, $set: { updated_at: new Date() } }
+    );
+  }
 
   static async reassignOwnership(businessId, oldOwnerId, newOwnerId, newOwnerName) {
     return await this.collection().updateMany(
