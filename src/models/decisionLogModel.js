@@ -89,7 +89,12 @@ class DecisionLogModel {
     const filter = { project_id: new ObjectId(projectId) };
 
     if (options.log_type) filter.log_type = options.log_type;
-    if (options.execution_state) filter.execution_state = options.execution_state;
+    if (options.execution_state) {
+      filter.$or = [
+        { execution_state: options.execution_state },
+        { to_status: options.execution_state }
+      ];
+    }
     if (options.assumption_state) filter.assumption_state = options.assumption_state;
     if (options.status) filter.status = options.status;
     if (options.actor_id && ObjectId.isValid(options.actor_id)) {
@@ -212,7 +217,12 @@ class DecisionLogModel {
       match.project_id = new ObjectId(options.project_id);
     }
     if (options.log_type) match.log_type = options.log_type;
-    if (options.execution_state) match.execution_state = options.execution_state;
+    if (options.execution_state) {
+      match.$or = [
+        { execution_state: options.execution_state },
+        { to_status: options.execution_state }
+      ];
+    }
     if (options.status) match.status = options.status;
     if (options.from || options.to) {
       match.created_at = {};
