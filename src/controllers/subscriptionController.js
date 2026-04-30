@@ -79,16 +79,17 @@ class SubscriptionController {
 
             const isItemActive = (item) => !item.status || item.status === 'active';
 
-            const [currentProjects, paymentMethodsData, livePlan] = await Promise.all([
+            const [currentProjects, paymentMethodsData, livePlan, actualWorkspacesCount] = await Promise.all([
                 db.collection('projects').countDocuments({ business_id: { $in: allBusinessIds } }),
                 company?.stripe_customer_id ? StripeService.listPaymentMethods(company.stripe_customer_id).catch(() => []) : Promise.resolve([]),
-                company?.plan_id ? db.collection('plans').findOne({ _id: company.plan_id }) : Promise.resolve(null)
+                company?.plan_id ? db.collection('plans').findOne({ _id: company.plan_id }) : Promise.resolve(null),
+                db.collection('user_businesses').countDocuments({
+                    user_id: { $in: allUserIds },
+                    status: { $nin: ['deleted', 'archived', 'inactive'] }
+                })
             ]);
 
-            // Recalculate workspace count based on all user IDs (consistent with existing logic)
-            const actualWorkspacesCount = companyBusinesses.filter(b => 
-                !['deleted', 'archived', 'inactive'].includes(b.status) && b.access_mode !== 'archived'
-            ).length;
+
 
             const currentCollaborators = companyUsers.filter(u =>
                 isItemActive(u) && roleIdToNameMap[u.role_id?.toString()] === 'collaborator'
@@ -226,7 +227,7 @@ class SubscriptionController {
                 })),
                 usage: {
                     workspaces: {
-                        current: currentWorkspaces,
+                        current: actualWorkspacesCount,
                         limit: limits.max_workspaces,
                         original_limit: originalPlanLimits?.workspaces ?? limits.max_workspaces
                     },
