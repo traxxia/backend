@@ -202,6 +202,16 @@ class BusinessModel {
     );
   }
 
+  static async revokeRerankAccessGlobally(userId) {
+    return await this.collection().updateMany(
+      { allowed_ranking_collaborators: new ObjectId(userId) },
+      { 
+        $pull: { allowed_ranking_collaborators: new ObjectId(userId) },
+        $set: { updated_at: new Date() }
+      }
+    );
+  }
+
   static async setAllowedRankingCollaborators(businessId, collaboratorIds) {
     return await this.collection().updateOne(
       { _id: new ObjectId(businessId) },

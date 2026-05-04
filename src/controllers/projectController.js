@@ -4,6 +4,7 @@ const BusinessModel = require("../models/businessModel");
 const ProjectRankingModel = require("../models/projectRankingModel");
 const UserModel = require("../models/userModel")
 const DecisionLogModel = require("../models/decisionLogModel");
+const DecisionLogService = require("../services/decisionLogService");
 const NotificationModel = require("../models/notificationModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
@@ -21,6 +22,7 @@ const ADMIN_ROLES = ["company_admin", "super_admin"];
 const PROJECT_TYPES = ["immediate action", "short term initiative", "long term shift"];
 const DEFAULT_PROJECT_TYPE = "immediate action";
 const { calculateNextReviewDate, isProjectStale } = require("../utils/helpers");
+const { calculateProjectScore } = require("../utils/projectScore");
 
 
 
@@ -256,7 +258,7 @@ class ProjectController {
     const nonAdminUsers = users.filter(u => {
       const roleName = roleMap[u.role_id?.toString()];
       const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
-      return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
+      return isActive;
     });
 
     const mandatoryProjectIds = adminRankings.filter(r => r.rank !== null).map(r => r.project_id);
@@ -403,6 +405,7 @@ class ProjectController {
           decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []),
           is_stale: isProjectStale(project.next_review_date),
           rank: userRankMap[project._id.toString()] || null,
+          score: project.score !== undefined ? project.score : calculateProjectScore(project.impact, project.effort, project.risk)
         };
       });
 
@@ -469,7 +472,7 @@ class ProjectController {
       const nonAdminUsers = users.filter(u => {
         const roleName = roleMap[u.role_id?.toString()];
         const isActive = !['inactive', 'archived', 'deleted'].includes(u.status) && u.access_mode !== 'archived';
-        return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer' && isActive;
+        return isActive;
       });
       const nonAdminUserIds = nonAdminUsers.map(u => u._id);
 
@@ -528,7 +531,7 @@ class ProjectController {
       const raw = await ProjectModel.findById(id);
       if (!raw) return res.status(404).json({ error: "Project not found" });
 
-      const [project] = await ProjectModel.populateCreatedBy(raw);
+      const project = await ProjectModel.populateCreatedBy(raw);
       
       const actualCadence = project.review_cadence || "";
       const nextReview = project.next_review_date || calculateNextReviewDate(project.last_reviewed || project.created_at, actualCadence);
@@ -584,9 +587,9 @@ class ProjectController {
       } = req.body;
 
       // Required fields
-      if (!business_id || !project_name) {
+      if (!business_id || !project_name || !learning_state) {
         return res.status(400).json({
-          error: "business_id and project_name are required",
+          error: "business_id, project_name and learning_state are required",
         });
       }
 
@@ -594,6 +597,18 @@ class ProjectController {
       const business = await BusinessModel.findById(business_id);
       if (!business)
         return res.status(404).json({ error: "Business not found" });
+
+      // Check for duplicate name in the same business
+      const existingProject = await ProjectModel.collection().findOne({
+        business_id: new ObjectId(business_id),
+        project_name: { $regex: new RegExp("^" + project_name.trim() + "$", "i") }
+      });
+
+      if (existingProject) {
+        return res.status(400).json({
+          error: `A project with the name "${project_name}" already exists in this workspace.`
+        });
+      }
 
       const tierName = await TierService.getUserTier(req.user._id);
       if (!await TierService.canCreateProject(tierName)) {
@@ -742,7 +757,7 @@ class ProjectController {
         accountable_owner_id: accountable_owner_id ? new ObjectId(accountable_owner_id) : null,
         status: status || PROJECT_STATES.DRAFT,
         launch_status: PROJECT_LAUNCH_STATUS.UNLAUNCHED,
-        learning_state: learning_state || "Testing",
+        learning_state: learning_state,
         last_reviewed: last_reviewed ? new Date(last_reviewed) : null,
 
         impact: normalizeString(impact),
@@ -762,6 +777,7 @@ class ProjectController {
             ? ""
             : String(budget_estimate).trim(),
         next_review_date: calculateNextReviewDate(last_reviewed || new Date(), review_cadence),
+        score: calculateProjectScore(impact, effort, risk),
         created_at: new Date(),
         updated_at: new Date(),
       };
@@ -791,7 +807,7 @@ class ProjectController {
       // }
 
       const raw = await ProjectModel.findById(insertedId);
-      const [project] = await ProjectModel.populateCreatedBy(raw);
+      const project = await ProjectModel.populateCreatedBy(raw);
 
       res.status(201).json({
         message: "Project created successfully",
@@ -919,6 +935,20 @@ class ProjectController {
         if (!name) {
           return res.status(400).json({ error: "Project name cannot be empty" });
         }
+
+        // Check for duplicate name (excluding current project)
+        const existingProjectWithSameName = await ProjectModel.collection().findOne({
+          _id: { $ne: new ObjectId(id) },
+          business_id: existing.business_id,
+          project_name: { $regex: new RegExp("^" + name + "$", "i") }
+        });
+
+        if (existingProjectWithSameName) {
+          return res.status(400).json({
+            error: `A project with the name "${name}" already exists in this workspace.`
+          });
+        }
+
         updateData.project_name = name;
       }
 
@@ -1005,7 +1035,7 @@ class ProjectController {
             return res.status(400).json({ error: transition.error });
           }
 
-          if (found !== existing.status) {
+          if (found.toLowerCase() !== (existing.status || "").toLowerCase()) {
             statusChanged = true;
             resolvedStatus = found;
           }
@@ -1064,9 +1094,13 @@ class ProjectController {
 
       // Process learning_state
       if (req.body.learning_state !== undefined) {
-        newLearningState = normalizeString(req.body.learning_state);
+        newLearningState = normalizeString(req.body.learning_state).trim();
 
-        if (newLearningState && oldLearningState.toLowerCase() !== newLearningState.toLowerCase()) {
+        if (!newLearningState) {
+          return res.status(400).json({ error: "learning_state cannot be empty" });
+        }
+
+        if (oldLearningState.toLowerCase() !== newLearningState.toLowerCase()) {
           learningStateChanged = true;
         }
 
@@ -1075,14 +1109,17 @@ class ProjectController {
 
       // Create a single decision log entry if either status or learning_state changed
       if (statusChanged || learningStateChanged) {
-        if (!req.body.justification || String(req.body.justification).trim() === "") {
+        const isLaunched = (existing.launch_status || "").toLowerCase() === "launched";
+
+        if (isLaunched && (!req.body.justification || String(req.body.justification).trim() === "")) {
           return res.status(400).json({
             error: "Justification is required when changing project status or learning state."
           });
         }
 
-        const justification = String(req.body.justification).trim();
-        const validSentence = /^[A-Za-z\s.,'-]+$/;
+        const justification = req.body.justification ? String(req.body.justification).trim() : (isLaunched ? "" : "Initial state set during drafting");
+        const validSentence = /^[A-Za-z0-9\s.,'?!()-]+$/; // Relaxed regex to allow more characters
+
 
         if (!validSentence.test(justification)) {
           return res.status(400).json({
@@ -1090,24 +1127,13 @@ class ProjectController {
           });
         }
 
-        const logEntry = {
-          project_id: new ObjectId(id),
-          justification: justification,
-          changed_by: new ObjectId(req.user._id),
-          changed_at: new Date()
-        };
-
-        if (statusChanged) {
-          logEntry.from_status = existing.status;
-          logEntry.to_status = resolvedStatus;
-        }
-
-        if (learningStateChanged) {
-          logEntry.from_learning_state = oldLearningState;
-          logEntry.to_learning_state = newLearningState;
-        }
-
-        await DecisionLogModel.create(logEntry);
+        await DecisionLogService.logProjectUpdateIfSignificant({
+          projectBefore: existing,
+          updateData,
+          actorId: req.user._id,
+          justification,
+          source: "project_update_api",
+        });
       }
 
       if (req.body.last_reviewed !== undefined || req.body.review_cadence !== undefined) {
@@ -1119,6 +1145,14 @@ class ProjectController {
         }
 
         updateData.next_review_date = calculateNextReviewDate(lr || new Date(), rc);
+      }
+
+      // Recalculate score if impact, effort, or risk changed
+      if (req.body.impact !== undefined || req.body.effort !== undefined || req.body.risk !== undefined) {
+        const impact = req.body.impact !== undefined ? req.body.impact : existing.impact;
+        const effort = req.body.effort !== undefined ? req.body.effort : existing.effort;
+        const risk = req.body.risk !== undefined ? req.body.risk : existing.risk;
+        updateData.score = calculateProjectScore(impact, effort, risk);
       }
 
       delete updateData._id;
@@ -1179,7 +1213,8 @@ class ProjectController {
         return res.status(404).json({ error: "No valid projects found to launch" });
       }
 
-      // 3. Admin Ranking Check: Admin must have ranked all selected projects
+      // 3. Admin Ranking Check: (Optional) Admin no longer required to rank all selected projects before launch
+      /*
       const adminRankings = await ProjectRankingModel.collection().find({
         user_id: new ObjectId(req.user._id),
         project_id: { $in: project_ids.map(id => new ObjectId(id)) },
@@ -1197,6 +1232,7 @@ class ProjectController {
           error: `Launch failed: Numerical ranks are mandatory for all projects moved to 'Launched'. The following projects are not ranked:\n${bulletedList}\n\nPlease assign ranks before launching.`
         });
       }
+      */
 
       // 4. Persist the selection: Mark selected as PENDING_LAUNCH, reset others (if not already LAUNCHED)
       await ProjectModel.collection().updateMany(
@@ -1221,7 +1257,8 @@ class ProjectController {
 
 
 
-      // 5. Consensus check: All non-admin collaborators must have a rank for ALL launched/pending projects
+      // 5. Consensus check: (Optional) Ranking consensus no longer blocks launch
+      /*
       const business = await BusinessModel.findById(businessId);
       if (business) {
         const collaboratorIds = (business.collaborators || []).map(id => id.toString());
@@ -1283,6 +1320,7 @@ class ProjectController {
           });
         }
       }
+      */
 
       const results = [];
       for (const project of projectsToLaunch) {
@@ -2485,7 +2523,7 @@ class ProjectController {
       const nonAdminUserIds = users
         .filter(u => {
           const roleName = roleMap[u.role_id?.toString()];
-          return !ADMIN_ROLES.includes(roleName) && roleName !== 'viewer';
+          return true;
         })
         .map(u => u._id.toString());
 
@@ -2823,29 +2861,20 @@ class ProjectController {
       const project = await ProjectModel.populateCreatedBy(updated);
       project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
-      // Log the decision
-      const db = getDB();
-      await db.collection("audit_trail").insertOne({
-        user_id: new ObjectId(req.user._id),
-        event_type: "project_decision_log",
-        event_data: {
-          project_id: new ObjectId(id),
-          business_id: existing.business_id,
-          action: "adhoc_update",
-          justification,
-          old_state: { status: existing.status, learning_state: existing.learning_state },
-          new_state: { status: status || existing.status, learning_state: learning_state || existing.learning_state }
+      await DecisionLogService.createManualDecisionLog({
+        project: existing,
+        actorId: req.user._id,
+        logType: "adhoc_update",
+        decision: `adhoc_${existing.status || "unknown"}_to_${status || existing.status || "unknown"}`,
+        executionState: status || existing.status,
+        assumptionState: learning_state || existing.learning_state,
+        justification: `[Ad-Hoc Update] ${justification}`,
+        metadata: { source: "adhoc_update_api" },
+        beforeSnapshot: { status: existing.status, learning_state: existing.learning_state },
+        afterSnapshot: {
+          status: status || existing.status,
+          learning_state: learning_state || existing.learning_state,
         },
-        timestamp: new Date()
-      });
-
-      await DecisionLogModel.create({
-        project_id: new ObjectId(id),
-        changed_at: new Date(),
-        from_status: existing.status || "Draft",
-        to_status: status || existing.status || "Draft",
-        justification,
-        user_id: new ObjectId(req.user._id)
       });
 
       res.json({ message: "Ad-hoc update processed", project });
@@ -2914,34 +2943,30 @@ class ProjectController {
       const project = await ProjectModel.populateCreatedBy(updated);
       project.is_stale = project.launch_status === 'launched' ? isProjectStale(project.next_review_date) : false;
 
-      // Log the decision
-      const db = getDB();
-      await db.collection("audit_trail").insertOne({
-        user_id: new ObjectId(req.user._id),
-        event_type: "project_decision_log",
-        event_data: {
-          project_id: new ObjectId(id),
-          business_id: existing.business_id,
-          action: no_changes ? "no_change_review" : "cadence_review",
-          justification,
-          old_state: { status: existing.status, learning_state: existing.learning_state },
-          new_state: {
-            status: no_changes ? existing.status : (status || existing.status),
-            learning_state: no_changes ? existing.learning_state : (learning_state || existing.learning_state)
-          }
-        },
-        timestamp: new Date()
-      });
+      const finalStatus = no_changes ? existing.status : (status || existing.status);
+      const finalLearningState = no_changes ? existing.learning_state : (learning_state || existing.learning_state);
 
-      await DecisionLogModel.create({
-        project_id: new ObjectId(id),
-        changed_at: new Date(),
-        from_status: existing.status || "Draft",
-        to_status: no_changes ? (existing.status || "Draft") : (status || existing.status || "Draft"),
-        from_learning_state: existing.learning_state || "Testing",
-        to_learning_state: no_changes ? (existing.learning_state || "Testing") : (learning_state || existing.learning_state || "Testing"),
+      await DecisionLogService.createManualDecisionLog({
+        project: existing,
+        actorId: req.user._id,
+        logType: no_changes ? "no_change_review" : "cadence_review",
+        decision: no_changes ? "no_change_review" : `cadence_review_${existing.status || "unknown"}_to_${finalStatus || "unknown"}`,
+        executionState: finalStatus,
+        assumptionState: finalLearningState,
         justification: `[Cadence Review] ${justification}`,
-        user_id: new ObjectId(req.user._id)
+        metadata: { source: "cadence_review_api", no_changes: !!no_changes },
+        beforeSnapshot: {
+          status: existing.status,
+          learning_state: existing.learning_state,
+          review_cadence: existing.review_cadence || null,
+          next_review_date: existing.next_review_date || null,
+        },
+        afterSnapshot: {
+          status: finalStatus,
+          learning_state: finalLearningState,
+          review_cadence: actualCadence,
+          next_review_date: updateData.next_review_date || null,
+        },
       });
 
       res.json({ message: "Review processed", project });
