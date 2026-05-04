@@ -27,7 +27,7 @@ const runStaleBetCheck = async () => {
 
     const projects = await db.collection("projects").find({
       launch_status: 'launched',
-      status: { $nin: ['archived', 'deleted'] }
+      status: { $nin: ['archived', 'deleted', 'completed', 'scaled', 'killed'] }
     }).toArray();
 
     for (const project of projects) {

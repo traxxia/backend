@@ -403,7 +403,7 @@ class ProjectController {
           allowed_collaborators: (project.allowed_collaborators || []).map(id => id.toString()),
           status: project.status,
           decision_log: logsByProject[project._id.toString()] || (Array.isArray(project.decision_log) ? project.decision_log : []),
-          is_stale: isProjectStale(project.next_review_date),
+          is_stale: (project.launch_status === 'launched' && !['completed', 'scaled', 'killed'].includes(project.status?.toLowerCase())) ? isProjectStale(project.next_review_date) : false,
           rank: userRankMap[project._id.toString()] || null,
           score: project.score !== undefined ? project.score : calculateProjectScore(project.impact, project.effort, project.risk)
         };
@@ -429,7 +429,7 @@ class ProjectController {
             review_cadence: actualCadence,
             next_review_date: nextReview,
             is_admin_ranked: adminRankedProjectIds.has(p._id.toString()),
-            is_stale: p.launch_status === 'launched' ? isProjectStale(nextReview) : false
+            is_stale: (p.launch_status === 'launched' && !['completed', 'scaled', 'killed'].includes(p.status?.toLowerCase())) ? isProjectStale(nextReview) : false
           };
         }),
         business_status: businessStatus,
@@ -537,7 +537,7 @@ class ProjectController {
       const nextReview = project.next_review_date || calculateNextReviewDate(project.last_reviewed || project.created_at, actualCadence);
       project.review_cadence = actualCadence;
       project.next_review_date = nextReview;
-      project.is_stale = project.launch_status === 'launched' ? isProjectStale(nextReview) : false;
+      project.is_stale = (project.launch_status === 'launched' && !['completed', 'scaled', 'killed'].includes(project.status?.toLowerCase())) ? isProjectStale(nextReview) : false;
 
       const { ownerNameMap, bizOwnerFallbackMap } = await ProjectController._getOwnerNames([project]);
       project.accountable_owner = ProjectController._resolveOwner(project, ownerNameMap, bizOwnerFallbackMap);
