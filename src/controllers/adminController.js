@@ -1612,7 +1612,8 @@ class AdminController {
       // Find launched projects in those businesses
       const projects = await db.collection("projects").find({
         business_id: { $in: businessIds },
-        launch_status: 'launched'
+        launch_status: 'launched',
+        status: { $nin: ['completed', 'scaled', 'killed', 'archived', 'deleted'] }
       }).toArray();
 
       const { isProjectStale } = require('../utils/helpers');
