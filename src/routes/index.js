@@ -50,7 +50,9 @@ router.get("/api/rankings/summary", authenticateToken, ProjectController.getRank
 router.get("/api/access-control", authenticateToken, ProjectController.getGrantedAccess);
 
 const aiChatRoutes = require('./aiChatRoutes');
+const superAdminRoutes = require('./superAdminRoutes');
 
 router.use('/ai-chat', aiChatRoutes);
+router.use('/api/superadmin', superAdminRoutes);
 
 module.exports = router;
