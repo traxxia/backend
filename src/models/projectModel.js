@@ -167,18 +167,24 @@ class ProjectModel {
   }
 
   static async reassignOwnership(businessId, oldOwnerId, newOwnerId, newOwnerName) {
+    const oldOwnerIdObj = new ObjectId(oldOwnerId);
+    const oldOwnerIdStr = oldOwnerId.toString();
+    const newOwnerIdObj = new ObjectId(newOwnerId);
+
     return await this.collection().updateMany(
       { 
         business_id: new ObjectId(businessId), 
         $or: [
-          { user_id: new ObjectId(oldOwnerId) },
-          { accountable_owner_id: new ObjectId(oldOwnerId) }
+          { user_id: oldOwnerIdObj },
+          { user_id: oldOwnerIdStr },
+          { accountable_owner_id: oldOwnerIdObj },
+          { accountable_owner_id: oldOwnerIdStr }
         ]
       },
       { 
         $set: { 
-          user_id: new ObjectId(newOwnerId), 
-          accountable_owner_id: new ObjectId(newOwnerId),
+          user_id: newOwnerIdObj, 
+          accountable_owner_id: newOwnerIdObj,
           accountable_owner: newOwnerName,
           updated_at: new Date() 
         } 
