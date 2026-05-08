@@ -481,17 +481,18 @@ class BusinessController {
         });
       }
 
-      const limits = await TierService.getCompanyLimits(req.user.company_id);
-      const existingCount = await BusinessModel.countByCompanyId(req.user.company_id);
+      // Observatory Account has no workspace limits — skip tier check entirely
+      if (!req.user.is_observatory) {
+        const limits = await TierService.getCompanyLimits(req.user.company_id);
+        const existingCount = await BusinessModel.countByCompanyId(req.user.company_id);
 
-      if (existingCount >= limits.max_workspaces) {
-        return res.status(403).json({
-          error: `Workspace limit reached. Maximum ${limits.max_workspaces} workspace(s) allowed. Please upgrade your plan to create more.`,
-          plan: limits.plan_name,
-          limits: {
-            max_workspaces: limits.max_workspaces
-          }
-        });
+        if (existingCount >= limits.max_workspaces) {
+          return res.status(403).json({
+            error: `Workspace limit reached. Maximum ${limits.max_workspaces} workspace(s) allowed. Please upgrade your plan to create more.`,
+            plan: limits.plan_name,
+            limits: { max_workspaces: limits.max_workspaces }
+          });
+        }
       }
 
 

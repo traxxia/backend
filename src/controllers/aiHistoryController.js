@@ -2,6 +2,8 @@ const { ObjectId } = require('mongodb');
 const AiHistoryModel = require('../models/aiHistoryModel');
 const ProjectModel = require('../models/projectModel');
 const BusinessModel = require('../models/businessModel');
+const AiChatLogModel = require('../models/aiChatLogModel');
+const { isObservatoryRequest } = require('../utils/isObservatoryRequest');
 
 class AiHistoryController {
 
@@ -107,6 +109,57 @@ class AiHistoryController {
         } catch (error) {
             console.error('Error clearing chat history:', error);
             res.status(500).json({ error: 'Failed to clear chat history' });
+        }
+    }
+    /**
+     * Log a full AI chat turn (system prompt + user input + assistant response).
+     * GATED: Only writes to ai_chat_logs if the request is from the Observatory Account.
+     * For all other users, responds 204 No Content immediately — zero overhead.
+     */
+    static async logTurn(req, res) {
+        // ✅ GATE: Silently discard for non-observatory users
+        if (!isObservatoryRequest(req)) {
+            return res.status(204).end();
+        }
+
+        try {
+            const {
+                user_input, system_prompt, assistant_response,
+                business_id, project_id, page_context,
+                token_usage, latency_ms, model, status, timestamp
+            } = req.body;
+
+            // Resolve names from DB for easier filtering in Observatory UI
+            const [business, project] = await Promise.all([
+                business_id ? BusinessModel.findById(business_id) : Promise.resolve(null),
+                project_id ? ProjectModel.findById(project_id) : Promise.resolve(null)
+            ]);
+
+            // Fire-and-forget — respond immediately, write in background
+            AiChatLogModel.create({
+                observatory_account_id: req.user._id,
+                business_id: business_id || null,
+                business_name: business?.business_name || null,
+                project_id: project_id || null,
+                project_name: project?.project_name || null,
+                page_context: page_context || null,
+                system_prompt: system_prompt || null,
+                user_input: user_input || null,
+                assistant_response: assistant_response || null,
+                llm_provider: 'mastra',
+                model: model || null,
+                token_usage: token_usage || null,
+                latency_ms: latency_ms || null,
+                status: status || 'success',
+                timestamp: timestamp || new Date().toISOString()
+            }).catch((err) => {
+                console.error('[Observatory] Failed to write AI chat log:', err.message);
+            });
+
+            res.status(202).json({ ok: true });
+        } catch (error) {
+            console.error('Error in logTurn:', error);
+            res.status(500).json({ error: 'Failed to log chat turn' });
         }
     }
 }

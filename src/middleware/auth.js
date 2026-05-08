@@ -73,4 +73,17 @@ const requireSuperAdmin = (req, res, next) => {
   next();
 };
 
-module.exports = { authenticateToken, requireAdmin, requireSuperAdmin };
+/**
+ * Allows access if the user is a super_admin OR has is_observatory === true.
+ * Used exclusively for Observatory API routes.
+ */
+const requireObservatory = (req, res, next) => {
+  const isSuperAdmin = req.user?.role?.role_name === 'super_admin';
+  const isObservatory = req.user?.is_observatory === true;
+  if (!isSuperAdmin && !isObservatory) {
+    return res.status(403).json({ error: 'Observatory access required' });
+  }
+  next();
+};
+
+module.exports = { authenticateToken, requireAdmin, requireSuperAdmin, requireObservatory };

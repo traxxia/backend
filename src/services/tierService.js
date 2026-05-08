@@ -25,6 +25,10 @@ class TierService {
             return 'none';
         }
 
+        if (user.is_observatory) {
+            return 'observatory';
+        }
+
         const company = await db.collection('companies').findOne({ _id: user.company_id });
         if (!company) {
             return 'none';
@@ -97,6 +101,19 @@ class TierService {
 
         const db = getDB();
 
+        if (normalizedTier === 'observatory') {
+            return {
+                max_workspaces: 999999,
+                project: true,
+                max_collaborators: 999999,
+                max_viewers: 999999,
+                max_users: 999999,
+                insight: true,
+                strategic: true,
+                pmf: true
+            };
+        }
+
         // Look up plan by name (case-insensitive) so "Essential" / "essential" both work
         const plan = await db.collection('plans').findOne({
             name: new RegExp(`^${normalizedTier}$`, 'i')
@@ -126,6 +143,20 @@ class TierService {
                 insight: false,
                 strategic: false,
                 pmf: false
+            };
+        }
+
+        if (company.company_name === 'Traxxia Internal') {
+            return {
+                plan_name: 'Observatory',
+                max_workspaces: 999999,
+                project: true,
+                max_collaborators: 999999,
+                max_viewers: 999999,
+                max_users: 999999,
+                insight: true,
+                strategic: true,
+                pmf: true
             };
         }
 
