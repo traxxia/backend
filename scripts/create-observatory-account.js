@@ -41,7 +41,7 @@ async function createObservatoryAccount() {
     }
 
     // 2. Find the 'user' role
-    const userRole = await db.collection('roles').findOne({ role_name: 'user' });
+    const userRole = await db.collection('roles').findOne({ role_name: 'company_admin' });
     if (!userRole) {
       console.error('❌ Role "user" not found in the roles collection.');
       process.exit(1);
