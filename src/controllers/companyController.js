@@ -50,6 +50,17 @@ class CompanyController {
         return res.status(400).json({ error: 'business_id is required' });
       }
 
+      // Observatory Account has no AI token limits — return unlimited quota
+      if (req.user?.is_observatory) {
+        return res.json({
+          quotaExceed: false,
+          quotaResetAt: null,
+          ai_token_usage: 0,
+          ai_limit: 999999999,
+          is_observatory: true
+        });
+      }
+
       // 1. Find the business to get the user_id
       const business = await BusinessModel.findById(business_id);
       
@@ -80,6 +91,11 @@ class CompanyController {
 
       if (!business_id || tokens_used === undefined) {
         return res.status(400).json({ error: 'business_id and tokens_used are required' });
+      }
+
+      // Observatory Account: accept the call but don't charge any tokens
+      if (req.user?.is_observatory) {
+        return res.json({ success: true, is_observatory: true, tokens_charged: 0 });
       }
 
       // 1. Find the business to get the user_id
