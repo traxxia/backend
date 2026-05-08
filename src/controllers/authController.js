@@ -64,6 +64,7 @@ class AuthController {
         id: user._id,
         email: user.email,
         role: role.role_name,
+        is_observatory: user.is_observatory || false,
         limits: {
           insight:   planLimits.insight   ?? false,
           strategic: planLimits.strategic ?? false,
@@ -78,6 +79,7 @@ class AuthController {
           name: user.name,
           email: user.email,
           role: role.role_name,
+          is_observatory: user.is_observatory || false,
           tour_completed: user.tour_completed !== undefined ? user.tour_completed : true,
           plan_name: planName,
           limits: planLimits,
