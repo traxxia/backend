@@ -73,14 +73,21 @@ class InitiativeModel {
   }
 
   static async reassignOwnership(businessId, oldOwnerId, newOwnerId, newOwnerName = "") {
+    const oldOwnerIdObj = new ObjectId(oldOwnerId);
+    const oldOwnerIdStr = oldOwnerId.toString();
+    const newOwnerIdObj = new ObjectId(newOwnerId);
+
     return await this.collection().updateMany(
       { 
         business_id: new ObjectId(businessId), 
-        user_id: new ObjectId(oldOwnerId) 
+        $or: [
+          { user_id: oldOwnerIdObj },
+          { user_id: oldOwnerIdStr }
+        ]
       },
       { 
         $set: { 
-          user_id: new ObjectId(newOwnerId), 
+          user_id: newOwnerIdObj, 
           updated_at: new Date() 
         } 
       }

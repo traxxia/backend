@@ -611,14 +611,14 @@ class AdminController {
       // Also remove project-level edit access for this user in this business
       await ProjectModel.removeFromAllowedCollaborators(business_id, user_id);
 
-      // CRITICAL: Reassign ownership of any projects/bets owned by this participant back to the business owner
-      const businessOwnerId = business.user_id;
-      if (businessOwnerId.toString() !== user_id.toString()) {
-        const busOwner = await db.collection("users").findOne({ _id: businessOwnerId });
-        const newOwnerName = busOwner ? (busOwner.name || busOwner.email || "Business Owner") : "Business Owner";
-        
-        await ProjectModel.reassignOwnership(business_id, user_id, businessOwnerId, newOwnerName);
-        await InitiativeModel.reassignOwnership(business_id, user_id, businessOwnerId, newOwnerName);
+      // CRITICAL: Reassign ownership of any projects/bets owned by this participant 
+      // By default, we assign them to the admin performing the removal (req.user), as requested.
+      const newOwnerId = req.user._id;
+      const newOwnerName = req.user.name || req.user.email || "Admin";
+      
+      if (newOwnerId.toString() !== user_id.toString()) {
+        await ProjectModel.reassignOwnership(business_id, user_id, newOwnerId, newOwnerName);
+        await InitiativeModel.reassignOwnership(business_id, user_id, newOwnerId, newOwnerName);
       }
 
       res.json({ message: "Participant removed successfully" });
@@ -1612,8 +1612,7 @@ class AdminController {
       // Find launched projects in those businesses
       const projects = await db.collection("projects").find({
         business_id: { $in: businessIds },
-        launch_status: 'launched',
-        status: { $nin: ['completed', 'scaled', 'killed', 'archived', 'deleted'] }
+        launch_status: 'launched'
       }).toArray();
 
       const { isProjectStale } = require('../utils/helpers');
