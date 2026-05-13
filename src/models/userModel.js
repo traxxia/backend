@@ -110,6 +110,47 @@ class UserModel {
       }
     );
   }
+
+  static async setResetOtp(email, otp, expiry) {
+    const db = getDB();
+    return await db.collection('users').updateOne(
+      { email },
+      {
+        $set: {
+          reset_otp: otp,
+          reset_otp_expiry: expiry,
+          updated_at: new Date()
+        }
+      }
+    );
+  }
+
+  static async findByOtp(email, otp) {
+    const db = getDB();
+    return await db.collection('users').findOne({
+      email: email,
+      reset_otp: otp,
+      reset_otp_expiry: { $gt: new Date() }
+    });
+  }
+
+  static async resetPassword(userId, newPassword) {
+    const db = getDB();
+    const hashedPassword = await bcrypt.hash(newPassword, 12);
+    return await db.collection('users').updateOne(
+      { _id: new ObjectId(userId) },
+      {
+        $set: {
+          password: hashedPassword,
+          updated_at: new Date()
+        },
+        $unset: {
+          reset_otp: "",
+          reset_otp_expiry: ""
+        }
+      }
+    );
+  }
 }
 
 
