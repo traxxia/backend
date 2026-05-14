@@ -9,6 +9,7 @@ const NotificationModel = require("../models/notificationModel");
 const { getDB } = require("../config/database");
 const TierService = require("../services/tierService");
 const cacheUtil = require("../utils/cache");
+const EmailService = require("../services/emailService");
 
 
 const {
@@ -1542,6 +1543,17 @@ class ProjectController {
                 message: `The admin has ranked the projects for "${business.business_name || 'the business'}". Please review and rank your projects.`,
                 action_data: { business_id: business_id.toString() }
               }));
+
+              // Email Notification
+              if (u.email) {
+                notificationPromises.push(
+                  EmailService.sendRankingNotification(u.email, {
+                    userName: req.user.name,
+                    businessName: business.business_name,
+                    isAdminAction: true
+                  }).catch(err => console.error(`Failed to send ranking email to ${u.email}:`, err))
+                );
+              }
             });
           }
         } else {
@@ -1567,6 +1579,17 @@ class ProjectController {
                   collaborator_id: user_id.toString() 
                 }
               }));
+
+              // Email Notification
+              if (admin.email) {
+                notificationPromises.push(
+                  EmailService.sendRankingNotification(admin.email, {
+                    userName: req.user.name,
+                    businessName: business.business_name,
+                    isAdminAction: false
+                  }).catch(err => console.error(`Failed to send ranking email to admin ${admin.email}:`, err))
+                );
+              }
             });
           }
         }
