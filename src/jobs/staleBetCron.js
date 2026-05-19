@@ -1,5 +1,6 @@
 const { getDB } = require('../config/database');
 const NotificationModel = require('../models/notificationModel');
+const EmailService = require('../services/emailService');
 const { ObjectId } = require('mongodb');
 
 const getHoursDifference = (targetDate) => {
@@ -78,10 +79,13 @@ const runStaleBetCheck = async () => {
           ownerId = new ObjectId(String(project.user_id));
         }
 
-        const notificationRecipients = new Set();
+        const notificationRecipients = []; // Use array of objects { id, email }
 
         if (ownerId && ObjectId.isValid(ownerId)) {
-          notificationRecipients.add(ownerId.toString());
+          const owner = await db.collection("users").findOne({ _id: ownerId });
+          if (owner && owner.email) {
+            notificationRecipients.push({ id: ownerId.toString(), email: owner.email });
+          }
         }
 
         if (companyId && ObjectId.isValid(String(companyId))) {
@@ -93,11 +97,14 @@ const runStaleBetCheck = async () => {
           ]).toArray();
 
           for (const admin of companyAdmins) {
-            notificationRecipients.add(admin._id.toString());
+            if (admin.email && !notificationRecipients.some(r => r.id === admin._id.toString())) {
+              notificationRecipients.push({ id: admin._id.toString(), email: admin.email });
+            }
           }
         }
 
-        for (const recipientId of notificationRecipients) {
+        for (const recipient of notificationRecipients) {
+          const { id: recipientId, email } = recipient;
           const existing = await NotificationModel.findExistingNotificationForTarget(
             recipientId,
             notificationType,
@@ -116,7 +123,17 @@ const runStaleBetCheck = async () => {
                 target_date: new Date(project.next_review_date).toISOString()
               }
             });
-            console.log(`[Cron] Sent ${notificationType} to user ${recipientId} for project ${project._id}`);
+
+            // Send Email Notification
+            if (email) {
+              EmailService.sendReviewReminder(email, {
+                projectName: project.project_name,
+                businessName: businessName,
+                notificationType: notificationType
+              }).catch(err => console.error(`[Cron] Failed to send email to ${email}:`, err));
+            }
+
+            console.log(`[Cron] Sent ${notificationType} to user ${recipientId} (${email}) for project ${project._id}`);
           }
         }
       }

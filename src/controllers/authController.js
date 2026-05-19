@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { ObjectId } = require('mongodb');
 const { getDB } = require('../config/database');
 const { SECRET_KEY } = require('../config/constants');
@@ -7,6 +8,7 @@ const CompanyModel = require("../models/companyModel")
 const { logAuditEvent } = require('../services/auditService');
 const TierService = require('../services/tierService');
 const StripeService = require('../services/stripeService');
+const EmailService = require('../services/emailService');
 
 class AuthController {
   static async login(req, res) {
@@ -335,6 +337,78 @@ class AuthController {
     } catch (error) {
       console.error('[AuthController] Complete tour error:', error);
       res.status(500).json({ error: 'Failed to update tour status' });
+    }
+  }
+
+  static async forgotPassword(req, res) {
+    const { email } = req.body;
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Email is required" });
+    }
+
+    try {
+      const user = await UserModel.findByEmail(email);
+      if (!user) {
+        // Aligned with the provided snippet's approach (returning 404)
+        return res.status(404).json({ success: false, message: "User not found" });
+      }
+
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiry = new Date(Date.now() + 5 * 60 * 1000); // 5 minutes
+
+      await UserModel.setResetOtp(email, otp, expiry);
+      
+      await EmailService.sendPasswordResetOtp(email, otp);
+
+      res.json({ success: true, message: "OTP sent to your email" });
+    } catch (error) {
+      console.error('Error in forgotPassword:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  static async verifyOtp(req, res) {
+    const { email, otp } = req.body;
+    if (!email || !otp) {
+      return res.status(400).json({ success: false, message: "Email and OTP are required" });
+    }
+
+    try {
+      const user = await UserModel.findByOtp(email, otp);
+      if (!user) {
+        return res.status(400).json({ success: false, message: "Invalid or expired OTP" });
+      }
+
+      res.json({ success: true, message: "OTP verified successfully" });
+    } catch (error) {
+      console.error('Error in verifyOtp:', error);
+      res.status(500).json({ success: false, message: error.message });
+    }
+  }
+
+  static async resetPassword(req, res) {
+    const { email, otp, password } = req.body;
+    if (!email || !otp || !password) {
+      return res.status(400).json({
+        success: false,
+        message: "Email, OTP and new password are required",
+      });
+    }
+
+    try {
+      const user = await UserModel.findByOtp(email, otp);
+      if (!user) {
+        return res.status(400).json({ success: false, message: "Invalid or expired OTP" });
+      }
+
+      await UserModel.resetPassword(user._id, password);
+      
+      await logAuditEvent(user._id, 'password_reset_success', { email: user.email });
+
+      res.json({ success: true, message: "Password reset successfully" });
+    } catch (error) {
+      console.error('Error in resetPassword:', error);
+      res.status(500).json({ success: false, message: error.message });
     }
   }
 }
