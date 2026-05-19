@@ -19,7 +19,10 @@ require('./jobs/staleBetCron'); // Initializes stale bet notification scheduler
 const app = express();
 
 // Security and Performance Middlewares
-app.use(helmet());
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: "cross-origin" },
+  crossOriginEmbedderPolicy: false
+}));
 app.use(compression());
 
 const limiter = rateLimit({
