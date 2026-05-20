@@ -25,17 +25,24 @@ class AnswerModel {
 
   static async bulkUpdate(answersData) {
     const db = getDB();
-    const bulkOps = answersData.map(item => ({
-      updateOne: {
-        filter: { _id: new ObjectId(item.answer_id) },
-        update: {
-          $set: {
-            answer: item.answer,
-            updated_at: new Date()
+    const bulkOps = answersData.map(item => {
+      const updateFields = {
+        answer: item.answer,
+        updated_at: new Date()
+      };
+      if (item.confidence !== undefined) updateFields.confidence = item.confidence;
+      if (item.status !== undefined) updateFields.status = item.status;
+      if (item.evidence !== undefined) updateFields.evidence = item.evidence;
+
+      return {
+        updateOne: {
+          filter: { _id: new ObjectId(item.answer_id) },
+          update: {
+            $set: updateFields
           }
         }
-      }
-    }));
+      };
+    });
     if (bulkOps.length === 0) return { modifiedCount: 0 };
     return await db.collection('answers').bulkWrite(bulkOps);
   }

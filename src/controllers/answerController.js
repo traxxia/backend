@@ -7,13 +7,16 @@ class AnswerController {
   
   static async create(req, res) {
     try {
-      const { business_id, question_id, answer } = req.body;
+      const { business_id, question_id, answer, confidence, status, evidence } = req.body;
       
       const answerData = {
         business_id: new ObjectId(business_id),
         question_id: new ObjectId(question_id),
         answer: answer
       };
+      if (confidence !== undefined) answerData.confidence = confidence;
+      if (status !== undefined) answerData.status = status;
+      if (evidence !== undefined) answerData.evidence = evidence;
 
       const result = await AnswerModel.create(answerData);
       
@@ -35,11 +38,17 @@ class AnswerController {
         return res.status(400).json({ error: 'business_id and a non-empty array of answers are required' });
       }
 
-      const answersData = answers.map(item => ({
-        business_id: new ObjectId(business_id),
-        question_id: new ObjectId(item.question_id),
-        answer: item.answer
-      }));
+      const answersData = answers.map(item => {
+        const data = {
+          business_id: new ObjectId(business_id),
+          question_id: new ObjectId(item.question_id),
+          answer: item.answer
+        };
+        if (item.confidence !== undefined) data.confidence = item.confidence;
+        if (item.status !== undefined) data.status = item.status;
+        if (item.evidence !== undefined) data.evidence = item.evidence;
+        return data;
+      });
 
       const result = await AnswerModel.bulkCreate(answersData);
       
@@ -63,10 +72,14 @@ class AnswerController {
 
       const answersData = answers.map(item => {
          if(!item.answer_id) throw new Error("Missing answer_id in bulk update payload");
-         return {
+         const data = {
            answer_id: item.answer_id,
            answer: item.answer
          };
+         if (item.confidence !== undefined) data.confidence = item.confidence;
+         if (item.status !== undefined) data.status = item.status;
+         if (item.evidence !== undefined) data.evidence = item.evidence;
+         return data;
       });
 
       const result = await AnswerModel.bulkUpdate(answersData);
@@ -188,11 +201,20 @@ class AnswerController {
   static async update(req, res) {
     try {
       const { id } = req.params;
-      const { answer } = req.body;
+      const { answer, confidence, status, evidence } = req.body;
       
       const updateData = {};
       if (answer !== undefined) {
         updateData.answer = answer;
+      }
+      if (confidence !== undefined) {
+        updateData.confidence = confidence;
+      }
+      if (status !== undefined) {
+        updateData.status = status;
+      }
+      if (evidence !== undefined) {
+        updateData.evidence = evidence;
       }
       
       const result = await AnswerModel.update(id, updateData);

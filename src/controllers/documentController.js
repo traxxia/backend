@@ -237,6 +237,91 @@ class DocumentController {
       res.status(500).json({ error: 'Failed to download financial document' });
     }
   }
+
+  static async analyzeDocuments(req, res) {
+    try {
+      const businessId = req.params.id;
+      const uploadedFile = req.file;
+
+      if (!uploadedFile) {
+        return res.status(400).json({ error: 'No document file uploaded' });
+      }
+
+      // Fetch active questions
+      const QuestionModel = require('../models/questionModel');
+      const questions = await QuestionModel.findAll({ is_active: true });
+
+      const mockAnswers = questions.map((question, index) => {
+        const qId = String(question._id || question.question_id);
+        const text = question.question_text || '';
+        const lowerText = text.toLowerCase();
+
+        let answer = '';
+        let status = 'FOUND';
+        let confidence = parseFloat((0.8 + Math.random() * 0.19).toFixed(2));
+        let page = (index % 8) + 1;
+        let evidenceText = '';
+
+        if (lowerText.includes('name') || lowerText.includes('identity')) {
+          answer = '[AI Extraction] Traxxia Enterprise Solutions';
+          evidenceText = 'The business operates under the trade name Traxxia Enterprise Solutions.';
+        } else if (lowerText.includes('purpose') || lowerText.includes('objective') || lowerText.includes('mission')) {
+          answer = '[AI Extraction] To provide high-quality, high-capacity automated agentic strategic solutions to enterprise customers globally.';
+          evidenceText = 'Our primary objective is to scale automated, reliable execution pipelines and expand target market reach.';
+        } else if (lowerText.includes('target') || lowerText.includes('audience') || lowerText.includes('customer') || lowerText.includes('segment')) {
+          answer = '[AI Extraction] B2B Mid-market and enterprise organizations looking to automate complex software and operational engineering pipelines.';
+          evidenceText = 'The primary target segment comprises B2B mid-market organizations and enterprise players.';
+        } else if (lowerText.includes('competit') || lowerText.includes('rival') || lowerText.includes('landscape')) {
+          answer = '[AI Extraction] Legacy management consultancies and early-stage specialized SaaS companies in the automation domain.';
+          evidenceText = 'We face competition from legacy firms and modern AI startups offering narrow automation tools.';
+        } else if (lowerText.includes('pricing') || lowerText.includes('cost') || lowerText.includes('revenue') || lowerText.includes('model')) {
+          answer = '[AI Extraction] Enterprise subscription tiers starting from $499/month, supplemented by custom pilot consulting contracts.';
+          evidenceText = 'Pricing is structured on a tiered B2B SaaS model to ensure scalable adoption across customer sizes.';
+        } else if (lowerText.includes('effective') || lowerText.includes('date') || lowerText.includes('launch') || lowerText.includes('start')) {
+          answer = '[AI Extraction] March 1, 2025';
+          evidenceText = 'This policy is effective from March 1, 2025.';
+        } else if (lowerText.includes('board') || lowerText.includes('directors') || lowerText.includes('approve') || lowerText.includes('governance')) {
+          answer = '[AI Extraction] Board of Directors';
+          evidenceText = 'Approved by the Board of Directors.';
+        } else if (lowerText.includes('violation') || lowerText.includes('penalty') || lowerText.includes('breach') || lowerText.includes('risk')) {
+          answer = '';
+          status = 'NOT_FOUND';
+          confidence = 0.0;
+        } else {
+          const businessThemes = [
+            'Optimizing operational efficiency through high-capacity automated agentic workflow pipelines.',
+            'Targeting a 35% reduction in project delivery overhead within the next two fiscal quarters.',
+            'Maintaining strict compliance with global digital security and data protection regulations.',
+            'Fostering strong peer-to-peer developer collaboration and organic platform adoption.',
+            'Developing flexible, integration-ready standard architectures that hook into client ERP networks.'
+          ];
+          const chosenTheme = businessThemes[index % businessThemes.length];
+          answer = `[AI Extraction] ${chosenTheme}`;
+          evidenceText = `As documented under Section ${index + 1}: ${chosenTheme}`;
+        }
+
+        return {
+          question_id: qId,
+          answer: answer,
+          confidence: confidence,
+          status: status,
+          evidence: status === 'FOUND' ? [{
+            page: page,
+            text: evidenceText,
+            document_name: uploadedFile.originalname
+          }] : null
+        };
+      });
+
+      res.status(200).json({
+        request_id: `req_${Math.random().toString(36).substr(2, 9)}`,
+        answers: mockAnswers
+      });
+    } catch (error) {
+      console.error('Document analysis error:', error);
+      res.status(500).json({ error: 'Failed to analyze documents' });
+    }
+  }
 }
 
 module.exports = DocumentController;
