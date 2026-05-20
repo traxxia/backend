@@ -1560,6 +1560,18 @@ class AdminController {
         contentType = 'image/svg+xml';
       }
 
+      if (!logoUrl.includes('blob.core.windows.net')) {
+        const fs = require('fs');
+        const path = require('path');
+        const localPath = path.join(__dirname, '../../uploads/logos', blobName);
+        if (fs.existsSync(localPath)) {
+          res.setHeader('Content-Type', contentType);
+          return res.sendFile(localPath);
+        } else {
+          return res.status(404).json({ error: "Local logo file not found" });
+        }
+      }
+
       await blobService.downloadToStream(
         blobName,
         res,
