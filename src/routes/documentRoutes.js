@@ -5,7 +5,6 @@ const { authenticateToken } = require('../middleware/auth');
 const { financialDocUpload } = require('../middleware/upload');
 
 router.put('/:id/financial-document', authenticateToken, financialDocUpload.single('document'), DocumentController.upload);
-router.post('/:id/analyze-documents', authenticateToken, financialDocUpload.single('document'), DocumentController.analyzeDocuments);
 router.post('/:id/upload-decision', authenticateToken, DocumentController.updateUploadDecision);
 router.get('/:id/financial-document', authenticateToken, DocumentController.getInfo);
 router.delete('/:id/financial-document', authenticateToken, DocumentController.delete);
