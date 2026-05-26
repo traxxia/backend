@@ -51,6 +51,15 @@ router.use("/api/sessions", docIntelligenceRoutes);
 router.get("/api/rankings/summary", authenticateToken, ProjectController.getRankingsSummary);
 router.get("/api/access-control", authenticateToken, ProjectController.getGrantedAccess);
 
+// System configuration and limit endpoints (single source of truth for frontend)
+const { FILE_SIZE_LIMITS, MAX_FILE_UPLOAD_LIMIT } = require("../config/constants");
+router.get("/api/config/limits", (req, res) => {
+  res.status(200).json({
+    maxFileSizeMB: FILE_SIZE_LIMITS.DOCUMENT / (1024 * 1024),
+    maxFileUploadLimit: MAX_FILE_UPLOAD_LIMIT
+  });
+});
+
 const aiChatRoutes = require('./aiChatRoutes');
 const superAdminRoutes = require('./superAdminRoutes');
 
