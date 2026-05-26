@@ -284,6 +284,26 @@ class BusinessModel {
     );
   }
 
+  static async addStrategicDocument(businessId, documentData) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $addToSet: { strategic_documents: documentData },
+        $set: { updated_at: new Date() },
+      }
+    );
+  }
+
+  static async removeStrategicDocument(businessId, filename) {
+    return await this.collection().updateOne(
+      { _id: new ObjectId(businessId) },
+      {
+        $pull: { strategic_documents: { filename: filename } },
+        $set: { updated_at: new Date() },
+      }
+    );
+  }
+
 }
 
 module.exports = BusinessModel;

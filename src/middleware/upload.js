@@ -51,4 +51,23 @@ const financialDocUpload = multer({
   }
 });
 
-module.exports = { logoUpload, financialDocUpload };
+const strategicDocUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: FILE_SIZE_LIMITS.DOCUMENT
+  },
+  fileFilter: (req, file, cb) => {
+    const allowedTypes = [
+      'application/pdf',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/msword'
+    ];
+    if (allowedTypes.includes(file.mimetype) || file.originalname.endsWith('.docx') || file.originalname.endsWith('.doc')) {
+      cb(null, true);
+    } else {
+      cb(new Error('Invalid file type. Only PDF and Word documents are allowed.'), false);
+    }
+  }
+});
+
+module.exports = { logoUpload, financialDocUpload, strategicDocUpload };
