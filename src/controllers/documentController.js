@@ -65,6 +65,37 @@ class DocumentController {
 
       await BusinessModel.updateUploadDecision(businessId, 'upload');
 
+      // Seed Document Intelligence Session record
+      try {
+        const { getDB } = require('../config/database');
+        const db = getDB();
+        await db.collection("doc_intelligence_sessions").updateOne(
+          { businessId: new ObjectId(businessId) },
+          {
+            $set: {
+              status: "processing",
+              uploadedDocuments: [
+                {
+                  filename: blobName,
+                  original_name: uploadedFile.originalname,
+                  file_type: uploadedFile.mimetype,
+                  file_size: uploadedFile.size,
+                  upload_date: new Date()
+                }
+              ],
+              updated_at: new Date()
+            },
+            $setOnInsert: {
+              created_at: new Date()
+            }
+          },
+          { upsert: true }
+        );
+        console.log(`[DocumentController] Seeded doc_intelligence_sessions for business: ${businessId}`);
+      } catch (err) {
+        console.warn("[DocumentController] Non-fatal: failed to seed doc_intelligence_sessions:", err);
+      }
+
       await logAuditEvent(req.user._id, 'financial_document_uploaded', {
         business_id: businessId,
         business_name: business.business_name,
