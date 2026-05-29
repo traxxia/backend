@@ -2,6 +2,7 @@ const LLMInteractionLogModel = require('../models/llmInteractionLogModel');
 const AiChatLogModel = require('../models/aiChatLogModel');
 const BusinessModel = require('../models/businessModel');
 const ProjectModel = require('../models/projectModel');
+const SystemSettingsModel = require('../models/systemSettingsModel');
 const { isObservatoryRequest } = require('../utils/isObservatoryRequest');
 
 class SuperAdminController {
@@ -233,6 +234,68 @@ class SuperAdminController {
     } catch (error) {
       console.error('[SuperAdmin] getChatUsageStats error:', error);
       res.status(500).json({ success: false, error: 'Failed to fetch chat usage stats' });
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────────────
+  // LLM MODEL SETTINGS
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * GET /api/superadmin/settings
+   * Fetch current dynamic LLM model configurations for PMF flow and Insights tab.
+   */
+  static async getSettings(req, res) {
+    try {
+      const settings = await SystemSettingsModel.getLLMModelSettings();
+      res.json({ success: true, data: settings });
+    } catch (error) {
+      console.error('[SuperAdmin] getSettings error:', error);
+      res.status(500).json({ success: false, error: 'Failed to fetch settings' });
+    }
+  }
+
+  /**
+   * POST /api/superadmin/settings
+   * Save dynamic LLM model configurations.
+   */
+  static async saveSettings(req, res) {
+    try {
+      const {
+        pmfFlow,
+        enrichment,
+        documentQa,
+        simpleSwot,
+        purchaseCriteria,
+        loyaltyNps,
+        expandedCapability,
+        strategicRadar,
+        maturityScoring,
+        competitiveAdvantage,
+        strategicPositioning,
+        productivityMetrics,
+        coreAdjacency
+      } = req.body;
+      
+      await SystemSettingsModel.saveLLMModelSettings({
+        pmfFlow,
+        enrichment,
+        documentQa,
+        simpleSwot,
+        purchaseCriteria,
+        loyaltyNps,
+        expandedCapability,
+        strategicRadar,
+        maturityScoring,
+        competitiveAdvantage,
+        strategicPositioning,
+        productivityMetrics,
+        coreAdjacency
+      });
+      res.json({ success: true, message: 'Settings saved successfully' });
+    } catch (error) {
+      console.error('[SuperAdmin] saveSettings error:', error);
+      res.status(500).json({ success: false, error: 'Failed to save settings' });
     }
   }
 }

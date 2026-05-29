@@ -24,4 +24,8 @@ router.get('/stats/models',              SuperAdminController.getModelStats);
 router.get('/stats/stages',              SuperAdminController.getStageStats);
 router.get('/stats/chat-usage',          SuperAdminController.getChatUsageStats);
 
+// ── Model Settings ───────────────────────────────────────────────────────────
+router.get('/settings',                  SuperAdminController.getSettings);
+router.post('/settings',                 SuperAdminController.saveSettings);
+
 module.exports = router;
