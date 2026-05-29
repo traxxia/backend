@@ -60,6 +60,21 @@ class BlobService {
     downloadResponse.readableStreamBody.pipe(res);
   }
 
+  async downloadToBuffer(blobName) {
+    if (!this.containerClient) {
+      throw new Error('Blob storage not configured');
+    }
+
+    await this.ensureContainer();
+    const blockBlobClient = this.containerClient.getBlockBlobClient(blobName);
+
+    if (!(await blockBlobClient.exists())) {
+      throw new Error('Blob not found');
+    }
+
+    return await blockBlobClient.downloadToBuffer();
+  }
+
   async deleteBlob(blobName) {
     if (!this.containerClient) {
       throw new Error('Blob storage not configured');

@@ -119,9 +119,7 @@ class QuestionController {
       const analysisQuestionMap = {
         'swot': ['swot'],
         'customerSegmentation': ['customerSegmentation'],
-        'purchaseCriteria': ['purchaseCriteria'],
         'channelHeatmap': ['channelHeatmap'],
-        'loyaltyNPS': ['loyaltyNPS'],
         'capabilityHeatmap': ['capabilityHeatmap'],
         'porters': ['porters'],
         'pestel': ['pestel'],

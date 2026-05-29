@@ -20,6 +20,7 @@ const academyFeedbackRoutes = require("./academyFeedbackRoutes");
 const answerRoutes = require("./answerRoutes");
 const notificationRoutes = require("./notificationRoutes");
 const decisionLogRoutes = require("./decisionLogRoutes");
+const docIntelligenceRoutes = require("./docIntelligenceRoutes");
 const ProjectController = require("../controllers/projectController");
 const { authenticateToken } = require("../middleware/auth");
 
@@ -46,8 +47,18 @@ router.use("/api/academy-feedback", academyFeedbackRoutes);
 router.use("/api/answers", answerRoutes);
 router.use("/api/notifications", notificationRoutes);
 router.use("/api/decision-logs", decisionLogRoutes);
+router.use("/api/sessions", docIntelligenceRoutes);
 router.get("/api/rankings/summary", authenticateToken, ProjectController.getRankingsSummary);
 router.get("/api/access-control", authenticateToken, ProjectController.getGrantedAccess);
+
+// System configuration and limit endpoints (single source of truth for frontend)
+const { FILE_SIZE_LIMITS, MAX_FILE_UPLOAD_LIMIT } = require("../config/constants");
+router.get("/api/config/limits", (req, res) => {
+  res.status(200).json({
+    maxFileSizeMB: FILE_SIZE_LIMITS.DOCUMENT / (1024 * 1024),
+    maxFileUploadLimit: MAX_FILE_UPLOAD_LIMIT
+  });
+});
 
 const aiChatRoutes = require('./aiChatRoutes');
 const superAdminRoutes = require('./superAdminRoutes');

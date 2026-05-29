@@ -1,3 +1,6 @@
+const maxFileSizeMB = parseInt(process.env.MAX_FILE_SIZE_MB, 10) || 15;
+const maxUploadLimit = parseInt(process.env.MAX_FILE_UPLOAD_LIMIT, 10) || 5;
+
 module.exports = {
   SECRET_KEY: process.env.SECRET_KEY || 'default_secret_key',
   PORT: process.env.PORT || 5000, // Changed from 5001 to 5000
@@ -24,6 +27,7 @@ module.exports = {
   MAX_BUSINESSES_PER_USER: 5, // Default/Legacy fallback
   FILE_SIZE_LIMITS: {
     LOGO: 5 * 1024 * 1024, // 5MB
-    DOCUMENT: 10 * 1024 * 1024 // 10MB
-  }
+    DOCUMENT: maxFileSizeMB * 1024 * 1024 // Configurable dynamic limit
+  },
+  MAX_FILE_UPLOAD_LIMIT: maxUploadLimit
 };

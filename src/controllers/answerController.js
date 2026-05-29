@@ -7,13 +7,19 @@ class AnswerController {
   
   static async create(req, res) {
     try {
-      const { business_id, question_id, answer } = req.body;
+      const { business_id, question_id, answer, confidence, status, evidence, ai_answer, user_answer, previous_answer } = req.body;
       
       const answerData = {
         business_id: new ObjectId(business_id),
         question_id: new ObjectId(question_id),
         answer: answer
       };
+      if (confidence !== undefined) answerData.confidence = confidence;
+      if (status !== undefined) answerData.status = status;
+      if (evidence !== undefined) answerData.evidence = evidence;
+      if (ai_answer !== undefined) answerData.ai_answer = ai_answer;
+      if (user_answer !== undefined) answerData.user_answer = user_answer;
+      if (previous_answer !== undefined) answerData.previous_answer = previous_answer;
 
       const result = await AnswerModel.create(answerData);
       
@@ -35,11 +41,20 @@ class AnswerController {
         return res.status(400).json({ error: 'business_id and a non-empty array of answers are required' });
       }
 
-      const answersData = answers.map(item => ({
-        business_id: new ObjectId(business_id),
-        question_id: new ObjectId(item.question_id),
-        answer: item.answer
-      }));
+      const answersData = answers.map(item => {
+        const data = {
+          business_id: new ObjectId(business_id),
+          question_id: new ObjectId(item.question_id),
+          answer: item.answer
+        };
+        if (item.confidence !== undefined) data.confidence = item.confidence;
+        if (item.status !== undefined) data.status = item.status;
+        if (item.evidence !== undefined) data.evidence = item.evidence;
+        if (item.ai_answer !== undefined) data.ai_answer = item.ai_answer;
+        if (item.user_answer !== undefined) data.user_answer = item.user_answer;
+        if (item.previous_answer !== undefined) data.previous_answer = item.previous_answer;
+        return data;
+      });
 
       const result = await AnswerModel.bulkCreate(answersData);
       
@@ -63,10 +78,17 @@ class AnswerController {
 
       const answersData = answers.map(item => {
          if(!item.answer_id) throw new Error("Missing answer_id in bulk update payload");
-         return {
+         const data = {
            answer_id: item.answer_id,
            answer: item.answer
          };
+         if (item.confidence !== undefined) data.confidence = item.confidence;
+         if (item.status !== undefined) data.status = item.status;
+         if (item.evidence !== undefined) data.evidence = item.evidence;
+         if (item.ai_answer !== undefined) data.ai_answer = item.ai_answer;
+         if (item.user_answer !== undefined) data.user_answer = item.user_answer;
+         if (item.previous_answer !== undefined) data.previous_answer = item.previous_answer;
+         return data;
       });
 
       const result = await AnswerModel.bulkUpdate(answersData);
@@ -188,11 +210,29 @@ class AnswerController {
   static async update(req, res) {
     try {
       const { id } = req.params;
-      const { answer } = req.body;
+      const { answer, confidence, status, evidence, ai_answer, user_answer, previous_answer } = req.body;
       
       const updateData = {};
       if (answer !== undefined) {
         updateData.answer = answer;
+      }
+      if (confidence !== undefined) {
+        updateData.confidence = confidence;
+      }
+      if (status !== undefined) {
+        updateData.status = status;
+      }
+      if (evidence !== undefined) {
+        updateData.evidence = evidence;
+      }
+      if (ai_answer !== undefined) {
+        updateData.ai_answer = ai_answer;
+      }
+      if (user_answer !== undefined) {
+        updateData.user_answer = user_answer;
+      }
+      if (previous_answer !== undefined) {
+        updateData.previous_answer = previous_answer;
       }
       
       const result = await AnswerModel.update(id, updateData);
