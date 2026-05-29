@@ -60,12 +60,18 @@ const strategicDocUpload = multer({
     const allowedTypes = [
       'application/pdf',
       'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
-      'application/msword'
+      'application/msword',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
     ];
-    if (allowedTypes.includes(file.mimetype) || file.originalname.endsWith('.docx') || file.originalname.endsWith('.doc')) {
+    if (allowedTypes.includes(file.mimetype) || 
+        file.originalname.endsWith('.docx') || 
+        file.originalname.endsWith('.doc') || 
+        file.originalname.endsWith('.xlsx') || 
+        file.originalname.endsWith('.xls')) {
       cb(null, true);
     } else {
-      cb(new Error('Invalid file type. Only PDF and Word documents are allowed.'), false);
+      cb(new Error('Invalid file type. Only PDF, Word, and Excel documents are allowed.'), false);
     }
   }
 });
